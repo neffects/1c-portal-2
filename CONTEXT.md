@@ -353,6 +353,15 @@ The project includes automated security testing with:
     - Dashboard now fetches entity types directly from `/api/entity-types` API
     - Previously relied on sync store manifest which only includes types with published entities
     - Superadmins now see accurate count of all defined entity types regardless of entity count
+  - Fixed approval queue to show entity names and organization names (NEF-6):
+    - Approval queue now displays `entity.data.name` instead of entity IDs
+    - Fetches and displays organization names alongside entity information
+    - Backend API includes `organizationId` in `EntityListItem` response
+    - Standardized entity name field convention across the system:
+      - All entity types now use `data.name` consistently (not `entity_name`, `title`, etc.)
+      - TypeBuilder creates fields with standard IDs: `name` and `slug`
+      - EntityEditor strictly checks `fieldId === 'name'` for auto-slug generation
+      - Enforces convention: all entities must have `data.name` field
 
 ## Notes
 
