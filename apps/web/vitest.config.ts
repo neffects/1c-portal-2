@@ -61,11 +61,6 @@ export default defineConfig({
     testTimeout: 10000,
     
     // Reporter configuration
-    reporters: ['default', 'html'],
-    
-    // Output directory for reports
-    outputFile: {
-      html: './coverage/test-report.html'
-    }
+    reporters: ['default']
   }
 });
