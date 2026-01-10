@@ -1,0 +1,33 @@
+# Cloudflare Worker configuration for 1C Portal API
+name = "1cc-portal-api"
+main = "src/index.ts"
+compatibility_date = "2024-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Development settings
+[dev]
+port = 8787
+local_protocol = "http"
+
+# R2 bucket binding
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "1cc-portal-data"
+preview_bucket_name = "1cc-portal-data-preview"
+
+# Environment variables (set via wrangler secret)
+[vars]
+ENVIRONMENT = "development"
+API_BASE_URL = "http://localhost:8787"
+
+# Production environment
+[env.production]
+name = "1cc-portal-api-prod"
+[env.production.vars]
+ENVIRONMENT = "production"
+
+# Staging environment
+[env.staging]
+name = "1cc-portal-api-staging"
+[env.staging.vars]
+ENVIRONMENT = "staging"

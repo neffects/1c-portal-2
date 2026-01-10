@@ -1,0 +1,12 @@
+# Development secrets for local testing
+# Copy this file to .dev.vars and fill in the values
+
+# JWT signing secret (use a long random string in production)
+JWT_SECRET=your-jwt-secret-here-minimum-32-characters
+
+# Superadmin emails (comma-separated)
+# Users with these emails will automatically be assigned the superadmin role
+SUPERADMIN_EMAILS=admin@example.com,another-admin@example.com
+
+# Resend API key for sending emails (optional in dev - magic links logged to console)
+# RESEND_API_KEY=re_xxxxxxxxxxxxx

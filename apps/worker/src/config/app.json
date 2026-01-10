@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "environment": "development",
+  "apiBaseUrl": "http://localhost:8787",
+  "r2PublicUrl": "http://localhost:8787/assets",
+  "features": {
+    "alerts": true,
+    "offlineMode": true,
+    "realtime": false,
+    "darkMode": true
+  },
+  "branding": {
+    "rootOrgId": "root001",
+    "siteName": "1C Portal",
+    "defaultTheme": "light",
+    "logoUrl": "/logo.svg"
+  },
+  "sync": {
+    "bundleRefreshInterval": 300000,
+    "staleTime": 60000,
+    "gcTime": 86400000
+  },
+  "auth": {
+    "magicLinkExpiry": 600,
+    "sessionDuration": 604800
+  }
+}

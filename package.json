@@ -1,0 +1,27 @@
+{
+  "name": "1cc-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-tenant CMS built on Cloudflare Workers",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "dev:worker": "turbo run dev --filter=@1cc/worker",
+    "dev:web": "turbo run dev --filter=@1cc/web",
+    "deploy:worker": "turbo run deploy --filter=@1cc/worker"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0"
+  },
+  "packageManager": "npm@10.2.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
