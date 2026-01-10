@@ -3,13 +3,15 @@
  * 
  * Multi-step wizard for creating new organizations.
  * Steps: Basic Info → Domain Config → Permissions → Admin Assignment → Review
+ * 
+ * Note: This wizard fetches all entity types directly from the API,
+ * not from the sync store manifest (which only contains published content).
  */
 
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
 import { api } from '../../lib/api';
-import { useSync } from '../../stores/sync';
-import type { ManifestEntityType } from '@1cc/shared';
+import type { EntityTypeListItem } from '@1cc/shared';
 
 interface WizardStep {
   id: string;
@@ -30,7 +32,9 @@ interface OrgWizardProps {
 }
 
 export function OrgWizard({ onComplete, onCancel }: OrgWizardProps) {
-  const { entityTypes } = useSync();
+  // Fetch entity types from API (not from sync store which only has public manifest data)
+  const [entityTypes, setEntityTypes] = useState<EntityTypeListItem[]>([]);
+  const [loadingTypes, setLoadingTypes] = useState(true);
   
   const [currentStep, setCurrentStep] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -47,7 +51,38 @@ export function OrgWizard({ onComplete, onCancel }: OrgWizardProps) {
   const [creatableTypes, setCreatableTypes] = useState<string[]>([]);
   const [adminEmail, setAdminEmail] = useState('');
   
-  const types = entityTypes.value;
+  // Fetch all entity types from API on mount
+  useEffect(() => {
+    async function loadEntityTypes() {
+      setLoadingTypes(true);
+      console.log('[OrgWizard] Fetching entity types from API...');
+      
+      try {
+        const response = await api.get('/api/entity-types') as { 
+          success: boolean; 
+          data?: { items: EntityTypeListItem[] } 
+        };
+        
+        if (response.success && response.data) {
+          // Only show active entity types
+          const activeTypes = response.data.items.filter(t => t.isActive !== false);
+          setEntityTypes(activeTypes);
+          console.log('[OrgWizard] Loaded', activeTypes.length, 'entity types');
+        } else {
+          console.error('[OrgWizard] Failed to load entity types:', response);
+        }
+      } catch (err) {
+        console.error('[OrgWizard] Error loading entity types:', err);
+      } finally {
+        setLoadingTypes(false);
+      }
+    }
+    
+    loadEntityTypes();
+  }, []);
+  
+  // Use the fetched entity types (not from sync store)
+  const types = entityTypes;
   
   // Auto-generate slug from name
   function handleNameChange(value: string) {
@@ -95,7 +130,10 @@ export function OrgWizard({ onComplete, onCancel }: OrgWizardProps) {
     switch (currentStep) {
       case 0: return !!name && !!slug;
       case 1: return true; // Domains optional
-      case 2: return viewableTypes.length > 0;
+      case 2: 
+        // Can only proceed if types are loaded and at least one is selected
+        // If no types exist at all, allow proceeding (org can be created without permissions)
+        return !loadingTypes && (viewableTypes.length > 0 || types.length === 0);
       case 3: return !adminEmail || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail);
       case 4: return true;
       default: return true;
@@ -287,7 +325,23 @@ export function OrgWizard({ onComplete, onCancel }: OrgWizardProps) {
               Select which entity types this organization can view and create.
             </p>
             
-            {types.length > 0 ? (
+            {loadingTypes ? (
+              // Loading state while fetching entity types
+              <div class="space-y-3">
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} class="flex items-center justify-between p-4 bg-surface-50 dark:bg-surface-800 rounded-lg animate-pulse">
+                    <div class="flex-1">
+                      <div class="h-5 w-32 bg-surface-200 dark:bg-surface-700 rounded mb-2"></div>
+                      <div class="h-4 w-48 bg-surface-200 dark:bg-surface-700 rounded"></div>
+                    </div>
+                    <div class="flex items-center gap-4">
+                      <div class="h-4 w-16 bg-surface-200 dark:bg-surface-700 rounded"></div>
+                      <div class="h-4 w-16 bg-surface-200 dark:bg-surface-700 rounded"></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : types.length > 0 ? (
               <div class="space-y-3">
                 {types.map(type => (
                   <div key={type.id} class="flex items-center justify-between p-4 bg-surface-50 dark:bg-surface-800 rounded-lg">
@@ -323,7 +377,11 @@ export function OrgWizard({ onComplete, onCancel }: OrgWizardProps) {
               </div>
             ) : (
               <div class="text-center py-8 text-surface-500">
-                No entity types available. Create some first!
+                <span class="i-lucide-box text-4xl mb-4 block mx-auto opacity-50"></span>
+                <p>No entity types available. Create some first!</p>
+                <a href="/super/types" class="text-primary-600 hover:text-primary-700 text-sm mt-2 inline-block">
+                  Go to Entity Type Manager →
+                </a>
               </div>
             )}
           </div>

@@ -2,12 +2,14 @@
  * Organization Manager Page
  * 
  * Create and manage organizations (tenants).
+ * Provides list view of all organizations and creation wizard integration.
  */
 
 import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
+import { OrgWizard } from './OrgWizard';
 import type { OrganizationListItem, Organization } from '@1cc/shared';
 
 export function OrgManager() {
@@ -15,7 +17,8 @@ export function OrgManager() {
   
   const [orgs, setOrgs] = useState<OrganizationListItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showCreateModal, setShowCreateModal] = useState(false);
+  // Controls showing the full organization creation wizard
+  const [showCreateWizard, setShowCreateWizard] = useState(false);
   
   // Redirect if not superadmin
   useEffect(() => {
@@ -62,7 +65,7 @@ export function OrgManager() {
           <h1 class="heading-1">Organizations</h1>
         </div>
         
-        <button onClick={() => setShowCreateModal(true)} class="btn-primary">
+        <button onClick={() => setShowCreateWizard(true)} class="btn-primary">
           <span class="i-lucide-plus mr-2"></span>
           New Organization
         </button>
@@ -138,20 +141,39 @@ export function OrgManager() {
           <p class="body-text mb-6">
             Organizations are tenants that can manage their own content.
           </p>
-          <button onClick={() => setShowCreateModal(true)} class="btn-primary">
+          <button onClick={() => setShowCreateWizard(true)} class="btn-primary">
             Create First Organization
           </button>
         </div>
       )}
       
-      {/* Create modal placeholder */}
-      {showCreateModal && (
-        <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
-          <div class="card p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-            <h2 class="heading-3 mb-4">Create Organization</h2>
-            <p class="body-text mb-4">Organization creation wizard coming soon.</p>
-            <div class="flex justify-end">
-              <button onClick={() => setShowCreateModal(false)} class="btn-ghost">Close</button>
+      {/* Organization Creation Wizard Modal */}
+      {showCreateWizard && (
+        <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-start justify-center z-50 overflow-y-auto py-8">
+          <div class="bg-white dark:bg-surface-900 rounded-xl shadow-2xl w-full max-w-3xl mx-4 my-auto">
+            {/* Modal header */}
+            <div class="flex items-center justify-between p-6 border-b border-surface-200 dark:border-surface-700">
+              <h2 class="heading-2">Create Organization</h2>
+              <button 
+                onClick={() => setShowCreateWizard(false)}
+                class="p-2 rounded-lg hover:bg-surface-100 dark:hover:bg-surface-800 transition-colors"
+                aria-label="Close wizard"
+              >
+                <span class="i-lucide-x text-xl text-surface-500"></span>
+              </button>
+            </div>
+            
+            {/* Wizard content */}
+            <div class="p-6">
+              <OrgWizard 
+                onComplete={() => {
+                  // Close modal and refresh org list
+                  setShowCreateWizard(false);
+                  loadOrgs();
+                  console.log('[OrgManager] Organization created, refreshing list');
+                }}
+                onCancel={() => setShowCreateWizard(false)}
+              />
             </div>
           </div>
         </div>

@@ -9,6 +9,7 @@
  * - DELETE /:id - Soft delete organization
  * - GET /:id/permissions - Get entity type permissions
  * - PATCH /:id/permissions - Update entity type permissions
+ * - POST /:id/users/invite - Invite user to organization (superadmin)
  */
 
 import { Hono } from 'hono';
@@ -16,14 +17,16 @@ import type { Env, Variables } from '../types';
 import { 
   createOrganizationRequestSchema, 
   updateOrganizationRequestSchema,
-  updateEntityTypePermissionsRequestSchema 
+  updateEntityTypePermissionsRequestSchema,
+  inviteUserRequestSchema
 } from '@1cc/shared';
-import { readJSON, writeJSON, listFiles, getOrgProfilePath, getOrgPermissionsPath } from '../lib/r2';
-import { createOrgId, createSlug } from '../lib/id';
+import { readJSON, writeJSON, listFiles, getOrgProfilePath, getOrgPermissionsPath, getInvitationPath } from '../lib/r2';
+import { createOrgId, createSlug, createInvitationToken } from '../lib/id';
 import { requireSuperadmin, requireOrgAdmin, requireOrgMembership } from '../middleware/auth';
 import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
+import { sendInvitationEmail } from '../lib/email';
 import { R2_PATHS } from '@1cc/shared';
-import type { Organization, EntityTypePermissions, OrganizationListItem } from '@1cc/shared';
+import type { Organization, EntityTypePermissions, OrganizationListItem, UserInvitation, OrganizationMembership } from '@1cc/shared';
 
 export const organizationRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -360,6 +363,92 @@ organizationRoutes.patch('/:id/permissions', requireSuperadmin, async (c) => {
     success: true,
     data: updatedPermissions
   });
+});
+
+/**
+ * POST /:id/users/invite
+ * Invite a user to a specific organization (superadmin only)
+ * This allows superadmins to invite admins to newly created organizations
+ */
+organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
+  const orgId = c.req.param('id');
+  console.log('[Orgs] Superadmin inviting user to org:', orgId);
+  
+  const body = await c.req.json();
+  const result = inviteUserRequestSchema.safeParse(body);
+  
+  if (!result.success) {
+    throw new ValidationError('Invalid invitation data', { errors: result.error.errors });
+  }
+  
+  const { email, role } = result.data;
+  const userId = c.get('userId')!;
+  
+  // Verify organization exists
+  const org = await readJSON<Organization>(c.env.R2_BUCKET, getOrgProfilePath(orgId));
+  if (!org) {
+    throw new NotFoundError('Organization', orgId);
+  }
+  
+  // Check if user already exists in org
+  const existingUsers = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+  
+  for (const file of existingUsers) {
+    const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, file);
+    if (membership && membership.email.toLowerCase() === email.toLowerCase()) {
+      throw new ConflictError('This user is already a member of the organization');
+    }
+  }
+  
+  // Create invitation token
+  const token = createInvitationToken();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days
+  
+  const invitation: UserInvitation = {
+    token,
+    email,
+    organizationId: orgId,
+    role,
+    invitedBy: userId,
+    createdAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    accepted: false
+  };
+  
+  await writeJSON(c.env.R2_BUCKET, getInvitationPath(token), invitation);
+  
+  // Build invitation link
+  const baseUrl = c.env.API_BASE_URL || 'http://localhost:8787';
+  const inviteLink = `${baseUrl}/auth/verify?token=${token}&invite=true`;
+  
+  // Send invitation email
+  if (c.env.RESEND_API_KEY) {
+    await sendInvitationEmail(
+      c.env.RESEND_API_KEY,
+      email,
+      inviteLink,
+      org.name,
+      'The platform administrator'
+    );
+    console.log('[Orgs] Invitation email sent to:', email);
+  } else {
+    console.log('[Orgs] DEV MODE - Invitation link:', inviteLink);
+  }
+  
+  console.log('[Orgs] Invitation created for:', email, 'to join org:', orgId);
+  
+  return c.json({
+    success: true,
+    data: {
+      message: 'Invitation sent successfully',
+      email,
+      organizationId: orgId,
+      expiresAt: expiresAt.toISOString(),
+      // Include dev link in non-production environments for testing
+      ...(c.env.ENVIRONMENT !== 'production' && { devLink: inviteLink })
+    }
+  }, 201);
 });
 
 // Helper functions

@@ -89,6 +89,7 @@ secret/ROOT.json          # Root config
 - `GET /api/organizations` - List orgs
 - `PATCH /api/organizations/:id` - Update org
 - `PATCH /api/organizations/:id/permissions` - Update entity type permissions
+- `POST /api/organizations/:id/users/invite` - Invite user to org (superadmin)
 
 ### Entity Types
 - `POST /api/entity-types` - Create type (superadmin)
@@ -172,6 +173,14 @@ npm run build
 - 🔲 Production deployment
 
 ### Recently Completed
+- ✅ Organization creation wizard fully integrated (2026-01-10):
+  - OrgManager now uses full OrgWizard component (replaces placeholder modal)
+  - Multi-step wizard: Basic Info → Domains → Permissions → Admin → Review
+  - Auto-generated slugs from organization name
+  - Domain whitelist configuration for self-signup
+  - Entity type permissions selection (viewable/creatable)
+  - Optional admin invitation on creation
+  - Added `POST /api/organizations/:id/users/invite` route for superadmin user invites
 - ✅ Type builder visual interface (TypeBuilder.tsx) - Full-featured visual editor for creating/editing entity types with:
   - Field type selector with icons and descriptions
   - Section management with reordering
@@ -187,6 +196,7 @@ npm run build
   - Fixed `allFields` undefined error in TypeBuilder.tsx PreviewPanel component
   - Fixed double sync calls on page load in SyncProvider (now uses ref to track initial sync)
   - Sync store now properly deduplicates initial sync vs auth-change sync
+  - Fixed OrgWizard permissions step not showing entity types - now fetches from API instead of sync store manifest
 
 ## Notes
 

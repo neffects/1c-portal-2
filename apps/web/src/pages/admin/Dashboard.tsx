@@ -2,19 +2,23 @@
  * Admin Dashboard
  * 
  * Main admin page for org admins to manage entities.
+ * 
+ * Note: Entity types are fetched from the API (which respects org permissions)
+ * instead of the sync store manifest (which only has public content).
  */
 
 import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
-import { useSync } from '../../stores/sync';
 import { api } from '../../lib/api';
-import type { EntityListItem } from '@1cc/shared';
+import type { EntityListItem, EntityTypeListItem } from '@1cc/shared';
 
 export function AdminDashboard() {
   const { isAuthenticated, isOrgAdmin, loading: authLoading, organizationId } = useAuth();
-  const { entityTypes } = useSync();
   
+  // Fetch entity types from API (respects org permissions) instead of sync store
+  const [entityTypes, setEntityTypes] = useState<EntityTypeListItem[]>([]);
+  const [loadingTypes, setLoadingTypes] = useState(true);
   const [recentEntities, setRecentEntities] = useState<EntityListItem[]>([]);
   const [loading, setLoading] = useState(true);
   
@@ -26,12 +30,45 @@ export function AdminDashboard() {
     }
   }, [authLoading.value, isAuthenticated.value, isOrgAdmin.value]);
   
+  // Fetch entity types from API (filtered by org permissions)
+  useEffect(() => {
+    if (isOrgAdmin.value) {
+      loadEntityTypes();
+    }
+  }, [isOrgAdmin.value]);
+  
   // Load recent entities
   useEffect(() => {
     if (isOrgAdmin.value) {
       loadRecentEntities();
     }
   }, [isOrgAdmin.value]);
+  
+  // Fetch entity types that this org can create
+  async function loadEntityTypes() {
+    setLoadingTypes(true);
+    console.log('[AdminDashboard] Fetching entity types from API...');
+    
+    try {
+      const response = await api.get('/api/entity-types') as { 
+        success: boolean; 
+        data?: { items: EntityTypeListItem[] } 
+      };
+      
+      if (response.success && response.data) {
+        // Only show active entity types
+        const activeTypes = response.data.items.filter(t => t.isActive !== false);
+        setEntityTypes(activeTypes);
+        console.log('[AdminDashboard] Loaded', activeTypes.length, 'entity types for org');
+      } else {
+        console.error('[AdminDashboard] Failed to load entity types:', response);
+      }
+    } catch (err) {
+      console.error('[AdminDashboard] Error loading entity types:', err);
+    } finally {
+      setLoadingTypes(false);
+    }
+  }
   
   async function loadRecentEntities() {
     setLoading(true);
@@ -51,7 +88,8 @@ export function AdminDashboard() {
     );
   }
   
-  const types = entityTypes.value;
+  // Use the fetched entity types (filtered by org permissions)
+  const types = entityTypes;
   
   return (
     <div class="container-default py-12">
