@@ -2,16 +2,21 @@
  * Superadmin Dashboard
  * 
  * Main dashboard for superadmins with platform overview.
+ * 
+ * Note: Fetches entity types directly from API to show accurate count,
+ * not from sync store which only includes types with published entities.
  */
 
-import { useEffect } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
-import { useSync } from '../../stores/sync';
+import { api } from '../../lib/api';
+import type { EntityTypeListItem } from '@1cc/shared';
 
 export function SuperadminDashboard() {
   const { isAuthenticated, isSuperadmin, loading: authLoading } = useAuth();
-  const { entityTypes, syncing } = useSync();
+  const [types, setTypes] = useState<EntityTypeListItem[]>([]);
+  const [loadingTypes, setLoadingTypes] = useState(true);
   
   // Redirect if not superadmin
   useEffect(() => {
@@ -21,15 +26,44 @@ export function SuperadminDashboard() {
     }
   }, [authLoading.value, isAuthenticated.value, isSuperadmin.value]);
   
-  if (authLoading.value) {
+  // Load entity types from API (not sync store)
+  useEffect(() => {
+    if (isSuperadmin.value) {
+      loadEntityTypes();
+    }
+  }, [isSuperadmin.value]);
+  
+  /**
+   * Load entity types directly from API to get accurate count
+   */
+  async function loadEntityTypes() {
+    console.log('[SuperadminDashboard] Loading entity types from API');
+    setLoadingTypes(true);
+    
+    try {
+      const response = await api.get('/api/entity-types?includeInactive=false') as { 
+        success: boolean; 
+        data?: { items: EntityTypeListItem[] } 
+      };
+      
+      if (response.success && response.data) {
+        console.log('[SuperadminDashboard] Loaded', response.data.items.length, 'entity types');
+        setTypes(response.data.items);
+      }
+    } catch (error) {
+      console.error('[SuperadminDashboard] Error loading entity types:', error);
+    } finally {
+      setLoadingTypes(false);
+    }
+  }
+  
+  if (authLoading.value || loadingTypes) {
     return (
       <div class="min-h-[60vh] flex items-center justify-center">
         <span class="i-lucide-loader-2 animate-spin text-3xl text-primary-500"></span>
       </div>
     );
   }
-  
-  const types = entityTypes.value;
   
   return (
     <div class="container-default py-12">
@@ -46,7 +80,7 @@ export function SuperadminDashboard() {
             <span class="i-lucide-boxes text-2xl text-primary-600 dark:text-primary-400"></span>
           </div>
           <h3 class="font-semibold text-surface-900 dark:text-surface-100 mb-1">Entity Types</h3>
-          <p class="text-sm text-surface-500">{types.length} types defined</p>
+          <p class="text-sm text-surface-500">{types.length} {types.length === 1 ? 'type' : 'types'} defined</p>
         </a>
         
         <a href="/super/orgs" class="card-hover p-6">
