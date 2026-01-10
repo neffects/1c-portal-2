@@ -64,11 +64,11 @@ manifestRoutes.get('/platform', optionalAuth, async (c) => {
     });
   }
   
-  // Get platform manifest
-  let manifest = await readJSON<SiteManifest>(c.env.R2_BUCKET, getManifestPath('platform'));
+  // Get authenticated (platform) manifest
+  let manifest = await readJSON<SiteManifest>(c.env.R2_BUCKET, getManifestPath('authenticated'));
   
   if (!manifest) {
-    manifest = await generateManifest(c.env.R2_BUCKET, 'platform');
+    manifest = await generateManifest(c.env.R2_BUCKET, 'authenticated');
   }
   
   return c.json({
@@ -85,14 +85,14 @@ manifestRoutes.get('/org/:orgId', requireOrgMembership('orgId'), async (c) => {
   const orgId = c.req.param('orgId');
   console.log('[Manifests] Getting org manifest:', orgId);
   
-  // Get org-specific manifest
+  // Get org-specific (members) manifest
   let manifest = await readJSON<SiteManifest>(
     c.env.R2_BUCKET, 
-    getManifestPath('private', orgId)
+    getManifestPath('members', orgId)
   );
   
   if (!manifest) {
-    manifest = await generateManifest(c.env.R2_BUCKET, 'private', orgId);
+    manifest = await generateManifest(c.env.R2_BUCKET, 'members', orgId);
   }
   
   return c.json({
@@ -140,11 +140,11 @@ manifestRoutes.get('/bundles/platform/:typeId', optionalAuth, async (c) => {
   
   let bundle = await readJSON<EntityBundle>(
     c.env.R2_BUCKET,
-    getBundlePath('platform', typeId)
+    getBundlePath('authenticated', typeId)
   );
   
   if (!bundle) {
-    bundle = await generateBundle(c.env.R2_BUCKET, 'platform', typeId);
+    bundle = await generateBundle(c.env.R2_BUCKET, 'authenticated', typeId);
   }
   
   return c.json({
@@ -175,11 +175,11 @@ manifestRoutes.get('/bundles/org/:orgId/:typeId', requireOrgMembership('orgId'),
   
   let bundle = await readJSON<EntityBundle>(
     c.env.R2_BUCKET,
-    getBundlePath('private', typeId, orgId)
+    getBundlePath('members', typeId, orgId)
   );
   
   if (!bundle) {
-    bundle = await generateBundle(c.env.R2_BUCKET, 'private', typeId, orgId);
+    bundle = await generateBundle(c.env.R2_BUCKET, 'members', typeId, orgId);
   }
   
   return c.json({
@@ -205,8 +205,8 @@ manifestRoutes.post('/sync', optionalAuth, async (c) => {
     removedTypes: []
   };
   
-  // Determine which manifest to check
-  const visibility = userId ? 'platform' : 'public';
+  // Determine which manifest to check (authenticated for logged-in users, public otherwise)
+  const visibility = userId ? 'authenticated' : 'public';
   const manifestPath = getManifestPath(visibility);
   
   const currentManifest = await readJSON<SiteManifest>(c.env.R2_BUCKET, manifestPath);
@@ -267,10 +267,11 @@ manifestRoutes.post('/sync', optionalAuth, async (c) => {
 
 /**
  * Generate site manifest for a visibility scope
+ * Visibility: 'public' | 'authenticated' | 'members'
  */
 async function generateManifest(
   bucket: R2Bucket,
-  visibility: 'public' | 'platform' | 'private',
+  visibility: 'public' | 'authenticated' | 'members',
   orgId?: string
 ): Promise<SiteManifest> {
   console.log('[Manifests] Generating manifest for:', visibility, orgId || '');
@@ -281,9 +282,9 @@ async function generateManifest(
   
   const entityTypes: ManifestEntityType[] = [];
   
-  // Filter by org permissions for private manifests
+  // Filter by org permissions for members-only manifests
   let allowedTypeIds: string[] | null = null;
-  if (visibility === 'private' && orgId) {
+  if (visibility === 'members' && orgId) {
     const permissions = await readJSON<EntityTypePermissions>(
       bucket,
       getOrgPermissionsPath(orgId)
@@ -297,11 +298,6 @@ async function generateManifest(
     
     // Filter by permissions
     if (allowedTypeIds !== null && !allowedTypeIds.includes(entityType.id)) {
-      continue;
-    }
-    
-    // Filter by visibility allowance
-    if (visibility === 'public' && !entityType.allowPublic) {
       continue;
     }
     
@@ -338,10 +334,11 @@ async function generateManifest(
 
 /**
  * Generate entity bundle for a type
+ * Visibility: 'public' | 'authenticated' | 'members'
  */
 async function generateBundle(
   bucket: R2Bucket,
-  visibility: 'public' | 'platform' | 'private',
+  visibility: 'public' | 'authenticated' | 'members',
   typeId: string,
   orgId?: string
 ): Promise<EntityBundle> {
@@ -354,11 +351,11 @@ async function generateBundle(
     throw new NotFoundError('Entity Type', typeId);
   }
   
-  // Determine entity path prefix
+  // Determine entity path prefix based on visibility
   let entityPrefix: string;
-  if (visibility === 'private' && orgId) {
+  if (visibility === 'members' && orgId) {
     entityPrefix = `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/`;
-  } else if (visibility === 'platform') {
+  } else if (visibility === 'authenticated') {
     entityPrefix = `${R2_PATHS.PLATFORM}entities/`;
   } else {
     entityPrefix = `${R2_PATHS.PUBLIC}entities/`;
@@ -427,10 +424,10 @@ export async function regenerateAllManifests(bucket: R2Bucket): Promise<void> {
   // Regenerate public manifest
   await generateManifest(bucket, 'public');
   
-  // Regenerate platform manifest
-  await generateManifest(bucket, 'platform');
+  // Regenerate authenticated (platform) manifest
+  await generateManifest(bucket, 'authenticated');
   
-  // Regenerate org manifests
+  // Regenerate org (members) manifests
   const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
   const orgIds = new Set<string>();
   
@@ -440,7 +437,7 @@ export async function regenerateAllManifests(bucket: R2Bucket): Promise<void> {
   }
   
   for (const orgId of orgIds) {
-    await generateManifest(bucket, 'private', orgId);
+    await generateManifest(bucket, 'members', orgId);
   }
   
   console.log('[Manifests] Regenerated all manifests');

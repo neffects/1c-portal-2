@@ -27,6 +27,7 @@ import { UserManagement } from './pages/admin/UserManagement';
 // Superadmin Pages (lazy loaded in production)
 import { SuperadminDashboard } from './pages/superadmin/Dashboard';
 import { TypeManager } from './pages/superadmin/TypeManager';
+import { TypeBuilder } from './pages/superadmin/TypeBuilder';
 import { OrgManager } from './pages/superadmin/OrgManager';
 import { ApprovalQueue } from './pages/superadmin/ApprovalQueue';
 
@@ -74,8 +75,8 @@ export function App() {
             {/* Superadmin routes */}
             <Route path="/super" component={SuperadminDashboard} />
             <Route path="/super/types" component={TypeManager} />
-            <Route path="/super/types/new" component={TypeManager} />
-            <Route path="/super/types/:id/edit" component={TypeManager} />
+            <Route path="/super/types/new" component={TypeBuilder} />
+            <Route path="/super/types/:id/edit" component={TypeBuilder} />
             <Route path="/super/orgs" component={OrgManager} />
             <Route path="/super/approvals" component={ApprovalQueue} />
             

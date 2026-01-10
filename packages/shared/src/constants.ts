@@ -23,7 +23,10 @@ export const ENTITY_STATUSES = ['draft', 'pending', 'published', 'archived', 'de
 export const USER_ROLES = ['superadmin', 'org_admin', 'org_member'] as const;
 
 // Visibility scopes
-export const VISIBILITY_SCOPES = ['public', 'platform', 'private'] as const;
+// - public: Accessible to everyone, SEO indexable
+// - authenticated: All authenticated users on the platform
+// - members: Organization members only
+export const VISIBILITY_SCOPES = ['public', 'authenticated', 'members'] as const;
 
 // Field types
 export const FIELD_TYPES = [

@@ -6,7 +6,7 @@
  */
 
 import { createContext } from 'preact';
-import { useContext, useEffect } from 'preact/hooks';
+import { useContext, useEffect, useRef } from 'preact/hooks';
 import { signal, computed } from '@preact/signals';
 import type { SiteManifest, EntityBundle, ManifestEntityType, BundleEntity } from '@1cc/shared';
 import { api } from '../lib/api';
@@ -212,18 +212,26 @@ const SyncContext = createContext(syncValue);
 export function SyncProvider({ children }: { children: preact.ComponentChildren }) {
   const { isAuthenticated } = useAuth();
   
+  // Track if initial sync has been done to prevent duplicate calls
+  const initialSyncDone = useRef(false);
+  
   // Initial sync on mount
   useEffect(() => {
     // Load from cache first for fast initial render
     loadFromCache();
     
     // Then sync with server
-    sync();
+    sync().then(() => {
+      initialSyncDone.current = true;
+      console.log('[Sync] Initial sync completed');
+    });
   }, []);
   
-  // Re-sync when auth state changes
+  // Re-sync when auth state changes (but skip initial)
   useEffect(() => {
-    if (isAuthenticated.value !== undefined) {
+    // Only re-sync after initial sync is done and auth state actually changes
+    if (initialSyncDone.current && isAuthenticated.value !== undefined) {
+      console.log('[Sync] Auth state changed, re-syncing...');
       sync(true);
     }
   }, [isAuthenticated.value]);

@@ -148,18 +148,50 @@ export async function listFilesPaginated(
 // Path builders for different storage locations
 
 /**
+ * Visibility scope type (user-facing values)
+ * Maps to R2 storage prefixes:
+ * - 'public' -> R2_PATHS.PUBLIC (public/)
+ * - 'authenticated' -> R2_PATHS.PLATFORM (platform/)
+ * - 'members' -> R2_PATHS.PRIVATE (private/)
+ */
+type VisibilityScope = 'public' | 'authenticated' | 'members';
+
+/**
+ * Get R2 path prefix for a visibility scope
+ */
+function getVisibilityPrefix(visibility: VisibilityScope): string {
+  switch (visibility) {
+    case 'public':
+      return R2_PATHS.PUBLIC;
+    case 'authenticated':
+      return R2_PATHS.PLATFORM;
+    case 'members':
+      return R2_PATHS.PRIVATE;
+    default:
+      return R2_PATHS.PLATFORM;
+  }
+}
+
+/**
+ * Check if visibility scope is organization-specific (members only)
+ */
+function isOrgSpecificVisibility(visibility: VisibilityScope): boolean {
+  return visibility === 'members';
+}
+
+/**
  * Get path for entity version file
  */
 export function getEntityVersionPath(
-  visibility: 'public' | 'platform' | 'private',
+  visibility: VisibilityScope,
   entityId: string,
   version: number,
   orgId?: string
 ): string {
-  if (visibility === 'private' && orgId) {
+  if (isOrgSpecificVisibility(visibility) && orgId) {
     return `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/${entityId}/v${version}.json`;
   }
-  const prefix = visibility === 'public' ? R2_PATHS.PUBLIC : R2_PATHS.PLATFORM;
+  const prefix = getVisibilityPrefix(visibility);
   return `${prefix}entities/${entityId}/v${version}.json`;
 }
 
@@ -167,14 +199,14 @@ export function getEntityVersionPath(
  * Get path for entity latest pointer
  */
 export function getEntityLatestPath(
-  visibility: 'public' | 'platform' | 'private',
+  visibility: VisibilityScope,
   entityId: string,
   orgId?: string
 ): string {
-  if (visibility === 'private' && orgId) {
+  if (isOrgSpecificVisibility(visibility) && orgId) {
     return `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/${entityId}/latest.json`;
   }
-  const prefix = visibility === 'public' ? R2_PATHS.PUBLIC : R2_PATHS.PLATFORM;
+  const prefix = getVisibilityPrefix(visibility);
   return `${prefix}entities/${entityId}/latest.json`;
 }
 
@@ -217,13 +249,13 @@ export function getUserMembershipPath(orgId: string, userId: string): string {
  * Get path for site manifest
  */
 export function getManifestPath(
-  visibility: 'public' | 'platform' | 'private',
+  visibility: VisibilityScope,
   orgId?: string
 ): string {
-  if (visibility === 'private' && orgId) {
+  if (isOrgSpecificVisibility(visibility) && orgId) {
     return `${R2_PATHS.PRIVATE}orgs/${orgId}/manifests/site.json`;
   }
-  const prefix = visibility === 'public' ? R2_PATHS.PUBLIC : R2_PATHS.PLATFORM;
+  const prefix = getVisibilityPrefix(visibility);
   return `${prefix}manifests/site.json`;
 }
 
@@ -231,14 +263,14 @@ export function getManifestPath(
  * Get path for entity bundle
  */
 export function getBundlePath(
-  visibility: 'public' | 'platform' | 'private',
+  visibility: VisibilityScope,
   typeId: string,
   orgId?: string
 ): string {
-  if (visibility === 'private' && orgId) {
+  if (isOrgSpecificVisibility(visibility) && orgId) {
     return `${R2_PATHS.PRIVATE}orgs/${orgId}/bundles/${typeId}.json`;
   }
-  const prefix = visibility === 'public' ? R2_PATHS.PUBLIC : R2_PATHS.PLATFORM;
+  const prefix = getVisibilityPrefix(visibility);
   return `${prefix}bundles/${typeId}.json`;
 }
 

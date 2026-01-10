@@ -62,8 +62,8 @@ Draft → Pending → Published → Archived
 ### Visibility Scopes
 
 - **Public**: Accessible to everyone, SEO indexable
-- **Platform**: All authenticated users
-- **Private**: Organization members only
+- **Authenticated**: All logged-in users on the platform
+- **Members**: Organization members only
 
 ### Storage Structure (R2)
 
@@ -168,9 +168,25 @@ npm run build
 - 🔲 R2 bucket initialization
 - 🔲 TanStack DB integration for true offline
 - 🔲 Alert notification system (email digests)
-- 🔲 Type builder visual interface
 - 🔲 Performance optimization
 - 🔲 Production deployment
+
+### Recently Completed
+- ✅ Type builder visual interface (TypeBuilder.tsx) - Full-featured visual editor for creating/editing entity types with:
+  - Field type selector with icons and descriptions
+  - Section management with reordering
+  - Field constraints editor (min/max, options, file types, link targets)
+  - Preview panel showing form layout
+  - Auto-generated slugs and plural names
+  - Default built-in fields: Name and Slug (locked, cannot be removed)
+- ✅ Simplified visibility system:
+  - Renamed visibility scopes: 'public' | 'authenticated' | 'members' (was platform/private)
+  - Removed redundant allowPublic checkbox from entity types
+  - Visibility now controlled by single dropdown (no checkbox duplication)
+- ✅ Bug fixes (2026-01-10):
+  - Fixed `allFields` undefined error in TypeBuilder.tsx PreviewPanel component
+  - Fixed double sync calls on page load in SyncProvider (now uses ref to track initial sync)
+  - Sync store now properly deduplicates initial sync vs auth-change sync
 
 ## Notes
 

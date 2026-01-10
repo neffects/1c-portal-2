@@ -97,27 +97,27 @@ export const tableDisplayConfigSchema = z.object({
 
 /**
  * Create entity type request schema
+ * Visibility options: 'public' | 'authenticated' | 'members'
  */
 export const createEntityTypeRequestSchema = z.object({
   name: z.string().min(1).max(100),
   pluralName: z.string().min(1).max(100),
   slug: entitySlugSchema,
   description: z.string().max(500).optional(),
-  allowPublic: z.boolean().default(false),
-  defaultVisibility: visibilityScopeSchema.default('platform'),
+  defaultVisibility: visibilityScopeSchema.default('authenticated'),
   fields: z.array(fieldDefinitionSchema.omit({ id: true })).min(1),
   sections: z.array(fieldSectionSchema.omit({ id: true })).min(1)
 });
 
 /**
  * Update entity type request schema
+ * Visibility options: 'public' | 'authenticated' | 'members'
  */
 export const updateEntityTypeRequestSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   pluralName: z.string().min(1).max(100).optional(),
   slug: entitySlugSchema.optional(),
   description: z.string().max(500).optional(),
-  allowPublic: z.boolean().optional(),
   defaultVisibility: visibilityScopeSchema.optional(),
   fields: z.array(fieldDefinitionSchema).optional(),
   sections: z.array(fieldSectionSchema).optional(),

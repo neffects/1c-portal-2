@@ -24,9 +24,7 @@ export interface EntityType {
   slug: string;
   /** Description of this entity type */
   description?: string;
-  /** Whether entities can be published publicly */
-  allowPublic: boolean;
-  /** Default visibility for new entities */
+  /** Default visibility for new entities: 'public' | 'authenticated' | 'members' */
   defaultVisibility: typeof VISIBILITY_SCOPES[number];
   /** Field definitions */
   fields: FieldDefinition[];
@@ -164,7 +162,7 @@ export interface CreateEntityTypeRequest {
   pluralName: string;
   slug: string;
   description?: string;
-  allowPublic: boolean;
+  /** Default visibility: 'public' | 'authenticated' | 'members' */
   defaultVisibility: typeof VISIBILITY_SCOPES[number];
   fields: Omit<FieldDefinition, 'id'>[];
   sections: Omit<FieldSection, 'id'>[];
@@ -178,7 +176,7 @@ export interface UpdateEntityTypeRequest {
   pluralName?: string;
   slug?: string;
   description?: string;
-  allowPublic?: boolean;
+  /** Default visibility: 'public' | 'authenticated' | 'members' */
   defaultVisibility?: typeof VISIBILITY_SCOPES[number];
   fields?: FieldDefinition[];
   sections?: FieldSection[];
@@ -194,7 +192,8 @@ export interface EntityTypeListItem {
   pluralName: string;
   slug: string;
   description?: string;
-  allowPublic: boolean;
+  /** Default visibility: 'public' | 'authenticated' | 'members' */
+  defaultVisibility: typeof VISIBILITY_SCOPES[number];
   fieldCount: number;
   entityCount: number;
   isActive: boolean;

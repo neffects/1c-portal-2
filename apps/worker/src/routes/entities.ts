@@ -80,13 +80,8 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   // Validate data against schema
   validateEntityData(data, entityType);
   
-  // Determine visibility
+  // Determine visibility (public, authenticated, members)
   const finalVisibility: VisibilityScope = visibility || entityType.defaultVisibility;
-  
-  // Check if public is allowed
-  if (finalVisibility === 'public' && !entityType.allowPublic) {
-    throw new ValidationError('This entity type does not allow public visibility');
-  }
   
   // Generate entity ID and slug
   const entityId = createEntityId();
@@ -120,8 +115,8 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   
   await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub);
   
-  // Write entity version (stored in private for drafts)
-  const versionPath = getEntityVersionPath('private', entityId, 1, userOrgId);
+  // Write entity version (stored in members location for drafts)
+  const versionPath = getEntityVersionPath('members', entityId, 1, userOrgId);
   await writeJSON(c.env.R2_BUCKET, versionPath, entity);
   
   // Write latest pointer
@@ -132,7 +127,7 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
     updatedAt: now
   };
   
-  const latestPath = getEntityLatestPath('private', entityId, userOrgId);
+  const latestPath = getEntityLatestPath('members', entityId, userOrgId);
   await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
   
   console.log('[Entities] Created entity:', entityId);
@@ -241,7 +236,7 @@ entityRoutes.get('/:id', async (c) => {
   const userOrgId = c.get('organizationId');
   
   // Get latest pointer to determine visibility
-  const latestPath = getEntityLatestPath('private', entityId, stub.organizationId);
+  const latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
   const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
   
   if (!latestPointer) {
@@ -250,7 +245,7 @@ entityRoutes.get('/:id', async (c) => {
   
   // Access control
   if (userRole !== 'superadmin') {
-    if (latestPointer.visibility === 'private' && userOrgId !== stub.organizationId) {
+    if (latestPointer.visibility === 'members' && userOrgId !== stub.organizationId) {
       throw new ForbiddenError('You do not have access to this entity');
     }
     
@@ -265,8 +260,8 @@ entityRoutes.get('/:id', async (c) => {
   
   // Determine storage location based on visibility
   const visibility = latestPointer.visibility;
-  const versionPath = visibility === 'private' 
-    ? getEntityVersionPath('private', entityId, version, stub.organizationId)
+  const versionPath = visibility === 'members' 
+    ? getEntityVersionPath('members', entityId, version, stub.organizationId)
     : getEntityVersionPath(visibility, entityId, version);
   
   const entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
@@ -314,7 +309,7 @@ entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
   }
   
   // Get current entity
-  const latestPath = getEntityLatestPath('private', entityId, stub.organizationId);
+  const latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
   const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
   
   if (!latestPointer) {
@@ -327,7 +322,7 @@ entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
   }
   
   // Get current version
-  const currentPath = getEntityVersionPath('private', entityId, latestPointer.version, stub.organizationId);
+  const currentPath = getEntityVersionPath('members', entityId, latestPointer.version, stub.organizationId);
   const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath);
   
   if (!currentEntity) {
@@ -353,11 +348,8 @@ entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
   const newVersion = currentEntity.version + 1;
   const now = new Date().toISOString();
   
-  // Check visibility change
+  // Get the new visibility for the entity
   const newVisibility = updates.visibility || currentEntity.visibility;
-  if (newVisibility === 'public' && entityType && !entityType.allowPublic) {
-    throw new ValidationError('This entity type does not allow public visibility');
-  }
   
   // Update slug if name changed
   const newSlug = (newData.name as string) !== (currentEntity.data.name as string)
@@ -376,7 +368,7 @@ entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
   };
   
   // Write new version
-  const newVersionPath = getEntityVersionPath('private', entityId, newVersion, stub.organizationId);
+  const newVersionPath = getEntityVersionPath('members', entityId, newVersion, stub.organizationId);
   await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
   
   // Update latest pointer
@@ -425,7 +417,7 @@ entityRoutes.post('/:id/transition', async (c) => {
   }
   
   // Get current entity state
-  const latestPath = getEntityLatestPath('private', entityId, stub.organizationId);
+  const latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
   const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
   
   if (!latestPointer) {
@@ -466,7 +458,7 @@ entityRoutes.post('/:id/transition', async (c) => {
   const newStatus = statusMap[action];
   
   // Get current entity version
-  const currentPath = getEntityVersionPath('private', entityId, latestPointer.version, stub.organizationId);
+  const currentPath = getEntityVersionPath('members', entityId, latestPointer.version, stub.organizationId);
   const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath);
   
   if (!currentEntity) {
@@ -486,7 +478,7 @@ entityRoutes.post('/:id/transition', async (c) => {
   };
   
   // Determine storage location based on new status and visibility
-  let targetVisibility: 'public' | 'platform' | 'private' = 'private';
+  let targetVisibility: 'public' | 'authenticated' | 'members' = 'members';
   
   if (newStatus === 'published') {
     targetVisibility = currentEntity.visibility;
@@ -494,7 +486,7 @@ entityRoutes.post('/:id/transition', async (c) => {
   
   // Write new version to appropriate location
   const newVersionPath = getEntityVersionPath(targetVisibility, entityId, newVersion, 
-    targetVisibility === 'private' ? stub.organizationId : undefined);
+    targetVisibility === 'members' ? stub.organizationId : undefined);
   await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
   
   // Update latest pointer
@@ -508,8 +500,8 @@ entityRoutes.post('/:id/transition', async (c) => {
   // Latest pointer stays in private for org reference
   await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
   
-  // If publishing to public/platform, also write latest there
-  if (newStatus === 'published' && targetVisibility !== 'private') {
+  // If publishing to public/authenticated, also write latest there
+  if (newStatus === 'published' && targetVisibility !== 'members') {
     const publicLatestPath = getEntityLatestPath(targetVisibility, entityId);
     await writeJSON(c.env.R2_BUCKET, publicLatestPath, newPointer);
   }
