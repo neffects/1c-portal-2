@@ -179,9 +179,6 @@ entityRoutes.get('/', async (c) => {
   
   const items: EntityListItem[] = [];
   
-  // Cache entity type definitions to avoid repeated lookups
-  const entityTypeCache = new Map<string, EntityType>();
-  
   // Get all entity stubs to find entities
   const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
   console.log('[Entities] Found', stubFiles.length, 'entity stubs');
@@ -227,26 +224,14 @@ entityRoutes.get('/', async (c) => {
     
     if (!entity) continue;
     
-    // Get or cache entity type definition
-    let entityTypeDef = entityTypeCache.get(stub.entityTypeId);
-    if (!entityTypeDef) {
-      entityTypeDef = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(stub.entityTypeId)) || undefined;
-      if (entityTypeDef) {
-        entityTypeCache.set(stub.entityTypeId, entityTypeDef);
-      }
-    }
-    
     // Filter by search query
     if (query.search) {
       const searchLower = query.search.toLowerCase();
-      const name = entityTypeDef ? getEntityDisplayName(entity.data, entityTypeDef).toLowerCase() : '';
+      const name = (entity.data.name as string || '').toLowerCase();
       const description = (entity.data.description as string || '').toLowerCase();
       
       if (!name.includes(searchLower) && !description.includes(searchLower)) continue;
     }
-    
-    // Get display name using the entity type definition
-    const displayName = entityTypeDef ? getEntityDisplayName(entity.data, entityTypeDef) : `Entity ${entity.id}`;
     
     items.push({
       id: entity.id,
@@ -256,7 +241,7 @@ entityRoutes.get('/', async (c) => {
       status: entity.status,
       visibility: entity.visibility,
       data: {
-        name: displayName,
+        name: entity.data.name as string || `Entity ${entity.id}`,
         description: entity.data.description as string || undefined
       },
       version: entity.version,
@@ -843,48 +828,6 @@ async function regenerateTypeBundle(
   
   // Also update the manifest
   await updateManifest(bucket, visibility, typeId, bundle, orgId);
-}
-
-/**
- * Get the display name for an entity by finding the appropriate name field
- * Uses the same heuristic as the EntityEditor: finds a field whose id or name contains "name"
- */
-function getEntityDisplayName(data: Record<string, unknown>, entityType: EntityType): string {
-  // First, try to find a field with id or name containing "name"
-  const nameField = entityType.fields.find(f => 
-    f.id.toLowerCase().includes('name') || 
-    f.name.toLowerCase().includes('name')
-  );
-  
-  if (nameField && data[nameField.id]) {
-    const value = data[nameField.id];
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
-  }
-  
-  // Fallback: try common name field IDs
-  const commonNameFields = ['name', 'title', 'label', 'displayName', 'company_name', 'tool_name'];
-  for (const fieldId of commonNameFields) {
-    if (data[fieldId] && typeof data[fieldId] === 'string') {
-      const value = data[fieldId] as string;
-      if (value.trim()) {
-        return value.trim();
-      }
-    }
-  }
-  
-  // Last resort: use the first non-empty string field value
-  for (const field of entityType.fields) {
-    if ((field.type === 'string' || field.type === 'text') && data[field.id]) {
-      const value = data[field.id];
-      if (typeof value === 'string' && value.trim()) {
-        return value.trim();
-      }
-    }
-  }
-  
-  return 'Untitled';
 }
 
 /**
