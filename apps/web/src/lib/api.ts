@@ -27,11 +27,19 @@ interface ApiResponse<T = unknown> {
  * Build request headers with auth token
  */
 function getHeaders(): HeadersInit {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:29',message:'getHeaders called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
   const headers: HeadersInit = {
     'Content-Type': 'application/json'
   };
   
   const token = getAuthToken();
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:34',message:'getAuthToken result',data:{tokenExists:!!token,tokenLength:token?.length,hasAuthHeader:!!headers['Authorization']},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+  
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
@@ -43,13 +51,26 @@ function getHeaders(): HeadersInit {
  * Make a GET request
  */
 async function get<T>(path: string): Promise<ApiResponse<T>> {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:45',message:'api.get called',data:{path},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
   console.log('[API] GET', path);
   
   try {
+    const headers = getHeaders();
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:51',message:'headers before fetch',data:{hasAuthHeader:!!headers['Authorization'],authHeaderValue:headers['Authorization']?.substring(0,20)+'...'},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
     const response = await fetch(`${API_BASE}${path}`, {
       method: 'GET',
-      headers: getHeaders()
+      headers
     });
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:56',message:'fetch response received',data:{status:response.status,statusText:response.statusText,path},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
     
     const data = await response.json();
     

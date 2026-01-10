@@ -35,12 +35,19 @@ const isOrgAdmin = computed(() => hasRole(['superadmin', 'org_admin']));
  * Load session from localStorage on startup
  */
 async function loadSession() {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/stores/auth.tsx:37',message:'loadSession entry',data:{sessionValueNull:session.value===null},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   console.log('[Auth] Loading session...');
   loading.value = true;
   error.value = null;
   
   try {
     const storedSession = localStorage.getItem('session');
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/stores/auth.tsx:44',message:'localStorage check',data:{hasStoredSession:!!storedSession},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     
     if (!storedSession) {
       console.log('[Auth] No stored session found');
@@ -50,6 +57,10 @@ async function loadSession() {
     
     const parsed: Session = JSON.parse(storedSession);
     
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/stores/auth.tsx:51',message:'session parsed from localStorage',data:{hasToken:!!parsed.token,tokenLength:parsed.token?.length,expiresAt:parsed.expiresAt},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
     // Check if expired
     if (new Date(parsed.expiresAt) < new Date()) {
       console.log('[Auth] Session expired, clearing');
@@ -58,17 +69,33 @@ async function loadSession() {
       return;
     }
     
+    // Set session value BEFORE validation so getAuthToken() returns the token
+    // This ensures the Authorization header is included in the validation request
+    session.value = parsed;
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/stores/auth.tsx:60',message:'before validation call',data:{sessionValueNull:session.value===null,parsedTokenExists:!!parsed.token,getAuthTokenResult:getAuthToken()},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
     // Validate token with server
     const response = await api.get('/auth/me');
     
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/stores/auth.tsx:62',message:'validation response received',data:{success:response.success,hasError:!!response.error,errorCode:response.error?.code},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
     if (response.success) {
-      session.value = parsed;
       console.log('[Auth] Session loaded:', parsed.user.id);
+      // Session value already set above
     } else {
       console.log('[Auth] Session invalid, clearing');
+      session.value = null;
       localStorage.removeItem('session');
     }
   } catch (err) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/stores/auth.tsx:72',message:'loadSession exception',data:{errorMessage:err instanceof Error?err.message:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
     console.error('[Auth] Load session error:', err);
     localStorage.removeItem('session');
   } finally {
@@ -245,5 +272,8 @@ export function useAuth() {
  * Get auth token for API requests
  */
 export function getAuthToken(): string | null {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/stores/auth.tsx:247',message:'getAuthToken called',data:{sessionValueNull:session.value===null,hasToken:!!session.value?.token},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
   return session.value?.token || null;
 }
