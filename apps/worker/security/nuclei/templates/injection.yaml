@@ -1,0 +1,145 @@
+# Nuclei Template: Injection Tests
+# Tests for path traversal and injection vulnerabilities
+
+id: 1cc-path-traversal
+
+info:
+  name: 1CC Portal Path Traversal
+  author: 1CC Security Team
+  severity: critical
+  description: Tests for R2 key path traversal vulnerabilities
+  tags: injection,path-traversal
+
+http:
+  # Test 1: Path traversal in entity ID
+  - raw:
+      - |
+        GET /api/entities/../../../secret/ROOT HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{TOKEN}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 400
+          - 404
+
+      - type: word
+        words:
+          - "secret"
+          - "ROOT"
+        negative: true
+
+  # Test 2: URL-encoded path traversal
+  - raw:
+      - |
+        GET /api/entities/%2e%2e%2f%2e%2e%2fsecret HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{TOKEN}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 400
+          - 404
+
+  # Test 3: Double-encoded path traversal
+  - raw:
+      - |
+        GET /api/entities/%252e%252e%252fsecret HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{TOKEN}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 400
+          - 404
+
+  # Test 4: Path traversal in file path
+  - raw:
+      - |
+        GET /files/uploads/../../../secret/config.json HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 400
+          - 404
+
+      - type: word
+        words:
+          - "JWT_SECRET"
+          - "config"
+          - "private"
+        negative: true
+
+---
+id: 1cc-xss-entity-data
+
+info:
+  name: 1CC Portal XSS in Entity Data
+  author: 1CC Security Team
+  severity: medium
+  description: Tests for XSS vulnerabilities in entity field data
+  tags: injection,xss
+
+http:
+  # Test: XSS payload in entity name field
+  - raw:
+      - |
+        POST /api/entities HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{ADMIN_TOKEN}}
+        Content-Type: application/json
+        Accept: application/json
+
+        {"entityTypeId":"type_123","data":{"name":"<script>alert(1)</script>","description":"test"}}
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 201
+          - 400
+
+      - type: word
+        words:
+          - "<script>"
+        part: body
+        negative: true
+
+---
+id: 1cc-header-injection
+
+info:
+  name: 1CC Portal Header Injection
+  author: 1CC Security Team
+  severity: medium
+  description: Tests for CRLF and header injection vulnerabilities
+  tags: injection,crlf,header
+
+http:
+  # Test: CRLF injection in redirect
+  - raw:
+      - |
+        GET /auth/callback?redirect=http://evil.com%0d%0aX-Injected:header HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        words:
+          - "X-Injected"
+        part: header
+        negative: true

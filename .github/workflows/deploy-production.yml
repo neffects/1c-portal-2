@@ -1,0 +1,166 @@
+# Deploy Production Workflow
+# Deploys to production environment when code is pushed to main branch
+# Includes smoke tests after deployment
+
+name: Deploy Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual trigger
+
+# Only one production deployment at a time
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false  # Don't cancel production deploys
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ==========================================================================
+  # CI Check - Ensure tests pass before deployment
+  # ==========================================================================
+  ci:
+    name: CI Checks
+    uses: ./.github/workflows/ci.yml
+
+  # ==========================================================================
+  # Deploy Worker to Production
+  # ==========================================================================
+  deploy-worker:
+    name: Deploy Worker (Production)
+    runs-on: ubuntu-latest
+    needs: ci
+    environment:
+      name: production
+      url: https://api.1cc-portal.workers.dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build --workspace=@1cc/shared --workspace=@1cc/xstate-machines
+
+      - name: Deploy Worker to Production
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/worker
+          command: deploy --env production
+          secrets: |
+            JWT_SECRET
+            RESEND_API_KEY
+            SUPERADMIN_EMAILS
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET_PRODUCTION }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY_PRODUCTION }}
+          SUPERADMIN_EMAILS: ${{ secrets.SUPERADMIN_EMAILS }}
+
+  # ==========================================================================
+  # Deploy Frontend to Cloudflare Pages (Production)
+  # ==========================================================================
+  deploy-frontend:
+    name: Deploy Frontend (Production)
+    runs-on: ubuntu-latest
+    needs: ci
+    environment:
+      name: production
+      url: https://1cc-portal.pages.dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend for production
+        run: npm run build --workspace=@1cc/web
+        env:
+          VITE_API_URL: https://api.1cc-portal.workers.dev
+          VITE_ENVIRONMENT: production
+          VITE_DEBUG: 'false'
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy apps/web/dist --project-name=1cc-portal --branch=main
+
+  # ==========================================================================
+  # Smoke Tests - Basic production verification
+  # ==========================================================================
+  smoke-tests:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-worker, deploy-frontend]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for deployment propagation
+        run: sleep 30
+
+      - name: Check API health
+        run: |
+          echo "Checking API health..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://api.1cc-portal.workers.dev/manifests/public)
+          if [ "$response" = "200" ]; then
+            echo "✅ API is healthy (HTTP $response)"
+          else
+            echo "❌ API health check failed (HTTP $response)"
+            exit 1
+          fi
+
+      - name: Check Frontend availability
+        run: |
+          echo "Checking frontend availability..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://1cc-portal.pages.dev)
+          if [ "$response" = "200" ]; then
+            echo "✅ Frontend is available (HTTP $response)"
+          else
+            echo "❌ Frontend check failed (HTTP $response)"
+            exit 1
+          fi
+
+      - name: Notify deployment success
+        if: success()
+        run: echo "🚀 Production deployment completed successfully!"
+
+  # ==========================================================================
+  # Create GitHub Release (optional - on tag push)
+  # ==========================================================================
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: smoke-tests
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

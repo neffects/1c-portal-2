@@ -1,4 +1,6 @@
 # Cloudflare Worker configuration for 1C Portal API
+# This file configures the Worker for development, staging, and production environments
+
 name = "1cc-portal-api"
 main = "src/index.ts"
 compatibility_date = "2024-05-01"
@@ -9,26 +11,68 @@ compatibility_flags = ["nodejs_compat"]
 port = 8787
 local_protocol = "http"
 
-# R2 bucket binding
+# R2 bucket binding (development/preview)
 [[r2_buckets]]
 binding = "R2_BUCKET"
-bucket_name = "1cc-portal-data"
+bucket_name = "1cc-portal-data-dev"
 preview_bucket_name = "1cc-portal-data-preview"
 
-# Environment variables (set via wrangler secret)
+# Default environment variables (development)
 [vars]
 ENVIRONMENT = "development"
 API_BASE_URL = "http://localhost:8787"
 FRONTEND_URL = "http://localhost:5173"
 
-# Production environment
-[env.production]
-name = "1cc-portal-api-prod"
-[env.production.vars]
-ENVIRONMENT = "production"
-
-# Staging environment
+# =============================================================================
+# STAGING ENVIRONMENT
+# Deployed on push to 'develop' branch
+# =============================================================================
 [env.staging]
 name = "1cc-portal-api-staging"
+
+# Staging R2 bucket - isolated from production data
+[[env.staging.r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "1cc-portal-data-staging"
+
+# Staging environment variables
 [env.staging.vars]
 ENVIRONMENT = "staging"
+API_BASE_URL = "https://api-staging.1cc-portal.workers.dev"
+FRONTEND_URL = "https://staging.1cc-portal.pages.dev"
+
+# =============================================================================
+# PRODUCTION ENVIRONMENT
+# Deployed on push to 'main' branch
+# =============================================================================
+[env.production]
+name = "1cc-portal-api-prod"
+
+# Production R2 bucket - contains live data
+[[env.production.r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "1cc-portal-data-prod"
+
+# Production environment variables
+[env.production.vars]
+ENVIRONMENT = "production"
+API_BASE_URL = "https://api.1cc-portal.workers.dev"
+FRONTEND_URL = "https://1cc-portal.pages.dev"
+
+# =============================================================================
+# SECRETS (set via wrangler secret put)
+# Required for each environment:
+#   - JWT_SECRET: JWT signing key (min 32 characters)
+#   - RESEND_API_KEY: Email service API key
+#   - SUPERADMIN_EMAILS: Comma-separated list of superadmin emails
+#
+# To set secrets for staging:
+#   wrangler secret put JWT_SECRET --env staging
+#   wrangler secret put RESEND_API_KEY --env staging
+#   wrangler secret put SUPERADMIN_EMAILS --env staging
+#
+# To set secrets for production:
+#   wrangler secret put JWT_SECRET --env production
+#   wrangler secret put RESEND_API_KEY --env production
+#   wrangler secret put SUPERADMIN_EMAILS --env production
+# =============================================================================

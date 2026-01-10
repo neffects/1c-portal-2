@@ -1,0 +1,216 @@
+# Security Scanning Workflow
+# Runs automated security tests including OWASP ZAP and Nuclei scans
+# Called by deploy workflows or triggered manually/scheduled
+
+name: Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: 'Target API URL to scan'
+        required: true
+        type: string
+  schedule:
+    # Run weekly on Sunday at 2am UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Target API URL to scan'
+        required: true
+        type: string
+        default: 'https://api-staging.1cc-portal.workers.dev'
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ==========================================================================
+  # Custom Security Tests (Vitest)
+  # ==========================================================================
+  security-tests:
+    name: Security Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security tests
+        run: npm test -- --filter=@1cc/worker -- --run --reporter=junit --outputFile=security-test-results.xml apps/worker/security/tests/
+        continue-on-error: true
+
+      - name: Upload security test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-test-results
+          path: apps/worker/security-test-results.xml
+          retention-days: 30
+
+  # ==========================================================================
+  # OWASP ZAP API Scan
+  # ==========================================================================
+  zap-scan:
+    name: OWASP ZAP Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for target availability
+        run: |
+          target_url="${{ inputs.target_url || 'https://api-staging.1cc-portal.workers.dev' }}"
+          echo "Waiting for $target_url to be available..."
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -s -o /dev/null -w "%{http_code}" "$target_url/manifests/public" | grep -q "200"; then
+              echo "✅ Target is available"
+              break
+            fi
+            echo "⏳ Attempt $((attempt + 1))/$max_attempts"
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+
+      - name: Run ZAP API Scan
+        uses: zaproxy/action-api-scan@v0.7.0
+        with:
+          target: ${{ inputs.target_url || 'https://api-staging.1cc-portal.workers.dev' }}
+          rules_file_name: 'apps/worker/security/zap/rules.tsv'
+          allow_issue_writing: false
+          artifact_name: 'zap-report'
+        continue-on-error: true
+
+      - name: Upload ZAP HTML Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-html-report
+          path: report_html.html
+          retention-days: 30
+
+      - name: Upload ZAP SARIF Report
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: report_sarif.json
+        continue-on-error: true
+
+  # ==========================================================================
+  # Nuclei Vulnerability Scan
+  # ==========================================================================
+  nuclei-scan:
+    name: Nuclei Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Nuclei
+        uses: projectdiscovery/nuclei-action@main
+        with:
+          target: ${{ inputs.target_url || 'https://api-staging.1cc-portal.workers.dev' }}
+          templates: 'apps/worker/security/nuclei/templates/'
+          output: 'nuclei-results.txt'
+          sarif-export: 'nuclei-results.sarif'
+          markdown-export: 'nuclei-results.md'
+          github-report: true
+        continue-on-error: true
+
+      - name: Upload Nuclei Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nuclei-results
+          path: |
+            nuclei-results.txt
+            nuclei-results.md
+          retention-days: 30
+
+      - name: Upload Nuclei SARIF Report
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: nuclei-results.sarif
+        continue-on-error: true
+
+  # ==========================================================================
+  # Dependency Audit
+  # ==========================================================================
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Run npm audit
+        run: |
+          npm audit --json > npm-audit.json || true
+          npm audit --audit-level=high || echo "::warning::Found high severity vulnerabilities"
+
+      - name: Upload audit results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-results
+          path: npm-audit.json
+          retention-days: 30
+
+  # ==========================================================================
+  # Security Summary Report
+  # ==========================================================================
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [security-tests, zap-scan, nuclei-scan, dependency-audit]
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: security-reports
+        continue-on-error: true
+
+      - name: Generate Summary
+        run: |
+          echo "# Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Job Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Tests | ${{ needs.security-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ZAP Scan | ${{ needs.zap-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Nuclei Scan | ${{ needs.nuclei-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependency Audit | ${{ needs.dependency-audit.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Target URL: ${{ inputs.target_url || 'https://api-staging.1cc-portal.workers.dev' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📊 View detailed results in the Security tab and Artifacts." >> $GITHUB_STEP_SUMMARY
+
+      - name: Check for critical findings
+        run: |
+          # Check if any scan found critical/high severity issues
+          if [ "${{ needs.zap-scan.result }}" == "failure" ] || [ "${{ needs.nuclei-scan.result }}" == "failure" ]; then
+            echo "⚠️ Security scans found issues. Review the reports for details."
+            # Don't fail the workflow, but alert via summary
+          fi

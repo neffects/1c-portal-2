@@ -1,0 +1,133 @@
+# Nuclei Template: Privilege Escalation Tests
+# Tests for role-based access control bypasses
+
+id: 1cc-privilege-escalation
+
+info:
+  name: 1CC Portal Privilege Escalation
+  author: 1CC Security Team
+  severity: critical
+  description: Tests for privilege escalation vulnerabilities
+  tags: authz,privilege-escalation,rbac
+
+variables:
+  member_token: "{{MEMBER_TOKEN}}"
+  admin_token: "{{ADMIN_TOKEN}}"
+
+http:
+  # Test 1: org_member attempting to create entity (admin only)
+  - raw:
+      - |
+        POST /api/entities HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{member_token}}
+        Content-Type: application/json
+        Accept: application/json
+
+        {"entityTypeId":"type_123","data":{"name":"Test"}}
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 403
+
+      - type: word
+        words:
+          - "FORBIDDEN"
+          - "permission"
+        condition: or
+
+  # Test 2: org_admin attempting to create entity type (superadmin only)
+  - raw:
+      - |
+        POST /api/entity-types HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{admin_token}}
+        Content-Type: application/json
+        Accept: application/json
+
+        {"name":"Test Type","pluralName":"Test Types","slug":"test","fields":[],"sections":[]}
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 403
+
+      - type: word
+        words:
+          - "FORBIDDEN"
+          - "superadmin"
+        condition: or
+
+  # Test 3: org_admin attempting to approve entity (superadmin only)
+  - raw:
+      - |
+        POST /api/entities/ent_123/transition HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{admin_token}}
+        Content-Type: application/json
+        Accept: application/json
+
+        {"action":"approve"}
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 403
+
+      - type: word
+        words:
+          - "FORBIDDEN"
+          - "superadmin"
+        condition: or
+
+  # Test 4: Attempt to self-elevate role
+  - raw:
+      - |
+        PATCH /api/users/me/role HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{member_token}}
+        Content-Type: application/json
+        Accept: application/json
+
+        {"role":"superadmin"}
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 400
+          - 403
+          - 404
+
+---
+id: 1cc-superadmin-only-endpoints
+
+info:
+  name: 1CC Portal Superadmin-Only Endpoints
+  author: 1CC Security Team
+  severity: high
+  description: Verifies that superadmin endpoints reject non-superadmin users
+  tags: authz,rbac,superadmin
+
+http:
+  # Test: org_admin accessing superadmin dashboard
+  - raw:
+      - |
+        GET /api/organizations HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{ADMIN_TOKEN}}
+        Accept: application/json
+
+    matchers-condition: or
+    matchers:
+      - type: status
+        status:
+          - 403
+
+      - type: word
+        words:
+          - "FORBIDDEN"

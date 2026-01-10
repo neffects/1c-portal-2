@@ -1,0 +1,125 @@
+# Nuclei Template: Authentication Bypass Tests
+# Tests for JWT and magic link authentication vulnerabilities
+
+id: 1cc-auth-bypass
+
+info:
+  name: 1CC Portal Authentication Bypass
+  author: 1CC Security Team
+  severity: critical
+  description: Tests for authentication bypass vulnerabilities
+  tags: auth,bypass,jwt
+
+variables:
+  base_url: "{{BaseURL}}"
+
+http:
+  # Test 1: Access protected endpoint without token
+  - raw:
+      - |
+        GET /api/entities HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 401
+
+      - type: word
+        words:
+          - "UNAUTHORIZED"
+          - "Authentication required"
+        condition: or
+
+  # Test 2: Access protected endpoint with empty bearer token
+  - raw:
+      - |
+        GET /api/entities HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer 
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 401
+
+  # Test 3: Access with "none" algorithm JWT
+  - raw:
+      - |
+        GET /api/entities HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhdHRhY2tlciIsInJvbGUiOiJzdXBlcmFkbWluIn0.
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 401
+
+  # Test 4: Access with malformed JWT
+  - raw:
+      - |
+        GET /api/entities HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer not.a.jwt
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 401
+
+  # Test 5: Magic link token reuse (should fail after first use)
+  - raw:
+      - |
+        GET /auth/verify?token=test-reuse-token HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+      - |
+        GET /auth/verify?token=test-reuse-token HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    req-condition: true
+    matchers:
+      - type: dsl
+        dsl:
+          - "status_code_2 == 400 || status_code_2 == 401"
+---
+id: 1cc-jwt-tampering
+
+info:
+  name: 1CC Portal JWT Tampering
+  author: 1CC Security Team
+  severity: high
+  description: Tests for JWT signature and payload tampering
+  tags: auth,jwt,tampering
+
+http:
+  # Test: Tampered JWT signature should be rejected
+  - raw:
+      - |
+        GET /api/entities HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzEyMyIsInJvbGUiOiJzdXBlcmFkbWluIiwiZXhwIjoxOTk5OTk5OTk5fQ.TAMPERED_SIGNATURE
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 401
+
+      - type: word
+        words:
+          - "INVALID_TOKEN"
+          - "invalid"
+          - "expired"
+        condition: or

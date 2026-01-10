@@ -1,0 +1,122 @@
+# E2E Testing Workflow
+# Runs Playwright tests against staging or production environments
+# Called by deploy workflows or triggered manually
+
+name: E2E Tests
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: 'Frontend URL to test against'
+        required: true
+        type: string
+      api_url:
+        description: 'API URL for backend requests'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Frontend URL to test against'
+        required: true
+        type: string
+        default: 'https://staging.1cc-portal.pages.dev'
+      api_url:
+        description: 'API URL for backend requests'
+        required: true
+        type: string
+        default: 'https://api-staging.1cc-portal.workers.dev'
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ==========================================================================
+  # Run E2E Tests
+  # ==========================================================================
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+        working-directory: apps/web
+
+      - name: Wait for deployment to be ready
+        run: |
+          echo "Waiting for deployment to be ready..."
+          max_attempts=30
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.target_url }}" || echo "000")
+            if [ "$response" = "200" ]; then
+              echo "✅ Frontend is ready (HTTP $response)"
+              break
+            fi
+            echo "⏳ Attempt $((attempt + 1))/$max_attempts: Frontend not ready (HTTP $response)"
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ Frontend did not become ready in time"
+            exit 1
+          fi
+
+      - name: Run Playwright tests
+        run: npx playwright test --reporter=html,github
+        working-directory: apps/web
+        env:
+          BASE_URL: ${{ inputs.target_url }}
+          API_URL: ${{ inputs.api_url }}
+          CI: true
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: apps/web/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-results-${{ github.run_id }}
+          path: apps/web/test-results/
+          retention-days: 7
+
+  # ==========================================================================
+  # Test Summary
+  # ==========================================================================
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    if: always()
+    steps:
+      - name: Report test status
+        run: |
+          if [ "${{ needs.e2e-tests.result }}" == "success" ]; then
+            echo "✅ All E2E tests passed!"
+          else
+            echo "❌ E2E tests failed. Check the Playwright report for details."
+            exit 1
+          fi

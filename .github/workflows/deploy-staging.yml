@@ -1,0 +1,128 @@
+# Deploy Staging Workflow
+# Deploys to staging environment when code is pushed to develop branch
+# Triggers E2E tests and security scans after deployment
+
+name: Deploy Staging
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:  # Allow manual trigger
+
+# Cancel in-progress runs
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ==========================================================================
+  # CI Check - Ensure tests pass before deployment
+  # ==========================================================================
+  ci:
+    name: CI Checks
+    uses: ./.github/workflows/ci.yml
+
+  # ==========================================================================
+  # Deploy Worker to Staging
+  # ==========================================================================
+  deploy-worker:
+    name: Deploy Worker (Staging)
+    runs-on: ubuntu-latest
+    needs: ci
+    environment:
+      name: staging
+      url: https://api-staging.1cc-portal.workers.dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build --workspace=@1cc/shared --workspace=@1cc/xstate-machines
+
+      - name: Deploy Worker to Staging
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/worker
+          command: deploy --env staging
+          secrets: |
+            JWT_SECRET
+            RESEND_API_KEY
+            SUPERADMIN_EMAILS
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET_STAGING }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY_STAGING }}
+          SUPERADMIN_EMAILS: ${{ secrets.SUPERADMIN_EMAILS }}
+
+  # ==========================================================================
+  # Deploy Frontend to Cloudflare Pages (Staging)
+  # ==========================================================================
+  deploy-frontend:
+    name: Deploy Frontend (Staging)
+    runs-on: ubuntu-latest
+    needs: ci
+    environment:
+      name: staging
+      url: https://staging.1cc-portal.pages.dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend for staging
+        run: npm run build --workspace=@1cc/web
+        env:
+          VITE_API_URL: https://api-staging.1cc-portal.workers.dev
+          VITE_ENVIRONMENT: staging
+          VITE_DEBUG: 'true'
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy apps/web/dist --project-name=1cc-portal-staging --branch=staging
+
+  # ==========================================================================
+  # Run E2E Tests against Staging
+  # ==========================================================================
+  e2e-tests:
+    name: E2E Tests
+    needs: [deploy-worker, deploy-frontend]
+    uses: ./.github/workflows/e2e.yml
+    with:
+      target_url: https://staging.1cc-portal.pages.dev
+      api_url: https://api-staging.1cc-portal.workers.dev
+    secrets: inherit
+
+  # ==========================================================================
+  # Run Security Scans against Staging
+  # ==========================================================================
+  security-scan:
+    name: Security Scan
+    needs: [deploy-worker, deploy-frontend]
+    uses: ./.github/workflows/security.yml
+    with:
+      target_url: https://api-staging.1cc-portal.workers.dev
+    secrets: inherit

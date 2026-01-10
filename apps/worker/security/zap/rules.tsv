@@ -1,0 +1,62 @@
+# ZAP Rules Configuration for 1CC Portal
+# Format: Rule ID	Alert Threshold	Alert Level
+# Alert Threshold: IGNORE, LOW, MEDIUM, HIGH (how easily triggered)
+# Alert Level: IGNORE, PASS, WARN, FAIL (CI pipeline behavior)
+
+# === HIGH PRIORITY - Fail pipeline ===
+# SQL Injection
+40018	LOW	FAIL
+# Path Traversal
+6	LOW	FAIL
+# Remote OS Command Injection
+90020	LOW	FAIL
+# CRLF Injection
+40003	LOW	FAIL
+# Server-Side Request Forgery
+40046	LOW	FAIL
+
+# === MEDIUM PRIORITY - Warn but don't fail ===
+# Cross Site Scripting (Reflected)
+40012	MEDIUM	WARN
+# Cross Site Scripting (Stored)
+40014	MEDIUM	WARN
+# External Redirect
+20019	MEDIUM	WARN
+# Open Redirect
+10028	MEDIUM	WARN
+# Remote File Inclusion
+7	MEDIUM	WARN
+# LDAP Injection
+40015	MEDIUM	WARN
+
+# === SECURITY HEADERS - Warn ===
+# Missing Content Security Policy
+10038	MEDIUM	WARN
+# Missing X-Content-Type-Options
+10021	HIGH	WARN
+# Missing X-Frame-Options
+10020	HIGH	WARN
+# Missing Strict-Transport-Security
+10035	MEDIUM	WARN
+# Cookie Without Secure Flag
+10011	MEDIUM	WARN
+# Cookie Without HttpOnly Flag
+10010	MEDIUM	WARN
+
+# === INFORMATIONAL - Log only ===
+# Information Disclosure - Debug Error Messages
+10023	HIGH	PASS
+# Information Disclosure - Sensitive Data
+10024	HIGH	PASS
+# Server Leaks Version Information
+10036	HIGH	PASS
+# Timestamp Disclosure
+10096	HIGH	PASS
+# Private IP Disclosure
+2	HIGH	PASS
+
+# === IGNORE - Not applicable ===
+# Anti-CSRF Tokens (handled differently in SPA)
+10202	IGNORE	IGNORE
+# User Controllable HTML Element Attribute (not relevant for API)
+10031	IGNORE	IGNORE

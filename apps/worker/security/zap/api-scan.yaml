@@ -1,0 +1,131 @@
+# OWASP ZAP API Scan Configuration
+# For 1CC Portal API Security Testing
+
+env:
+  contexts:
+    - name: "1CC Portal API"
+      urls:
+        - "${TARGET_URL}"
+      includePaths:
+        - "${TARGET_URL}/api/.*"
+        - "${TARGET_URL}/auth/.*"
+        - "${TARGET_URL}/manifests/.*"
+      excludePaths:
+        - "${TARGET_URL}/health"
+        - "${TARGET_URL}/favicon.ico"
+      authentication:
+        method: "bearer"
+        parameters:
+          token: "${TEST_JWT_TOKEN}"
+
+jobs:
+  # Spider the API to discover endpoints
+  - type: spider
+    parameters:
+      url: "${TARGET_URL}"
+      maxDuration: 5
+      maxDepth: 5
+    
+  # OpenAPI/Swagger import if available
+  - type: openapi
+    parameters:
+      apiFile: "${TARGET_URL}/api/openapi.json"
+    failOnWarning: false
+    failOnError: false
+    
+  # Active scan for vulnerabilities
+  - type: activeScan
+    parameters:
+      policy: "API-Scan"
+      maxRuleDurationInMins: 10
+      maxScanDurationInMins: 30
+    policyDefinition:
+      defaultStrength: "medium"
+      defaultThreshold: "medium"
+      rules:
+        # SQL Injection
+        - id: 40018
+          strength: "high"
+          threshold: "low"
+        # Cross Site Scripting
+        - id: 40012
+          strength: "high"
+          threshold: "medium"
+        # Path Traversal
+        - id: 6
+          strength: "high"
+          threshold: "low"
+        # Remote File Inclusion
+        - id: 7
+          strength: "high"
+          threshold: "medium"
+        # Server Side Include
+        - id: 40009
+          strength: "medium"
+          threshold: "medium"
+        # External Redirect
+        - id: 20019
+          strength: "medium"
+          threshold: "medium"
+        # LDAP Injection
+        - id: 40015
+          strength: "medium"
+          threshold: "high"
+        # Buffer Overflow
+        - id: 30001
+          strength: "medium"
+          threshold: "medium"
+        # Format String Error
+        - id: 30002
+          strength: "medium"
+          threshold: "medium"
+        # CRLF Injection
+        - id: 40003
+          strength: "high"
+          threshold: "low"
+
+  # Passive scan for additional issues
+  - type: passiveScan-config
+    parameters:
+      maxAlertsPerRule: 10
+      scanOnlyInScope: true
+    rules:
+      # Information Disclosure - Debug Error
+      - id: 10023
+        threshold: "low"
+      # Information Disclosure - Sensitive Information
+      - id: 10024
+        threshold: "low"
+      # CSP Header Missing
+      - id: 10038
+        threshold: "medium"
+      # X-Content-Type-Options Header Missing
+      - id: 10021
+        threshold: "medium"
+      # Strict-Transport-Security Header Missing
+      - id: 10035
+        threshold: "medium"
+      # Cookie Without Secure Flag
+      - id: 10011
+        threshold: "low"
+      # Cookie Without HttpOnly Flag
+      - id: 10010
+        threshold: "low"
+
+  # Generate reports
+  - type: report
+    parameters:
+      template: "sarif-json"
+      reportDir: "/zap/reports"
+      reportFile: "zap-report.sarif"
+    risks:
+      - high
+      - medium
+      - low
+      - informational
+
+  - type: report
+    parameters:
+      template: "traditional-html"
+      reportDir: "/zap/reports"
+      reportFile: "zap-report.html"

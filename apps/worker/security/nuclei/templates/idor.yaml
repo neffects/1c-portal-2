@@ -1,0 +1,99 @@
+# Nuclei Template: IDOR (Insecure Direct Object Reference) Tests
+# Tests for unauthorized access to objects across organizations
+
+id: 1cc-idor-entity
+
+info:
+  name: 1CC Portal Entity IDOR
+  author: 1CC Security Team
+  severity: high
+  description: Tests for IDOR vulnerabilities in entity access
+  tags: idor,authz,entity
+
+variables:
+  # These would be replaced with actual test values in CI
+  org1_token: "{{ORG1_TOKEN}}"
+  org2_entity_id: "{{ORG2_ENTITY_ID}}"
+
+http:
+  # Test: User from org1 accessing entity from org2 (should fail)
+  - raw:
+      - |
+        GET /api/entities/{{org2_entity_id}} HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{org1_token}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 403
+          - 404
+
+      - type: word
+        words:
+          - "FORBIDDEN"
+          - "NOT_FOUND"
+          - "access"
+        condition: or
+---
+id: 1cc-idor-user
+
+info:
+  name: 1CC Portal User IDOR
+  author: 1CC Security Team
+  severity: high
+  description: Tests for IDOR vulnerabilities in user management
+  tags: idor,authz,user
+
+http:
+  # Test: Accessing user list from different org
+  - raw:
+      - |
+        GET /api/users?orgId={{ORG2_ID}} HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{ORG1_TOKEN}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 403
+
+      - type: word
+        words:
+          - "FORBIDDEN"
+          - "organization"
+        condition: or
+---
+id: 1cc-idor-org-manifest
+
+info:
+  name: 1CC Portal Organization Manifest IDOR
+  author: 1CC Security Team
+  severity: medium
+  description: Tests for unauthorized access to organization manifests
+  tags: idor,authz,manifest
+
+http:
+  # Test: Accessing org manifest without membership
+  - raw:
+      - |
+        GET /manifests/org/{{ORG2_ID}} HTTP/1.1
+        Host: {{Hostname}}
+        Authorization: Bearer {{ORG1_TOKEN}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 403
+
+      - type: word
+        words:
+          - "FORBIDDEN"
+          - "access"
+        condition: or

@@ -137,16 +137,115 @@ npm run dev:web
 Worker secrets (set via `wrangler secret`):
 - `JWT_SECRET` - JWT signing key
 - `RESEND_API_KEY` - Email service API key
+- `SUPERADMIN_EMAILS` - Comma-separated list of superadmin emails
+
+### Testing
+
+```bash
+# Run all tests
+npm test
+
+# Run tests with coverage
+npm test -- --coverage
+
+# Run worker tests only
+npm run test --workspace=@1cc/worker
+
+# Run frontend component tests
+npm run test --workspace=@1cc/web
+
+# Run E2E tests (requires running server)
+npm run test:e2e --workspace=@1cc/web
+
+# Run security tests
+npm run test:security --workspace=@1cc/worker
+```
 
 ### Deployment
 
 ```bash
-# Deploy worker
-npm run deploy:worker
+# Deploy worker to staging
+wrangler deploy --env staging
+
+# Deploy worker to production
+wrangler deploy --env production
 
 # Build frontend
 npm run build
 ```
+
+## CI/CD Pipeline
+
+### Environments
+
+| Environment | Worker Name | R2 Bucket | Trigger |
+|-------------|-------------|-----------|---------|
+| Development | Local | Mock R2 | Local dev |
+| Staging | `1cc-portal-api-staging` | `1cc-portal-data-staging` | Push to `develop` |
+| Production | `1cc-portal-api-prod` | `1cc-portal-data-prod` | Push to `main` |
+
+### GitHub Actions Workflows
+
+| Workflow | Purpose | Trigger |
+|----------|---------|---------|
+| `ci.yml` | Lint, test, build | All PRs, pushes to main/develop |
+| `deploy-staging.yml` | Deploy to staging + E2E + security scans | Push to `develop` |
+| `deploy-production.yml` | Deploy to production + smoke tests | Push to `main` |
+| `e2e.yml` | Playwright E2E tests | Called by deploy workflows |
+| `security.yml` | ZAP + Nuclei security scans | Called by deploy, weekly schedule |
+
+### Required GitHub Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `CLOUDFLARE_API_TOKEN` | Wrangler deployments |
+| `CLOUDFLARE_ACCOUNT_ID` | Account identifier |
+| `JWT_SECRET_STAGING` | JWT signing key for staging |
+| `JWT_SECRET_PRODUCTION` | JWT signing key for production |
+| `RESEND_API_KEY_STAGING` | Email API key for staging |
+| `RESEND_API_KEY_PRODUCTION` | Email API key for production |
+| `SUPERADMIN_EMAILS` | Comma-separated admin emails |
+
+### Branching Strategy (Gitflow)
+
+- `main` - Production-ready code
+- `develop` - Integration branch, deploys to staging
+- `feature/*` - Feature branches, merged to develop
+- `hotfix/*` - Critical fixes, merged to main and develop
+
+## Security
+
+### Automated Security Testing
+
+The project includes automated security testing with:
+
+1. **Unit Security Tests** (`apps/worker/security/tests/`)
+   - Authentication bypass attempts
+   - Authorization/IDOR prevention
+   - Input validation and injection prevention
+
+2. **OWASP ZAP** (`apps/worker/security/zap/`)
+   - API scanning for common vulnerabilities
+   - Custom rule configuration
+   - SARIF reports for GitHub Security tab
+
+3. **Nuclei Templates** (`apps/worker/security/nuclei/templates/`)
+   - Auth bypass detection
+   - IDOR testing
+   - Privilege escalation testing
+   - Injection vulnerability detection
+
+### Security Best Practices
+
+- All routes require authentication except public manifests
+- JWT tokens verified with constant-time comparison
+- Magic links are single-use with 15-minute expiration
+- R2 keys validated against path traversal
+- User input sanitized against XSS
+- File uploads validated for type and size
+- Rate limiting on authentication endpoints
+- CORS configured per environment
+- Security headers enforced (CSP, X-Frame-Options, etc.)
 
 ## Current Status
 
@@ -170,7 +269,28 @@ npm run build
 - 🔲 TanStack DB integration for true offline
 - 🔲 Alert notification system (email digests)
 - 🔲 Performance optimization
-- 🔲 Production deployment
+
+### Recently Completed (CI/CD & Testing)
+- ✅ Multi-environment configuration (2026-01-10):
+  - Complete staging and production environment setup in wrangler.toml
+  - Separate R2 buckets per environment
+  - Environment-specific API and frontend URLs
+- ✅ GitHub Actions CI/CD pipeline:
+  - CI workflow with linting, testing, and build verification
+  - Staging deployment on push to develop branch
+  - Production deployment on push to main branch
+  - E2E testing workflow with Playwright
+  - Security scanning workflow with ZAP and Nuclei
+- ✅ Comprehensive test coverage:
+  - Worker unit tests for all routes (entities, entity-types, users, manifests)
+  - Auth middleware tests
+  - Frontend Vitest configuration with jsdom
+  - Playwright E2E tests for auth, entity CRUD, and admin flows
+- ✅ Security testing infrastructure:
+  - Security test suite (auth bypass, authz, injection prevention)
+  - OWASP ZAP API scanning configuration
+  - Custom Nuclei templates for 1CC-specific vulnerabilities
+  - Automated penetration testing in CI/CD
 
 ### Recently Completed
 - ✅ Simplified user management with email autocomplete (2026-01-10):
