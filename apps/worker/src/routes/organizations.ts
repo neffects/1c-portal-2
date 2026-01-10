@@ -18,9 +18,10 @@ import {
   createOrganizationRequestSchema, 
   updateOrganizationRequestSchema,
   updateEntityTypePermissionsRequestSchema,
-  inviteUserRequestSchema
+  inviteUserRequestSchema,
+  addUserToOrgRequestSchema
 } from '@1cc/shared';
-import { readJSON, writeJSON, listFiles, getOrgProfilePath, getOrgPermissionsPath, getInvitationPath } from '../lib/r2';
+import { readJSON, writeJSON, listFiles, getOrgProfilePath, getOrgPermissionsPath, getInvitationPath, getUserMembershipPath } from '../lib/r2';
 import { createOrgId, createSlug, createInvitationToken } from '../lib/id';
 import { requireSuperadmin, requireOrgAdmin, requireOrgMembership } from '../middleware/auth';
 import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
@@ -96,12 +97,28 @@ organizationRoutes.post('/', requireSuperadmin, async (c) => {
 /**
  * GET /
  * List all organizations
+ * Query param: adminOnly - if true, only return orgs where user is an admin
  */
 organizationRoutes.get('/', async (c) => {
   console.log('[Orgs] Listing organizations');
   
   const userRole = c.get('userRole');
+  const userId = c.get('userId');
   const userOrgId = c.get('organizationId');
+  const query = c.req.query();
+  const adminOnly = query.adminOnly === 'true';
+  
+  // If requesting admin-only orgs, return organizations where user is an admin
+  if (adminOnly && userId) {
+    const adminOrgs = await findAdminOrganizations(c.env.R2_BUCKET, userId, userRole === 'superadmin');
+    return c.json({
+      success: true,
+      data: {
+        items: adminOrgs,
+        total: adminOrgs.length
+      }
+    });
+  }
   
   // Non-superadmins can only see their own organization
   if (userRole !== 'superadmin') {
@@ -368,7 +385,11 @@ organizationRoutes.patch('/:id/permissions', requireSuperadmin, async (c) => {
 /**
  * POST /:id/users/invite
  * Invite a user to a specific organization (superadmin only)
- * This allows superadmins to invite admins to newly created organizations
+ * This allows superadmins to invite admins to newly created organizations.
+ * 
+ * If the user already exists in the system, they are added directly to the
+ * organization and a notification email is sent (no acceptance required).
+ * If the user doesn't exist, an invitation email with magic link is sent.
  */
 organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
   const orgId = c.req.param('id');
@@ -382,7 +403,7 @@ organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
   }
   
   const { email, role } = result.data;
-  const userId = c.get('userId')!;
+  const currentUserId = c.get('userId')!;
   
   // Verify organization exists
   const org = await readJSON<Organization>(c.env.R2_BUCKET, getOrgProfilePath(orgId));
@@ -390,15 +411,61 @@ organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
     throw new NotFoundError('Organization', orgId);
   }
   
-  // Check if user already exists in org
-  const existingUsers = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+  // Check if user already exists in this org
+  const existingOrgUsers = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
   
-  for (const file of existingUsers) {
+  for (const file of existingOrgUsers) {
     const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, file);
     if (membership && membership.email.toLowerCase() === email.toLowerCase()) {
       throw new ConflictError('This user is already a member of the organization');
     }
   }
+  
+  // Check if user already exists in the system
+  const existingUser = await findUserAcrossSystem(c.env.R2_BUCKET, email, c.env.SUPERADMIN_EMAILS);
+  
+  if (existingUser) {
+    // User exists - add them directly to the organization
+    console.log('[Orgs] User exists in system, adding directly:', email);
+    
+    const now = new Date().toISOString();
+    
+    // Create membership record
+    const membership: OrganizationMembership = {
+      userId: existingUser.id,
+      organizationId: orgId,
+      role,
+      email: email.toLowerCase(),
+      joinedAt: now,
+      invitedBy: currentUserId
+    };
+    
+    // Save membership to org
+    await writeJSON(c.env.R2_BUCKET, getUserMembershipPath(orgId, existingUser.id), membership);
+    
+    // Send notification email (not an invitation - they're already added)
+    if (c.env.RESEND_API_KEY) {
+      // TODO: Send a "you've been added" notification email instead of invitation
+      // For now, we'll just log it
+      console.log('[Orgs] User added to org, notification would be sent to:', email);
+    }
+    
+    console.log('[Orgs] Existing user added to org:', email, 'as', role);
+    
+    return c.json({
+      success: true,
+      data: {
+        message: 'User added to organization successfully',
+        email,
+        organizationId: orgId,
+        membership,
+        existingUser: true
+      }
+    }, 201);
+  }
+  
+  // User doesn't exist - send invitation email with magic link
+  console.log('[Orgs] User not found in system, sending invitation:', email);
   
   // Create invitation token
   const token = createInvitationToken();
@@ -410,7 +477,7 @@ organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
     email,
     organizationId: orgId,
     role,
-    invitedBy: userId,
+    invitedBy: currentUserId,
     createdAt: now.toISOString(),
     expiresAt: expiresAt.toISOString(),
     accepted: false
@@ -436,7 +503,7 @@ organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
     console.log('[Orgs] DEV MODE - Invitation link:', inviteLink);
   }
   
-  console.log('[Orgs] Invitation created for:', email, 'to join org:', orgId);
+  console.log('[Orgs] Invitation created for new user:', email, 'to join org:', orgId);
   
   return c.json({
     success: true,
@@ -445,13 +512,195 @@ organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
       email,
       organizationId: orgId,
       expiresAt: expiresAt.toISOString(),
+      existingUser: false,
       // Include dev link in non-production environments for testing
       ...(c.env.ENVIRONMENT !== 'production' && { devLink: inviteLink })
     }
   }, 201);
 });
 
+/**
+ * POST /:id/users/add
+ * Add an existing user directly to an organization (superadmin only)
+ * This is different from invite - it adds the user immediately without sending an email
+ * Used to add existing users (including superadmins) to organizations
+ */
+organizationRoutes.post('/:id/users/add', requireSuperadmin, async (c) => {
+  const orgId = c.req.param('id');
+  console.log('[Orgs] Superadmin adding existing user to org:', orgId);
+  
+  const body = await c.req.json();
+  const result = addUserToOrgRequestSchema.safeParse(body);
+  
+  if (!result.success) {
+    throw new ValidationError('Invalid user data', { errors: result.error.errors });
+  }
+  
+  const { email, role } = result.data;
+  const currentUserId = c.get('userId')!;
+  
+  // Verify organization exists
+  const org = await readJSON<Organization>(c.env.R2_BUCKET, getOrgProfilePath(orgId));
+  if (!org) {
+    throw new NotFoundError('Organization', orgId);
+  }
+  
+  // Check if user already exists in this org
+  const existingOrgUsers = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+  
+  for (const file of existingOrgUsers) {
+    const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, file);
+    if (membership && membership.email.toLowerCase() === email.toLowerCase()) {
+      throw new ConflictError('This user is already a member of this organization');
+    }
+  }
+  
+  // Find the user in the system (they must exist somewhere)
+  const existingUser = await findUserAcrossSystem(c.env.R2_BUCKET, email, c.env.SUPERADMIN_EMAILS);
+  
+  if (!existingUser) {
+    throw new ValidationError('User not found. Use the invite feature to add new users who don\'t have an account yet.');
+  }
+  
+  // Use existing user ID or generate a new one for superadmins (who don't have stored records)
+  const userId = existingUser.id || createSlug(); // createSlug generates a unique ID
+  const now = new Date().toISOString();
+  
+  // Create membership record
+  const membership: OrganizationMembership = {
+    userId,
+    organizationId: orgId,
+    role,
+    email: email.toLowerCase(),
+    joinedAt: now,
+    invitedBy: currentUserId
+  };
+  
+  // Save membership to org
+  await writeJSON(c.env.R2_BUCKET, getUserMembershipPath(orgId, userId), membership);
+  
+  console.log('[Orgs] User added to org:', email, 'as', role);
+  
+  return c.json({
+    success: true,
+    data: {
+      message: 'User added to organization successfully',
+      membership
+    }
+  }, 201);
+});
+
+/**
+ * GET /:id/users
+ * List all users in an organization (superadmin only for any org)
+ */
+organizationRoutes.get('/:id/users', requireSuperadmin, async (c) => {
+  const orgId = c.req.param('id');
+  console.log('[Orgs] Listing users for org:', orgId);
+  
+  // Verify organization exists
+  const org = await readJSON<Organization>(c.env.R2_BUCKET, getOrgProfilePath(orgId));
+  if (!org) {
+    throw new NotFoundError('Organization', orgId);
+  }
+  
+  // List users in organization
+  const userFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+  const jsonFiles = userFiles.filter(f => f.endsWith('.json'));
+  
+  const items: OrganizationMembership[] = [];
+  
+  for (const file of jsonFiles) {
+    const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, file);
+    if (membership) {
+      items.push(membership);
+    }
+  }
+  
+  // Sort by joinedAt
+  items.sort((a, b) => new Date(b.joinedAt).getTime() - new Date(a.joinedAt).getTime());
+  
+  console.log('[Orgs] Found', items.length, 'users');
+  
+  return c.json({
+    success: true,
+    data: {
+      items,
+      total: items.length
+    }
+  });
+});
+
 // Helper functions
+
+/**
+ * Find a user across the entire system (all orgs + superadmins)
+ */
+async function findUserAcrossSystem(
+  bucket: R2Bucket, 
+  email: string, 
+  superadminEmails?: string
+): Promise<{ id: string; email: string; role: string; organizationId: string | null } | null> {
+  const normalizedEmail = email.toLowerCase();
+  
+  // Check if user is a superadmin (from environment variable)
+  if (superadminEmails) {
+    const emails = superadminEmails.split(',').map(e => e.trim().toLowerCase());
+    if (emails.includes(normalizedEmail)) {
+      // Superadmins exist but don't have stored records - create a virtual ID
+      return {
+        id: `sa_${normalizedEmail.replace(/[^a-z0-9]/g, '_').substring(0, 20)}`,
+        email: normalizedEmail,
+        role: 'superadmin',
+        organizationId: null
+      };
+    }
+  }
+  
+  // Search across all organizations
+  const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+  
+  for (const orgDir of orgDirs) {
+    const match = orgDir.match(/private\/orgs\/([^\/]+)\//);
+    if (!match) continue;
+    
+    const orgId = match[1];
+    const userFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+    
+    for (const userFile of userFiles) {
+      if (!userFile.endsWith('.json')) continue;
+      
+      const membership = await readJSON<OrganizationMembership>(bucket, userFile);
+      if (membership && membership.email.toLowerCase() === normalizedEmail) {
+        return {
+          id: membership.userId,
+          email: membership.email,
+          role: membership.role,
+          organizationId: membership.organizationId
+        };
+      }
+    }
+  }
+  
+  // Check pending users (users who signed up but aren't in an org yet)
+  const pendingFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}pending-users/`);
+  
+  for (const file of pendingFiles) {
+    if (!file.endsWith('.json')) continue;
+    
+    const pendingUser = await readJSON<{ id: string; email: string }>(bucket, file);
+    if (pendingUser && pendingUser.email.toLowerCase() === normalizedEmail) {
+      return {
+        id: pendingUser.id,
+        email: pendingUser.email,
+        role: 'org_member',
+        organizationId: null
+      };
+    }
+  }
+  
+  return null;
+}
 
 /**
  * Find organization by slug
@@ -489,4 +738,74 @@ async function countOrgEntities(bucket: R2Bucket, orgId: string): Promise<number
     return match ? match[1] : null;
   }).filter(Boolean));
   return entityDirs.size;
+}
+
+/**
+ * Find all organizations where a user is an admin
+ */
+async function findAdminOrganizations(
+  bucket: R2Bucket, 
+  userId: string, 
+  isSuperadmin: boolean
+): Promise<OrganizationListItem[]> {
+  const items: OrganizationListItem[] = [];
+  
+  // Superadmins have access to all organizations
+  if (isSuperadmin) {
+    const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+    const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
+    
+    for (const file of profileFiles) {
+      const org = await readJSON<Organization>(bucket, file);
+      if (!org || !org.isActive) continue;
+      
+      items.push({
+        id: org.id,
+        name: org.name,
+        slug: org.slug,
+        memberCount: await countOrgMembers(bucket, org.id),
+        entityCount: await countOrgEntities(bucket, org.id),
+        createdAt: org.createdAt,
+        isActive: org.isActive
+      });
+    }
+  } else {
+    // Find all organizations where user is an admin
+    const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+    
+    for (const orgDir of orgDirs) {
+      const match = orgDir.match(/private\/orgs\/([^\/]+)\//);
+      if (!match) continue;
+      
+      const orgId = match[1];
+      
+      // Check if user is an admin in this org
+      const membership = await readJSON<OrganizationMembership>(
+        bucket,
+        getUserMembershipPath(orgId, userId)
+      );
+      
+      if (membership && membership.role === 'org_admin') {
+        const org = await readJSON<Organization>(bucket, getOrgProfilePath(orgId));
+        if (org && org.isActive) {
+          items.push({
+            id: org.id,
+            name: org.name,
+            slug: org.slug,
+            memberCount: await countOrgMembers(bucket, org.id),
+            entityCount: await countOrgEntities(bucket, org.id),
+            createdAt: org.createdAt,
+            isActive: org.isActive
+          });
+        }
+      }
+    }
+  }
+  
+  // Sort by name
+  items.sort((a, b) => a.name.localeCompare(b.name));
+  
+  console.log('[Orgs] Found', items.length, 'organizations where user is admin');
+  
+  return items;
 }

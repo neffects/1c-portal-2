@@ -67,8 +67,18 @@ export const updateUserProfileSchema = z.object({
   name: z.string().min(1).max(100).optional()
 });
 
+/**
+ * Add existing user to organization request schema (superadmin only)
+ * This allows adding users who already exist in the system to an organization
+ */
+export const addUserToOrgRequestSchema = z.object({
+  email: emailSchema,
+  role: orgRoleSchema
+});
+
 // Type exports
 export type InviteUserInput = z.infer<typeof inviteUserRequestSchema>;
 export type UpdateUserRoleInput = z.infer<typeof updateUserRoleRequestSchema>;
 export type UserPreferencesInput = z.infer<typeof userPreferencesSchema>;
 export type FlagEntityInput = z.infer<typeof flagEntityRequestSchema>;
+export type AddUserToOrgInput = z.infer<typeof addUserToOrgRequestSchema>;

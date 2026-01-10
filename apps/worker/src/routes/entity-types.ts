@@ -97,6 +97,9 @@ entityTypeRoutes.post('/', requireSuperadmin, async (c) => {
   
   console.log('[EntityTypes] Created entity type:', typeId);
   
+  // Auto-grant permissions to all existing organizations
+  await grantTypeToAllOrganizations(c.env.R2_BUCKET, typeId, userId);
+  
   return c.json({
     success: true,
     data: entityType
@@ -106,6 +109,11 @@ entityTypeRoutes.post('/', requireSuperadmin, async (c) => {
 /**
  * GET /
  * List all entity types (filtered by permissions for non-superadmins)
+ * 
+ * Query params:
+ * - permission: 'viewable' (default) or 'creatable'
+ *   - viewable: types the org can view (for browsing entities)
+ *   - creatable: types the org can create (for entity creation forms)
  */
 entityTypeRoutes.get('/', async (c) => {
   console.log('[EntityTypes] Listing entity types');
@@ -114,20 +122,30 @@ entityTypeRoutes.get('/', async (c) => {
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
   
+  console.log('[EntityTypes] User role:', userRole, 'Org:', userOrgId, 'Permission filter:', query.permission);
+  
   // Get all entity types
   const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`);
   const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
   
   let items: EntityTypeListItem[] = [];
   
-  // Load viewable types for non-superadmins
-  let viewableTypeIds: string[] | null = null;
+  // Load permitted types for non-superadmins based on permission filter
+  let allowedTypeIds: string[] | null = null;
   if (userRole !== 'superadmin' && userOrgId) {
     const permissions = await readJSON<EntityTypePermissions>(
       c.env.R2_BUCKET,
       getOrgPermissionsPath(userOrgId)
     );
-    viewableTypeIds = permissions?.viewable || [];
+    
+    // Filter by viewable or creatable based on query param
+    if (query.permission === 'creatable') {
+      allowedTypeIds = permissions?.creatable || [];
+      console.log('[EntityTypes] Filtering by creatable permissions:', allowedTypeIds);
+    } else {
+      allowedTypeIds = permissions?.viewable || [];
+      console.log('[EntityTypes] Filtering by viewable permissions:', allowedTypeIds);
+    }
   }
   
   for (const file of definitionFiles) {
@@ -138,7 +156,7 @@ entityTypeRoutes.get('/', async (c) => {
     if (!entityType.isActive && !query.includeInactive) continue;
     
     // Filter by permissions for non-superadmins
-    if (viewableTypeIds !== null && !viewableTypeIds.includes(entityType.id)) {
+    if (allowedTypeIds !== null && !allowedTypeIds.includes(entityType.id)) {
       continue;
     }
     
@@ -200,6 +218,7 @@ entityTypeRoutes.get('/:id', async (c) => {
   }
   
   // Check permissions for non-superadmins
+  // Allow access if type is viewable OR creatable (you can create entities of a type you can't view)
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
   
@@ -209,7 +228,10 @@ entityTypeRoutes.get('/:id', async (c) => {
       getOrgPermissionsPath(userOrgId)
     );
     
-    if (!permissions?.viewable.includes(typeId)) {
+    const canView = permissions?.viewable.includes(typeId) || false;
+    const canCreate = permissions?.creatable.includes(typeId) || false;
+    
+    if (!canView && !canCreate) {
       throw new NotFoundError('Entity Type', typeId);
     }
   }
@@ -273,6 +295,45 @@ entityTypeRoutes.patch('/:id', requireSuperadmin, async (c) => {
   return c.json({
     success: true,
     data: updatedType
+  });
+});
+
+/**
+ * POST /migrate-permissions
+ * Grant all existing entity types to all organizations (superadmin only)
+ * One-time migration endpoint
+ */
+entityTypeRoutes.post('/migrate-permissions', requireSuperadmin, async (c) => {
+  console.log('[EntityTypes] Running permissions migration...');
+  
+  const userId = c.get('userId')!;
+  
+  // Get all entity types
+  const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`);
+  const typeIds: string[] = [];
+  
+  for (const file of typeFiles) {
+    if (file.endsWith('.json')) {
+      const type = await readJSON<EntityType>(c.env.R2_BUCKET, file);
+      if (type && type.isActive) {
+        typeIds.push(type.id);
+      }
+    }
+  }
+  
+  console.log('[EntityTypes] Found', typeIds.length, 'active entity types');
+  
+  // Grant each type to all organizations
+  for (const typeId of typeIds) {
+    await grantTypeToAllOrganizations(c.env.R2_BUCKET, typeId, userId);
+  }
+  
+  return c.json({
+    success: true,
+    data: {
+      message: 'Permissions migrated successfully',
+      typesProcessed: typeIds.length
+    }
   });
 });
 
@@ -354,4 +415,59 @@ function countEntitiesOfType(files: string[], typeId: string): number {
   const latestFiles = files.filter(f => f.endsWith('/latest.json'));
   // In a real implementation, we'd check the entity's typeId
   return latestFiles.length;
+}
+
+/**
+ * Grant permissions for a new entity type to all existing organizations
+ */
+async function grantTypeToAllOrganizations(
+  bucket: R2Bucket,
+  typeId: string,
+  updatedBy: string
+): Promise<void> {
+  console.log('[EntityTypes] Granting type permissions to all organizations:', typeId);
+  
+  try {
+    // Find all organizations
+    const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+    const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
+    
+    for (const file of profileFiles) {
+      // Extract org ID from path: private/orgs/{orgId}/profile.json
+      const pathParts = file.split('/');
+      const orgId = pathParts[pathParts.length - 2];
+      
+      if (!orgId) continue;
+      
+      // Load existing permissions or create new
+      const permissionsPath = getOrgPermissionsPath(orgId);
+      let permissions = await readJSON<EntityTypePermissions>(bucket, permissionsPath);
+      
+      if (!permissions) {
+        permissions = {
+          organizationId: orgId,
+          viewable: [typeId],
+          creatable: [typeId],
+          updatedAt: new Date().toISOString(),
+          updatedBy
+        };
+      } else {
+        // Add type if not already present
+        if (!permissions.viewable.includes(typeId)) {
+          permissions.viewable.push(typeId);
+        }
+        if (!permissions.creatable.includes(typeId)) {
+          permissions.creatable.push(typeId);
+        }
+        permissions.updatedAt = new Date().toISOString();
+        permissions.updatedBy = updatedBy;
+      }
+      
+      await writeJSON(bucket, permissionsPath, permissions);
+      console.log('[EntityTypes] Granted permissions to org:', orgId);
+    }
+  } catch (error) {
+    console.error('[EntityTypes] Error granting permissions:', error);
+    // Don't fail the type creation if permissions fail
+  }
 }

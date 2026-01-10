@@ -10,14 +10,14 @@ import type { Env, Context } from '../types';
 
 const files = new Hono<{ Bindings: Env }>();
 
-// Require authentication for all file operations
-files.use('*', authMiddleware);
+// Auth middleware for upload and delete operations only
+// GET is public for serving images/files
 
 /**
  * Upload a file
  * POST /api/files/upload
  */
-files.post('/upload', async (c: Context) => {
+files.post('/upload', authMiddleware, async (c: Context) => {
   const user = c.get('user');
   if (!user) {
     return c.json({ success: false, error: { message: 'Unauthorized' } }, 401);
@@ -134,7 +134,7 @@ files.get('/:path{.+}', async (c: Context) => {
  * Delete a file
  * DELETE /api/files/:path+
  */
-files.delete('/:path{.+}', async (c: Context) => {
+files.delete('/:path{.+}', authMiddleware, async (c: Context) => {
   const user = c.get('user');
   if (!user) {
     return c.json({ success: false, error: { message: 'Unauthorized' } }, 401);

@@ -29,7 +29,7 @@ import {
 } from '../lib/r2';
 import { createUserId, createInvitationToken } from '../lib/id';
 import { sendInvitationEmail } from '../lib/email';
-import { requireOrgAdmin, requireOrgMembership } from '../middleware/auth';
+import { requireOrgAdmin, requireOrgMembership, requireSuperadmin } from '../middleware/auth';
 import { NotFoundError, ConflictError, ForbiddenError, ValidationError } from '../middleware/error';
 import { R2_PATHS } from '@1cc/shared';
 import type { 
@@ -37,7 +37,118 @@ import type {
   EntityFlag, Organization, EntityStub 
 } from '@1cc/shared';
 
+// Type for users across the system
+interface SystemUser {
+  id: string;
+  email: string;
+  role: string;
+  organizationId: string | null;
+  organizationName?: string;
+  isSuperadmin?: boolean;
+}
+
 export const userRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+/**
+ * GET /all
+ * List all users across all organizations (superadmin only)
+ * Used for adding existing users to organizations
+ */
+userRoutes.get('/all', requireSuperadmin, async (c) => {
+  console.log('[Users] Listing all users across system');
+  
+  const users: SystemUser[] = [];
+  const seenEmails = new Set<string>();
+  
+  // Add superadmins from environment variable
+  if (c.env.SUPERADMIN_EMAILS) {
+    const superadminEmails = c.env.SUPERADMIN_EMAILS.split(',').map((e: string) => e.trim().toLowerCase());
+    for (const email of superadminEmails) {
+      if (email && !seenEmails.has(email)) {
+        seenEmails.add(email);
+        users.push({
+          id: `sa_${email.replace(/[^a-z0-9]/g, '_').substring(0, 20)}`,
+          email,
+          role: 'superadmin',
+          organizationId: null,
+          isSuperadmin: true
+        });
+      }
+    }
+  }
+  
+  // List all organizations and their users
+  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+  const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
+  
+  // Build org name lookup
+  const orgNames = new Map<string, string>();
+  for (const file of profileFiles) {
+    const org = await readJSON<Organization>(c.env.R2_BUCKET, file);
+    if (org) {
+      orgNames.set(org.id, org.name);
+    }
+  }
+  
+  // Get all users from all organizations
+  for (const file of profileFiles) {
+    const match = file.match(/private\/orgs\/([^\/]+)\/profile\.json/);
+    if (!match) continue;
+    
+    const orgId = match[1];
+    const orgName = orgNames.get(orgId);
+    
+    // List users in this org
+    const userFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+    
+    for (const userFile of userFiles) {
+      if (!userFile.endsWith('.json')) continue;
+      
+      const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, userFile);
+      if (membership && !seenEmails.has(membership.email.toLowerCase())) {
+        seenEmails.add(membership.email.toLowerCase());
+        users.push({
+          id: membership.userId,
+          email: membership.email,
+          role: membership.role,
+          organizationId: membership.organizationId,
+          organizationName: orgName
+        });
+      }
+    }
+  }
+  
+  // Also check pending users
+  const pendingFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}pending-users/`);
+  
+  for (const file of pendingFiles) {
+    if (!file.endsWith('.json')) continue;
+    
+    const pendingUser = await readJSON<{ id: string; email: string }>(c.env.R2_BUCKET, file);
+    if (pendingUser && !seenEmails.has(pendingUser.email.toLowerCase())) {
+      seenEmails.add(pendingUser.email.toLowerCase());
+      users.push({
+        id: pendingUser.id,
+        email: pendingUser.email,
+        role: 'pending',
+        organizationId: null
+      });
+    }
+  }
+  
+  // Sort by email
+  users.sort((a, b) => a.email.localeCompare(b.email));
+  
+  console.log('[Users] Found', users.length, 'total users in system');
+  
+  return c.json({
+    success: true,
+    data: {
+      items: users,
+      total: users.length
+    }
+  });
+});
 
 /**
  * GET /

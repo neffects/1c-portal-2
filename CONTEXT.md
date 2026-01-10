@@ -173,6 +173,34 @@ npm run build
 - 🔲 Production deployment
 
 ### Recently Completed
+- ✅ Simplified user management with email autocomplete (2026-01-10):
+  - Single "Add Member" form with email autocomplete for existing users
+  - As you type, suggestions show existing users (including superadmins)
+  - Selecting a suggestion auto-fills the email
+  - Existing users are added immediately; new users receive an invitation email
+  - Removed separate "Add Existing User" modal - integrated into single form
+  - Frontend now properly handles both cases:
+    - Existing user: Shows "X added to organization", refreshes members list instantly
+    - New user: Shows "Invitation sent to X"
+  - API: POST /api/organizations/:id/users/invite handles both cases automatically
+  - API: GET /api/users/all provides autocomplete suggestions
+- ✅ Invite flow now adds existing users directly (2026-01-10):
+  - POST /api/organizations/:id/users/invite now checks if user exists in system
+  - If user exists: creates membership record on R2 immediately (no invitation needed)
+  - If user doesn't exist: sends invitation email with magic link (existing behavior)
+  - Response includes `existingUser: true/false` to indicate which path was taken
+- ✅ Organization member management in superadmin (2026-01-10):
+  - Edit modal now has tabs: "Settings" and "Members"
+  - Members tab shows all organization users with their roles
+  - Invite new users with email and role selection (Admin or Member)
+  - Change existing user roles via dropdown
+  - Remove users with confirmation dialog
+  - Uses existing API endpoints: GET /api/users?orgId, POST /api/organizations/:id/users/invite, PATCH /api/users/:id/role, DELETE /api/users/:id
+- ✅ Organization edit functionality (2026-01-10):
+  - Edit button in OrgManager now opens edit modal with organization details
+  - Edit modal allows updating: name, slug, description, domain whitelist, self-signup setting
+  - Uses `PATCH /api/organizations/:id` endpoint for saving changes
+  - Full error handling and loading states
 - ✅ Organization creation wizard fully integrated (2026-01-10):
   - OrgManager now uses full OrgWizard component (replaces placeholder modal)
   - Multi-step wizard: Basic Info → Domains → Permissions → Admin → Review
@@ -197,6 +225,10 @@ npm run build
   - Fixed double sync calls on page load in SyncProvider (now uses ref to track initial sync)
   - Sync store now properly deduplicates initial sync vs auth-change sync
   - Fixed OrgWizard permissions step not showing entity types - now fetches from API instead of sync store manifest
+  - Fixed AdminDashboard not showing entity types for org admins:
+    - Dashboard now fetches from `/api/entity-types?permission=creatable` instead of sync store
+    - Added `permission` query param to entity-types API ('viewable' or 'creatable')
+    - Viewable = types org can view/browse, Creatable = types org can create entities for
 
 ## Notes
 

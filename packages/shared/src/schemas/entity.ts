@@ -38,7 +38,8 @@ export const entitySlugSchema = z
 export const createEntityRequestSchema = z.object({
   entityTypeId: entityIdSchema,
   data: z.record(z.unknown()),
-  visibility: visibilityScopeSchema.optional()
+  visibility: visibilityScopeSchema.optional(),
+  organizationId: entityIdSchema.optional()
 });
 
 /**

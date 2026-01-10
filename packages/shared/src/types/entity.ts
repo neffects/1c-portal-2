@@ -46,6 +46,12 @@ export interface Entity {
   createdBy: string;
   /** ID of user who last updated the entity */
   updatedBy: string;
+  /** Approval feedback from superadmin (rejection reason or approval notes) */
+  approvalFeedback?: string;
+  /** When approval action was taken (ISO 8601) */
+  approvalActionAt?: string;
+  /** ID of superadmin who took approval action */
+  approvalActionBy?: string;
 }
 
 /**

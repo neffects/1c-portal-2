@@ -130,6 +130,10 @@ export const updateEntityTypeRequestSchema = z.object({
 export const entityTypeQueryParamsSchema = z.object({
   search: z.string().max(100).optional(),
   includeInactive: z.coerce.boolean().default(false),
+  // Permission filter: 'viewable' (default) or 'creatable'
+  // - viewable: types the user's org can view (for browsing)
+  // - creatable: types the user's org can create (for entity creation forms)
+  permission: z.enum(['viewable', 'creatable']).default('viewable'),
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20)
 });

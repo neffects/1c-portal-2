@@ -20,17 +20,20 @@ import {
   entityVersionQuerySchema
 } from '@1cc/shared';
 import { 
-  readJSON, writeJSON, deleteFile, fileExists,
+  readJSON, writeJSON, deleteFile, fileExists, listFiles,
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath,
-  getEntityTypePath, getOrgPermissionsPath
+  getEntityTypePath, getOrgPermissionsPath, getUserMembershipPath,
+  getBundlePath, getManifestPath
 } from '../lib/r2';
+import { R2_PATHS } from '@1cc/shared';
 import { createEntityId, createSlug } from '../lib/id';
 import { requireOrgAdmin, requireSuperadmin } from '../middleware/auth';
 import { NotFoundError, ForbiddenError, ValidationError, AppError } from '../middleware/error';
 import { isValidTransition, getAllowedTransitions } from '@1cc/xstate-machines';
 import type { 
   Entity, EntityStub, EntityLatestPointer, EntityListItem,
-  EntityType, EntityTypePermissions, VisibilityScope, EntityStatus 
+  EntityType, EntityTypePermissions, VisibilityScope, EntityStatus,
+  OrganizationMembership, EntityBundle, BundleEntity, SiteManifest, ManifestEntityType
 } from '@1cc/shared';
 
 export const entityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -49,22 +52,44 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
     throw new ValidationError('Invalid entity data', { errors: result.error.errors });
   }
   
-  const { entityTypeId, data, visibility } = result.data;
+  const { entityTypeId, data, visibility, organizationId: requestedOrgId } = result.data;
   const userId = c.get('userId')!;
+  const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
   
-  if (!userOrgId) {
-    throw new ForbiddenError('You must belong to an organization to create entities');
+  // Determine which organization to use
+  let targetOrgId: string | null;
+  
+  if (requestedOrgId) {
+    // Verify user is an admin of the requested organization
+    if (userRole !== 'superadmin') {
+      // Check if user is an admin of the requested org
+      const membership = await readJSON<OrganizationMembership>(
+        c.env.R2_BUCKET,
+        getUserMembershipPath(requestedOrgId, userId)
+      );
+      
+      if (!membership || membership.role !== 'org_admin') {
+        throw new ForbiddenError('You are not an admin of the requested organization');
+      }
+    }
+    targetOrgId = requestedOrgId;
+  } else {
+    // Use user's default organization
+    if (!userOrgId) {
+      throw new ForbiddenError('You must belong to an organization to create entities');
+    }
+    targetOrgId = userOrgId;
   }
   
-  // Check if user can create this entity type
+  // Check if user can create this entity type for the target organization
   const permissions = await readJSON<EntityTypePermissions>(
     c.env.R2_BUCKET,
-    getOrgPermissionsPath(userOrgId)
+    getOrgPermissionsPath(targetOrgId)
   );
   
   if (!permissions?.creatable.includes(entityTypeId)) {
-    throw new ForbiddenError('Your organization cannot create entities of this type');
+    throw new ForbiddenError('This organization cannot create entities of this type');
   }
   
   // Get entity type definition
@@ -93,7 +118,7 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   const entity: Entity = {
     id: entityId,
     entityTypeId,
-    organizationId: userOrgId,
+    organizationId: targetOrgId,
     version: 1,
     status: 'draft',
     visibility: finalVisibility,
@@ -108,7 +133,7 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   // Write entity stub for ownership lookup
   const stub: EntityStub = {
     entityId,
-    organizationId: userOrgId,
+    organizationId: targetOrgId,
     entityTypeId,
     createdAt: now
   };
@@ -116,7 +141,8 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub);
   
   // Write entity version (stored in members location for drafts)
-  const versionPath = getEntityVersionPath('members', entityId, 1, userOrgId);
+  // Use targetOrgId (the entity's org) not userOrgId (the logged-in user's org)
+  const versionPath = getEntityVersionPath('members', entityId, 1, targetOrgId);
   await writeJSON(c.env.R2_BUCKET, versionPath, entity);
   
   // Write latest pointer
@@ -127,7 +153,7 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
     updatedAt: now
   };
   
-  const latestPath = getEntityLatestPath('members', entityId, userOrgId);
+  const latestPath = getEntityLatestPath('members', entityId, targetOrgId);
   await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
   
   console.log('[Entities] Created entity:', entityId);
@@ -149,24 +175,96 @@ entityRoutes.get('/', async (c) => {
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
   
-  // For now, return entities from user's organization
-  // In production, this would aggregate from multiple sources based on permissions
+  console.log('[Entities] Query params:', query, 'userRole:', userRole, 'userOrgId:', userOrgId);
   
   const items: EntityListItem[] = [];
   
-  // TODO: Implement proper entity listing with pagination
-  // This requires iterating through stubs and filtering
+  // Get all entity stubs to find entities
+  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
+  console.log('[Entities] Found', stubFiles.length, 'entity stubs');
   
-  console.log('[Entities] Query params:', query);
+  for (const stubFile of stubFiles) {
+    if (!stubFile.endsWith('.json')) continue;
+    
+    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile);
+    if (!stub) continue;
+    
+    // Filter by entity type if specified
+    if (query.typeId && stub.entityTypeId !== query.typeId) continue;
+    
+    // Filter by organization if specified
+    if (query.organizationId && stub.organizationId !== query.organizationId) continue;
+    
+    // Access control: non-superadmins can only see their own org's entities
+    // or published public/platform entities
+    const latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
+    const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    
+    if (!latestPointer) continue;
+    
+    // Filter by status if specified
+    if (query.status && latestPointer.status !== query.status) continue;
+    
+    // Filter by visibility if specified
+    if (query.visibility && latestPointer.visibility !== query.visibility) continue;
+    
+    // Access control for non-superadmins
+    if (userRole !== 'superadmin') {
+      const isOwnOrg = userOrgId === stub.organizationId;
+      const isPublished = latestPointer.status === 'published';
+      const isPublicOrPlatform = latestPointer.visibility === 'public' || latestPointer.visibility === 'authenticated';
+      
+      // Can only see: own org entities OR published public/platform entities
+      if (!isOwnOrg && !(isPublished && isPublicOrPlatform)) continue;
+    }
+    
+    // Get full entity for display data
+    const entityPath = getEntityVersionPath('members', stub.entityId, latestPointer.version, stub.organizationId);
+    const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
+    
+    if (!entity) continue;
+    
+    // Filter by search query
+    if (query.search) {
+      const searchLower = query.search.toLowerCase();
+      const name = (entity.data.name as string || '').toLowerCase();
+      const description = (entity.data.description as string || '').toLowerCase();
+      
+      if (!name.includes(searchLower) && !description.includes(searchLower)) continue;
+    }
+    
+    items.push({
+      id: entity.id,
+      entityTypeId: entity.entityTypeId,
+      slug: entity.slug,
+      status: entity.status,
+      visibility: entity.visibility,
+      data: {
+        name: entity.data.name as string || `Entity ${entity.id}`,
+        description: entity.data.description as string || undefined
+      },
+      version: entity.version,
+      updatedAt: entity.updatedAt
+    });
+  }
+  
+  // Sort by updatedAt descending
+  items.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  
+  // Pagination
+  const start = (query.page - 1) * query.pageSize;
+  const paginatedItems = items.slice(start, start + query.pageSize);
+  
+  console.log('[Entities] Returning', paginatedItems.length, 'of', items.length, 'entities');
   
   return c.json({
     success: true,
     data: {
-      items,
+      items: paginatedItems,
       total: items.length,
       page: query.page,
       pageSize: query.pageSize,
-      hasMore: false
+      hasMore: start + query.pageSize < items.length
     }
   });
 });
@@ -258,11 +356,18 @@ entityRoutes.get('/:id', async (c) => {
   // Determine which version to fetch
   const version = versionQuery.version || latestPointer.version;
   
-  // Determine storage location based on visibility
-  const visibility = latestPointer.visibility;
-  const versionPath = visibility === 'members' 
-    ? getEntityVersionPath('members', entityId, version, stub.organizationId)
-    : getEntityVersionPath(visibility, entityId, version);
+  // Determine storage location based on status and visibility
+  // Draft/pending entities are always stored in members (private) location
+  // Published entities are stored based on their visibility setting
+  let versionPath: string;
+  if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
+    // Drafts and pending entities are always in the org's private space
+    versionPath = getEntityVersionPath('members', entityId, version, stub.organizationId);
+  } else if (latestPointer.visibility === 'members') {
+    versionPath = getEntityVersionPath('members', entityId, version, stub.organizationId);
+  } else {
+    versionPath = getEntityVersionPath(latestPointer.visibility, entityId, version);
+  }
   
   const entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
   
@@ -474,7 +579,13 @@ entityRoutes.post('/:id/transition', async (c) => {
     version: newVersion,
     status: newStatus,
     updatedAt: now,
-    updatedBy: userId
+    updatedBy: userId,
+    // Store approval feedback for approve/reject actions
+    ...((['approve', 'reject'].includes(action)) && {
+      approvalFeedback: feedback || undefined,
+      approvalActionAt: now,
+      approvalActionBy: userId
+    })
   };
   
   // Determine storage location based on new status and visibility
@@ -507,6 +618,15 @@ entityRoutes.post('/:id/transition', async (c) => {
   }
   
   console.log('[Entities] Transitioned entity:', entityId, currentStatus, '->', newStatus);
+  
+  // Trigger bundle regeneration for published/unpublished entities
+  // This is async but we don't await it to avoid blocking the response
+  if (newStatus === 'published' || currentStatus === 'published') {
+    console.log('[Entities] Triggering bundle regeneration for type:', stub.entityTypeId);
+    regenerateTypeBundle(c.env.R2_BUCKET, stub.entityTypeId, targetVisibility, 
+      targetVisibility === 'members' ? stub.organizationId : undefined)
+      .catch(err => console.error('[Entities] Bundle regeneration failed:', err));
+  }
   
   return c.json({
     success: true,
@@ -623,4 +743,141 @@ function validateEntityData(data: Record<string, unknown>, entityType: EntityTyp
   if (errors.length > 0) {
     throw new ValidationError('Entity data validation failed', { fields: errors });
   }
+}
+
+/**
+ * Regenerate entity bundle for a specific type
+ * Called after entity status changes (publish/unpublish)
+ */
+async function regenerateTypeBundle(
+  bucket: R2Bucket,
+  typeId: string,
+  visibility: 'public' | 'authenticated' | 'members',
+  orgId?: string
+): Promise<void> {
+  console.log('[Entities] Regenerating bundle for type:', typeId, visibility, orgId || '');
+  
+  // Get entity type
+  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+  if (!entityType) {
+    console.error('[Entities] Entity type not found:', typeId);
+    return;
+  }
+  
+  // Determine entity path prefix based on visibility
+  let entityPrefix: string;
+  if (visibility === 'members' && orgId) {
+    entityPrefix = `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/`;
+  } else if (visibility === 'authenticated') {
+    entityPrefix = `${R2_PATHS.PLATFORM}entities/`;
+  } else {
+    entityPrefix = `${R2_PATHS.PUBLIC}entities/`;
+  }
+  
+  // List all entity directories
+  const entityFiles = await listFiles(bucket, entityPrefix);
+  const latestFiles = entityFiles.filter(f => f.endsWith('/latest.json'));
+  
+  const entities: BundleEntity[] = [];
+  
+  for (const latestFile of latestFiles) {
+    // Get entity ID from path
+    const entityIdMatch = latestFile.match(/entities\/([^\/]+)\/latest\.json/);
+    if (!entityIdMatch) continue;
+    
+    const entityId = entityIdMatch[1];
+    
+    // Read latest pointer
+    const latestPointer = await readJSON<EntityLatestPointer>(bucket, latestFile);
+    if (!latestPointer) continue;
+    
+    // Only include published entities in bundles
+    if (latestPointer.status !== 'published') continue;
+    
+    // Read entity version
+    const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
+    const entity = await readJSON<Entity>(bucket, versionPath);
+    
+    if (!entity || entity.entityTypeId !== typeId) continue;
+    
+    entities.push({
+      id: entity.id,
+      version: entity.version,
+      status: entity.status,
+      slug: entity.slug,
+      data: entity.data,
+      updatedAt: entity.updatedAt
+    });
+  }
+  
+  const bundle: EntityBundle = {
+    typeId,
+    typeName: entityType.pluralName,
+    generatedAt: new Date().toISOString(),
+    version: Date.now(),
+    entityCount: entities.length,
+    entities
+  };
+  
+  // Save bundle
+  const bundlePath = getBundlePath(visibility, typeId, orgId);
+  await writeJSON(bucket, bundlePath, bundle);
+  
+  console.log('[Entities] Generated bundle with', entities.length, 'entities');
+  
+  // Also update the manifest
+  await updateManifest(bucket, visibility, typeId, bundle, orgId);
+}
+
+/**
+ * Update the site manifest after bundle regeneration
+ */
+async function updateManifest(
+  bucket: R2Bucket,
+  visibility: 'public' | 'authenticated' | 'members',
+  typeId: string,
+  bundle: EntityBundle,
+  orgId?: string
+): Promise<void> {
+  console.log('[Entities] Updating manifest for:', visibility, orgId || '');
+  
+  const manifestPath = getManifestPath(visibility, orgId);
+  let manifest = await readJSON<SiteManifest>(bucket, manifestPath);
+  
+  if (!manifest) {
+    manifest = {
+      generatedAt: new Date().toISOString(),
+      version: Date.now(),
+      entityTypes: []
+    };
+  }
+  
+  // Get entity type for manifest entry
+  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+  if (!entityType) return;
+  
+  // Update or add the entity type entry
+  const existingIndex = manifest.entityTypes.findIndex(t => t.id === typeId);
+  const typeEntry: ManifestEntityType = {
+    id: entityType.id,
+    name: entityType.name,
+    pluralName: entityType.pluralName,
+    slug: entityType.slug,
+    description: entityType.description,
+    entityCount: bundle.entityCount,
+    bundleVersion: bundle.version,
+    lastUpdated: bundle.generatedAt
+  };
+  
+  if (existingIndex >= 0) {
+    manifest.entityTypes[existingIndex] = typeEntry;
+  } else {
+    manifest.entityTypes.push(typeEntry);
+  }
+  
+  manifest.generatedAt = new Date().toISOString();
+  manifest.version = Date.now();
+  
+  await writeJSON(bucket, manifestPath, manifest);
+  console.log('[Entities] Manifest updated');
 }

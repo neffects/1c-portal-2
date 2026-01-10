@@ -10,7 +10,8 @@ import { useAuth } from '../../stores/auth';
 import { useSync } from '../../stores/sync';
 import { api } from '../../lib/api';
 import { FieldRenderer } from '../../components/fields';
-import type { Entity, EntityType, FieldDefinition, VisibilityScope } from '@1cc/shared';
+import { slugify } from '../../lib/utils';
+import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, VisibilityScope, OrganizationListItem } from '@1cc/shared';
 
 interface EntityEditorProps {
   id?: string;
@@ -23,6 +24,8 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
   
   const [entity, setEntity] = useState<Entity | null>(null);
   const [entityType, setEntityType] = useState<EntityType | null>(null);
+  const [creatableTypes, setCreatableTypes] = useState<EntityTypeListItem[]>([]);
+  const [loadingTypes, setLoadingTypes] = useState(false);
   const [formData, setFormData] = useState<Record<string, unknown>>({});
   const [visibility, setVisibility] = useState<VisibilityScope>('private');
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -31,6 +34,10 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
+  const [manuallyEditedFields, setManuallyEditedFields] = useState<Set<string>>(new Set());
+  const [adminOrganizations, setAdminOrganizations] = useState<OrganizationListItem[]>([]);
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(organizationId.value);
+  const [loadingOrgs, setLoadingOrgs] = useState(false);
   
   const isNew = !id;
   
@@ -41,24 +48,123 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
     }
   }, [authLoading.value, isAuthenticated.value, isOrgAdmin.value]);
   
-  // Load entity type
+  // Load creatable entity types for new entity type selector
   useEffect(() => {
-    const types = entityTypes.value;
-    
-    if (isNew && typeId) {
-      const type = types.find(t => t.id === typeId);
-      if (type) {
-        setEntityType(type as unknown as EntityType);
-        setVisibility(type.defaultVisibility as VisibilityScope);
-        initializeFormData(type as unknown as EntityType);
-      }
-    } else if (entity) {
-      const type = types.find(t => t.id === entity.entityTypeId);
-      if (type) {
-        setEntityType(type as unknown as EntityType);
-      }
+    if (isNew && !typeId && isOrgAdmin.value) {
+      loadCreatableTypes();
     }
-  }, [entityTypes.value, typeId, entity, isNew]);
+  }, [isNew, typeId, isOrgAdmin.value]);
+  
+  // Load organizations where user is an admin when creating new entity
+  useEffect(() => {
+    if (isNew && isOrgAdmin.value) {
+      loadAdminOrganizations();
+    }
+  }, [isNew, isOrgAdmin.value]);
+  
+  // Update selected org when default organization changes
+  useEffect(() => {
+    if (isNew && organizationId.value && !selectedOrgId) {
+      setSelectedOrgId(organizationId.value);
+    }
+  }, [isNew, organizationId.value]);
+  
+  // Load full entity type definition when typeId is selected or entity is loaded
+  useEffect(() => {
+    if (isNew && typeId && !entityType) {
+      // Loading type for new entity - initialize form data
+      loadEntityTypeDefinition(typeId, true);
+    } else if (entity && !entityType) {
+      // Loading type for existing entity - don't initialize form data (already loaded from entity)
+      loadEntityTypeDefinition(entity.entityTypeId, false);
+    }
+  }, [typeId, entity, isNew, entityType]);
+  
+  async function loadCreatableTypes() {
+    setLoadingTypes(true);
+    console.log('[EntityEditor] Loading creatable entity types...');
+    
+    try {
+      const response = await api.get('/api/entity-types?permission=creatable') as {
+        success: boolean;
+        data?: { items: EntityTypeListItem[] };
+      };
+      
+      if (response.success && response.data) {
+        const activeTypes = response.data.items.filter(t => t.isActive !== false);
+        setCreatableTypes(activeTypes);
+        console.log('[EntityEditor] Loaded', activeTypes.length, 'creatable entity types');
+      } else {
+        console.error('[EntityEditor] Failed to load creatable types:', response);
+        setCreatableTypes([]);
+      }
+    } catch (err) {
+      console.error('[EntityEditor] Error loading creatable types:', err);
+      setCreatableTypes([]);
+    } finally {
+      setLoadingTypes(false);
+    }
+  }
+  
+  async function loadAdminOrganizations() {
+    setLoadingOrgs(true);
+    console.log('[EntityEditor] Loading organizations where user is admin...');
+    
+    try {
+      const response = await api.get('/api/organizations?adminOnly=true') as {
+        success: boolean;
+        data?: { items: OrganizationListItem[] };
+      };
+      
+      if (response.success && response.data) {
+        setAdminOrganizations(response.data.items);
+        // Set default to first org or current org
+        if (response.data.items.length > 0 && !selectedOrgId) {
+          const defaultOrg = response.data.items.find(o => o.id === organizationId.value) || response.data.items[0];
+          setSelectedOrgId(defaultOrg.id);
+        }
+        console.log('[EntityEditor] Loaded', response.data.items.length, 'admin organizations');
+      } else {
+        console.error('[EntityEditor] Failed to load organizations:', response);
+        setAdminOrganizations([]);
+      }
+    } catch (err) {
+      console.error('[EntityEditor] Error loading organizations:', err);
+      setAdminOrganizations([]);
+    } finally {
+      setLoadingOrgs(false);
+    }
+  }
+  
+  async function loadEntityTypeDefinition(typeId: string, initializeForm: boolean = true) {
+    console.log('[EntityEditor] Loading entity type definition:', typeId, 'initializeForm:', initializeForm);
+    
+    try {
+      const response = await api.get(`/api/entity-types/${typeId}`) as {
+        success: boolean;
+        data?: EntityType;
+      };
+      
+      if (response.success && response.data) {
+        const type = response.data;
+        setEntityType(type);
+        if (initializeForm) {
+          // Only initialize form data for new entities
+          setVisibility(type.defaultVisibility as VisibilityScope);
+          initializeFormData(type);
+          // Reset manually edited fields for new entity
+          setManuallyEditedFields(new Set());
+        }
+        console.log('[EntityEditor] Loaded entity type definition:', type.name);
+      } else {
+        console.error('[EntityEditor] Failed to load entity type:', response);
+        setSaveError('Failed to load entity type definition');
+      }
+    } catch (err) {
+      console.error('[EntityEditor] Error loading entity type:', err);
+      setSaveError(err instanceof Error ? err.message : 'Failed to load entity type definition');
+    }
+  }
   
   // Load existing entity
   useEffect(() => {
@@ -110,6 +216,33 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
   function handleFieldChange(fieldId: string, value: unknown) {
     setFormData(prev => ({ ...prev, [fieldId]: value }));
     setIsDirty(true);
+    
+    // Mark field as manually edited
+    setManuallyEditedFields(prev => new Set(prev).add(fieldId));
+    
+    // Auto-populate slug from name field when creating new entity
+    if (isNew && entityType && typeof value === 'string') {
+      const field = entityType.fields.find(f => f.id === fieldId);
+      
+      // Check if this is a name field (by id or display name)
+      const isNameField = fieldId.toLowerCase().includes('name') || 
+                         field?.name.toLowerCase().includes('name');
+      
+      if (isNameField) {
+        // Find the slug field
+        const slugField = entityType.fields.find(f => 
+          f.id.toLowerCase().includes('slug') || 
+          f.name.toLowerCase().includes('slug')
+        );
+        
+        // Auto-populate slug if it exists and hasn't been manually edited
+        if (slugField && !manuallyEditedFields.has(slugField.id)) {
+          const slugValue = slugify(value);
+          setFormData(prev => ({ ...prev, [slugField.id]: slugValue }));
+          console.log('[EntityEditor] Auto-generated slug from name:', slugValue);
+        }
+      }
+    }
     
     // Clear error for this field
     if (errors[fieldId]) {
@@ -184,10 +317,17 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
       let response;
       
       if (isNew) {
-        response = await api.post<Entity>('/api/entities', {
+        const createPayload: Record<string, unknown> = {
           entityTypeId: entityType.id,
           ...payload
-        });
+        };
+        
+        // Include organizationId if different from default
+        if (selectedOrgId && selectedOrgId !== organizationId.value) {
+          createPayload.organizationId = selectedOrgId;
+        }
+        
+        response = await api.post<Entity>('/api/entities', createPayload);
       } else {
         response = await api.patch<Entity>(`/api/entities/${id}`, payload);
       }
@@ -196,7 +336,7 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
         setIsDirty(false);
         
         if (isNew) {
-          route(`/admin/entities/${response.data.id}`);
+          route(`/admin/entities/${response.data.id}/edit`);
         } else {
           setEntity(response.data);
         }
@@ -241,8 +381,6 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
   
   // Render type selector for new entities
   if (isNew && !entityType) {
-    const types = entityTypes.value;
-    
     return (
       <div class="container-default py-12">
         <div class="mb-8">
@@ -250,32 +388,40 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
           <p class="body-text">Select an entity type to get started.</p>
         </div>
         
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {types.map(type => (
-            <a
-              key={type.id}
-              href={`/admin/entities/new?type=${type.id}`}
-              class="card p-6 hover:ring-2 hover:ring-primary-500 transition-all"
-            >
-              <h3 class="heading-4 mb-2">{type.name}</h3>
-              {type.description && (
-                <p class="body-text text-sm">{type.description}</p>
-              )}
-              <div class="mt-4 text-sm text-surface-500">
-                {type.fields?.length || 0} fields
-              </div>
-            </a>
-          ))}
-        </div>
-        
-        {types.length === 0 && (
-          <div class="text-center py-16">
-            <span class="i-lucide-layers text-5xl text-surface-300 dark:text-surface-600 mb-4"></span>
-            <h3 class="heading-3 mb-2">No Entity Types Available</h3>
-            <p class="body-text">
-              Contact a superadmin to set up entity types for your organization.
-            </p>
+        {loadingTypes ? (
+          <div class="flex items-center justify-center py-16">
+            <span class="i-lucide-loader-2 animate-spin text-3xl text-primary-500"></span>
           </div>
+        ) : (
+          <>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {creatableTypes.map(type => (
+                <a
+                  key={type.id}
+                  href={`/admin/entities/new?type=${type.id}`}
+                  class="card p-6 hover:ring-2 hover:ring-primary-500 transition-all"
+                >
+                  <h3 class="heading-4 mb-2">{type.name}</h3>
+                  {type.description && (
+                    <p class="body-text text-sm">{type.description}</p>
+                  )}
+                  <div class="mt-4 text-sm text-surface-500">
+                    {type.fieldCount} fields
+                  </div>
+                </a>
+              ))}
+            </div>
+            
+            {creatableTypes.length === 0 && (
+              <div class="text-center py-16">
+                <span class="i-lucide-layers text-5xl text-surface-300 dark:text-surface-600 mb-4"></span>
+                <h3 class="heading-3 mb-2">No Entity Types Available</h3>
+                <p class="body-text">
+                  Contact a superadmin to set up entity types for your organization.
+                </p>
+              </div>
+            )}
+          </>
         )}
       </div>
     );
@@ -406,62 +552,92 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
         
         {/* Sidebar */}
         <div class="lg:col-span-1 space-y-6">
-          {/* Visibility */}
-          <div class="card p-6">
-            <h3 class="heading-4 mb-4">Visibility</h3>
-            
-            <div class="space-y-3">
-              <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
-                <input
-                  type="radio"
-                  name="visibility"
-                  value="private"
-                  checked={visibility === 'private'}
-                  onChange={() => setVisibility('private')}
-                  class="mt-1"
-                  disabled={entity?.status !== 'draft' && !!entity}
-                />
-                <div>
-                  <span class="font-medium text-surface-900 dark:text-surface-100">Private</span>
-                  <p class="text-sm text-surface-500">Only visible to your organization</p>
+          {/* Organization selector - only show when creating new entity */}
+          {isNew && adminOrganizations.length > 1 && (
+            <div class="card p-6">
+              <h3 class="heading-4 mb-4">Organization</h3>
+              {loadingOrgs ? (
+                <div class="flex items-center justify-center py-4">
+                  <span class="i-lucide-loader-2 animate-spin text-xl text-primary-500"></span>
                 </div>
-              </label>
+              ) : (
+                <select
+                  value={selectedOrgId || ''}
+                  onChange={(e) => setSelectedOrgId((e.target as HTMLSelectElement).value)}
+                  class="input w-full"
+                  disabled={saving}
+                >
+                  {adminOrganizations.map(org => (
+                    <option key={org.id} value={org.id}>
+                      {org.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <p class="text-sm text-surface-500 mt-2">
+                Select the organization this entity belongs to
+              </p>
+            </div>
+          )}
+          
+          {/* Visibility - only show when editing existing entity */}
+          {entity && (
+            <div class="card p-6">
+              <h3 class="heading-4 mb-4">Visibility</h3>
               
-              <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
-                <input
-                  type="radio"
-                  name="visibility"
-                  value="platform"
-                  checked={visibility === 'platform'}
-                  onChange={() => setVisibility('platform')}
-                  class="mt-1"
-                  disabled={entity?.status !== 'draft' && !!entity}
-                />
-                <div>
-                  <span class="font-medium text-surface-900 dark:text-surface-100">Platform</span>
-                  <p class="text-sm text-surface-500">Visible to all authenticated users</p>
-                </div>
-              </label>
-              
-              {entityType?.allowPublic && (
+              <div class="space-y-3">
                 <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
                   <input
                     type="radio"
                     name="visibility"
-                    value="public"
-                    checked={visibility === 'public'}
-                    onChange={() => setVisibility('public')}
+                    value="private"
+                    checked={visibility === 'private'}
+                    onChange={() => setVisibility('private')}
                     class="mt-1"
                     disabled={entity?.status !== 'draft' && !!entity}
                   />
                   <div>
-                    <span class="font-medium text-surface-900 dark:text-surface-100">Public</span>
-                    <p class="text-sm text-surface-500">Visible to everyone, including anonymous users</p>
+                    <span class="font-medium text-surface-900 dark:text-surface-100">Private</span>
+                    <p class="text-sm text-surface-500">Only visible to your organization</p>
                   </div>
                 </label>
-              )}
+                
+                <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
+                  <input
+                    type="radio"
+                    name="visibility"
+                    value="platform"
+                    checked={visibility === 'platform'}
+                    onChange={() => setVisibility('platform')}
+                    class="mt-1"
+                    disabled={entity?.status !== 'draft' && !!entity}
+                  />
+                  <div>
+                    <span class="font-medium text-surface-900 dark:text-surface-100">Platform</span>
+                    <p class="text-sm text-surface-500">Visible to all authenticated users</p>
+                  </div>
+                </label>
+                
+                {entityType?.allowPublic && (
+                  <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
+                    <input
+                      type="radio"
+                      name="visibility"
+                      value="public"
+                      checked={visibility === 'public'}
+                      onChange={() => setVisibility('public')}
+                      class="mt-1"
+                      disabled={entity?.status !== 'draft' && !!entity}
+                    />
+                    <div>
+                      <span class="font-medium text-surface-900 dark:text-surface-100">Public</span>
+                      <p class="text-sm text-surface-500">Visible to everyone, including anonymous users</p>
+                    </div>
+                  </label>
+                )}
+              </div>
             </div>
-          </div>
+          )}
           
           {/* Metadata */}
           {entity && (

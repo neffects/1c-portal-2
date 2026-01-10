@@ -44,13 +44,14 @@ export function AdminDashboard() {
     }
   }, [isOrgAdmin.value]);
   
-  // Fetch entity types that this org can create
+  // Fetch entity types that this org can CREATE (not just view)
   async function loadEntityTypes() {
     setLoadingTypes(true);
-    console.log('[AdminDashboard] Fetching entity types from API...');
+    console.log('[AdminDashboard] Fetching creatable entity types from API...');
     
     try {
-      const response = await api.get('/api/entity-types') as { 
+      // Use permission=creatable to get types the org can create (not just view)
+      const response = await api.get('/api/entity-types?permission=creatable') as { 
         success: boolean; 
         data?: { items: EntityTypeListItem[] } 
       };
@@ -59,7 +60,7 @@ export function AdminDashboard() {
         // Only show active entity types
         const activeTypes = response.data.items.filter(t => t.isActive !== false);
         setEntityTypes(activeTypes);
-        console.log('[AdminDashboard] Loaded', activeTypes.length, 'entity types for org');
+        console.log('[AdminDashboard] Loaded', activeTypes.length, 'creatable entity types for org');
       } else {
         console.error('[AdminDashboard] Failed to load entity types:', response);
       }
@@ -138,7 +139,17 @@ export function AdminDashboard() {
       <div class="mb-12">
         <h2 class="heading-3 mb-4">Create New Entity</h2>
         
-        {types.length > 0 ? (
+        {loadingTypes ? (
+          // Loading skeleton while fetching entity types
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} class="card p-4 flex items-center gap-3 animate-pulse">
+                <div class="w-5 h-5 bg-surface-200 dark:bg-surface-700 rounded"></div>
+                <div class="h-5 w-24 bg-surface-200 dark:bg-surface-700 rounded"></div>
+              </div>
+            ))}
+          </div>
+        ) : types.length > 0 ? (
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {types.map(type => (
               <a
@@ -155,7 +166,8 @@ export function AdminDashboard() {
           </div>
         ) : (
           <div class="card p-6 text-center">
-            <p class="body-text">No entity types available. Contact your administrator.</p>
+            <span class="i-lucide-alert-circle text-3xl text-surface-400 mb-3 block"></span>
+            <p class="body-text">No entity types available. Contact your administrator to grant permissions.</p>
           </div>
         )}
       </div>

@@ -29,6 +29,7 @@ import { SuperadminDashboard } from './pages/superadmin/Dashboard';
 import { TypeManager } from './pages/superadmin/TypeManager';
 import { TypeBuilder } from './pages/superadmin/TypeBuilder';
 import { OrgManager } from './pages/superadmin/OrgManager';
+import { OrgWizard } from './pages/superadmin/OrgWizard';
 import { ApprovalQueue } from './pages/superadmin/ApprovalQueue';
 
 // Auth and state
@@ -78,6 +79,7 @@ export function App() {
             <Route path="/super/types/new" component={TypeBuilder} />
             <Route path="/super/types/:id/edit" component={TypeBuilder} />
             <Route path="/super/orgs" component={OrgManager} />
+            <Route path="/super/orgs/new" component={OrgWizard} />
             <Route path="/super/approvals" component={ApprovalQueue} />
             
             {/* 404 fallback */}
