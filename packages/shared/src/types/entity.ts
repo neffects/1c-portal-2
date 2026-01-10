@@ -122,6 +122,7 @@ export interface EntityTransitionRequest {
 export interface EntityListItem {
   id: string;
   entityTypeId: string;
+  organizationId: string;
   slug: string;
   status: EntityStatus;
   visibility: VisibilityScope;

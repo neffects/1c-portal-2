@@ -8,12 +8,13 @@ import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
-import type { EntityListItem } from '@1cc/shared';
+import type { EntityListItem, OrganizationListItem } from '@1cc/shared';
 
 export function ApprovalQueue() {
   const { isAuthenticated, isSuperadmin, loading: authLoading } = useAuth();
   
   const [pendingEntities, setPendingEntities] = useState<EntityListItem[]>([]);
+  const [organizations, setOrganizations] = useState<Map<string, OrganizationListItem>>(new Map());
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
   
@@ -33,11 +34,25 @@ export function ApprovalQueue() {
   
   async function loadPending() {
     setLoading(true);
-    const response = await api.get('/api/entities?status=pending') as { success: boolean; data?: { items: EntityListItem[] } };
     
-    if (response.success && response.data) {
-      setPendingEntities(response.data.items);
+    // Fetch pending entities
+    const entitiesResponse = await api.get('/api/entities?status=pending') as { success: boolean; data?: { items: EntityListItem[] } };
+    
+    if (entitiesResponse.success && entitiesResponse.data) {
+      setPendingEntities(entitiesResponse.data.items);
+      
+      // Fetch organizations for the entities
+      const orgsResponse = await api.get('/api/organizations') as { success: boolean; data?: { items: OrganizationListItem[] } };
+      
+      if (orgsResponse.success && orgsResponse.data) {
+        const orgMap = new Map<string, OrganizationListItem>();
+        orgsResponse.data.items.forEach(org => {
+          orgMap.set(org.id, org);
+        });
+        setOrganizations(orgMap);
+      }
     }
+    
     setLoading(false);
   }
   
@@ -110,56 +125,63 @@ export function ApprovalQueue() {
         </div>
       ) : pendingEntities.length > 0 ? (
         <div class="space-y-4">
-          {pendingEntities.map(entity => (
-            <div key={entity.id} class="card p-6">
-              <div class="flex items-start justify-between gap-4">
-                <div class="flex-1">
-                  <h3 class="font-semibold text-lg text-surface-900 dark:text-surface-100 mb-1">
-                    {(entity.data.name as string) || `Entity ${entity.id}`}
-                  </h3>
-                  
-                  {entity.data.description && (
-                    <p class="text-surface-600 dark:text-surface-400 mb-3 line-clamp-2">
-                      {entity.data.description as string}
-                    </p>
-                  )}
-                  
-                  <div class="flex items-center gap-4 text-sm text-surface-500">
-                    <span>ID: {entity.id}</span>
-                    <span>·</span>
-                    <span>v{entity.version}</span>
-                    <span>·</span>
-                    <span>Updated {new Date(entity.updatedAt).toLocaleDateString()}</span>
+          {pendingEntities.map(entity => {
+            const org = organizations.get(entity.organizationId);
+            return (
+              <div key={entity.id} class="card p-6">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="flex-1">
+                    <h3 class="font-semibold text-lg text-surface-900 dark:text-surface-100 mb-1">
+                      {(entity.data.name as string) || `Entity ${entity.id}`}
+                    </h3>
+                    
+                    {entity.data.description && (
+                      <p class="text-surface-600 dark:text-surface-400 mb-3 line-clamp-2">
+                        {entity.data.description as string}
+                      </p>
+                    )}
+                    
+                    <div class="flex items-center gap-4 text-sm text-surface-500">
+                      {org && (
+                        <>
+                          <span class="font-medium text-surface-700 dark:text-surface-300">{org.name}</span>
+                          <span>·</span>
+                        </>
+                      )}
+                      <span>v{entity.version}</span>
+                      <span>·</span>
+                      <span>Updated {new Date(entity.updatedAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                
+                  <div class="flex items-center gap-3">
+                    {processingId === entity.id ? (
+                      <span class="i-lucide-loader-2 animate-spin text-xl text-surface-400"></span>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleReject(entity.id)}
+                          class="btn-ghost text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+                          disabled={processingId !== null}
+                        >
+                          <span class="i-lucide-x mr-1"></span>
+                          Reject
+                        </button>
+                        <button
+                          onClick={() => handleApprove(entity.id)}
+                          class="btn-primary bg-green-600 hover:bg-green-700"
+                          disabled={processingId !== null}
+                        >
+                          <span class="i-lucide-check mr-1"></span>
+                          Approve
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
-                
-                <div class="flex items-center gap-3">
-                  {processingId === entity.id ? (
-                    <span class="i-lucide-loader-2 animate-spin text-xl text-surface-400"></span>
-                  ) : (
-                    <>
-                      <button
-                        onClick={() => handleReject(entity.id)}
-                        class="btn-ghost text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
-                        disabled={processingId !== null}
-                      >
-                        <span class="i-lucide-x mr-1"></span>
-                        Reject
-                      </button>
-                      <button
-                        onClick={() => handleApprove(entity.id)}
-                        class="btn-primary bg-green-600 hover:bg-green-700"
-                        disabled={processingId !== null}
-                      >
-                        <span class="i-lucide-check mr-1"></span>
-                        Approve
-                      </button>
-                    </>
-                  )}
-                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div class="card p-8 text-center">

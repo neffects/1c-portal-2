@@ -236,6 +236,7 @@ entityRoutes.get('/', async (c) => {
     items.push({
       id: entity.id,
       entityTypeId: entity.entityTypeId,
+      organizationId: entity.organizationId,
       slug: entity.slug,
       status: entity.status,
       visibility: entity.visibility,
