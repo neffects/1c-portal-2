@@ -13,6 +13,7 @@ import { Layout } from './components/Layout';
 // Pages
 import { HomePage } from './pages/Home';
 import { LoginPage } from './pages/Login';
+import { AuthCallbackPage } from './pages/AuthCallback';
 import { BrowsePage } from './pages/Browse';
 import { EntityDetailPage } from './pages/EntityDetail';
 import { AlertsPage } from './pages/Alerts';
@@ -57,6 +58,7 @@ export function App() {
             {/* Public routes */}
             <Route path="/" component={HomePage} />
             <Route path="/login" component={LoginPage} />
+            <Route path="/auth/callback" component={AuthCallbackPage} />
             <Route path="/browse/:typeSlug" component={BrowsePage} />
             <Route path="/browse/:typeSlug/:entitySlug" component={EntityDetailPage} />
             

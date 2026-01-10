@@ -103,15 +103,25 @@ authRoutes.post('/magic-link', async (c) => {
 
 /**
  * GET /auth/verify
- * Verify magic link token and return JWT
+ * Verify magic link token and redirect to frontend with JWT
  */
 authRoutes.get('/verify', async (c) => {
   console.log('[Auth] Verifying magic link');
   
   const token = c.req.query('token');
+  const format = c.req.query('format'); // Allow 'json' for API testing
+  const frontendUrl = c.env.FRONTEND_URL || 'http://localhost:5173';
+  
+  // Helper to redirect to frontend with error
+  const redirectWithError = (error: string) => {
+    if (format === 'json') {
+      return c.json({ success: false, error: { code: 'AUTH_ERROR', message: error } }, 401);
+    }
+    return c.redirect(`${frontendUrl}/login?error=${encodeURIComponent(error)}`);
+  };
   
   if (!token) {
-    throw new ValidationError('Token is required');
+    return redirectWithError('No token provided');
   }
   
   // Read token from R2
@@ -121,18 +131,18 @@ authRoutes.get('/verify', async (c) => {
   );
   
   if (!tokenData) {
-    throw new AppError('INVALID_TOKEN', 'Invalid or expired magic link', 401);
+    return redirectWithError('Invalid or expired magic link');
   }
   
   // Check if already used
   if (tokenData.used) {
-    throw new AppError('TOKEN_USED', 'This magic link has already been used', 401);
+    return redirectWithError('This magic link has already been used');
   }
   
   // Check if expired
   if (new Date(tokenData.expiresAt) < new Date()) {
     await deleteFile(c.env.R2_BUCKET, getMagicLinkPath(token));
-    throw new AppError('TOKEN_EXPIRED', 'This magic link has expired', 401);
+    return redirectWithError('This magic link has expired');
   }
   
   // Mark token as used
@@ -172,25 +182,44 @@ authRoutes.get('/verify', async (c) => {
     organizationName = org?.name;
   }
   
-  const response: AuthResponse = {
-    success: true,
-    token: jwt,
-    user: {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      organizationId: user.organizationId,
-      organizationName
-    },
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-  };
-  
   // Clean up used token
   await deleteFile(c.env.R2_BUCKET, getMagicLinkPath(token));
   
   console.log('[Auth] User authenticated:', user.id, isNewUser ? '(new)' : '(existing)');
   
-  return c.json(response);
+  // Return JSON if requested (for API testing)
+  if (format === 'json') {
+    const response: AuthResponse = {
+      success: true,
+      token: jwt,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        organizationId: user.organizationId,
+        organizationName
+      },
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+    };
+    return c.json(response);
+  }
+  
+  // Redirect to frontend callback with token as query param
+  // The frontend will extract this and store it securely
+  const callbackUrl = new URL(`${frontendUrl}/auth/callback`);
+  callbackUrl.searchParams.set('token', jwt);
+  callbackUrl.searchParams.set('userId', user.id);
+  callbackUrl.searchParams.set('email', user.email);
+  callbackUrl.searchParams.set('role', user.role);
+  if (user.organizationId) {
+    callbackUrl.searchParams.set('orgId', user.organizationId);
+  }
+  if (organizationName) {
+    callbackUrl.searchParams.set('orgName', organizationName);
+  }
+  callbackUrl.searchParams.set('expiresAt', new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString());
+  
+  return c.redirect(callbackUrl.toString());
 });
 
 /**

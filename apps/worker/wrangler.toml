@@ -19,6 +19,7 @@ preview_bucket_name = "1cc-portal-data-preview"
 [vars]
 ENVIRONMENT = "development"
 API_BASE_URL = "http://localhost:8787"
+FRONTEND_URL = "http://localhost:5173"
 
 # Production environment
 [env.production]

@@ -139,6 +139,23 @@ async function verifyMagicLink(token: string): Promise<{ success: boolean; error
 }
 
 /**
+ * Login with token and user (called from auth callback)
+ */
+function login(token: string, userData: Session['user'], expiresAt?: string) {
+  console.log('[Auth] Logging in user:', userData.id);
+  
+  const newSession: Session = {
+    token,
+    user: userData,
+    expiresAt: expiresAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  };
+  
+  session.value = newSession;
+  localStorage.setItem('session', JSON.stringify(newSession));
+  console.log('[Auth] Login successful:', userData.role);
+}
+
+/**
  * Logout and clear session
  */
 async function logout() {
@@ -191,6 +208,7 @@ const authValue = {
   organizationId,
   isSuperadmin,
   isOrgAdmin,
+  login,
   requestMagicLink,
   verifyMagicLink,
   logout,

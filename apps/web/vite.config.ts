@@ -30,7 +30,8 @@ export default defineConfig({
         target: 'http://localhost:8787',
         changeOrigin: true
       },
-      '/auth': {
+      // Only proxy specific auth API endpoints, not /auth/callback (frontend route)
+      '^/auth/(?!callback)': {
         target: 'http://localhost:8787',
         changeOrigin: true
       },

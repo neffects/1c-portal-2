@@ -14,6 +14,7 @@ export interface Env {
   // Environment variables
   ENVIRONMENT: string;
   API_BASE_URL: string;
+  FRONTEND_URL: string;
   
   // Secrets (set via wrangler secret)
   JWT_SECRET: string;
