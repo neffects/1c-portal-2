@@ -349,6 +349,10 @@ The project includes automated security testing with:
     - Dashboard now fetches from `/api/entity-types?permission=creatable` instead of sync store
     - Added `permission` query param to entity-types API ('viewable' or 'creatable')
     - Viewable = types org can view/browse, Creatable = types org can create entities for
+  - Fixed SuperadminDashboard entity type count showing zero (NEF-5):
+    - Dashboard now fetches entity types directly from `/api/entity-types` API
+    - Previously relied on sync store manifest which only includes types with published entities
+    - Superadmins now see accurate count of all defined entity types regardless of entity count
 
 ## Notes
 
