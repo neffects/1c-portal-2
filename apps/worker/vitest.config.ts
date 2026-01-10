@@ -8,11 +8,18 @@ export default defineConfig({
       modules: true,
       r2Buckets: ['R2_BUCKET']
     },
-    include: ['src/**/*.test.ts'],
+    include: [
+      'src/**/*.test.ts',
+      'security/tests/**/*.test.ts'
+    ],
     coverage: {
       reporter: ['text', 'json', 'html'],
       include: ['src/**/*.ts'],
-      exclude: ['src/**/*.test.ts', 'src/types.ts']
+      exclude: [
+        'src/**/*.test.ts',
+        'src/types.ts',
+        'security/tests/**/*.test.ts'
+      ]
     }
   }
 });
