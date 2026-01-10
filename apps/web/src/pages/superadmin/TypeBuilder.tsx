@@ -805,9 +805,10 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
   
   // Default fields that every entity type must have (name and slug)
   // These are used as templates for new entity types
+  // IMPORTANT: Field IDs 'name' and 'slug' are standard across all entity types
   const getDefaultEntityFields = (mainSectionId: string): FieldDefinition[] => [
     {
-      id: 'entity_name',
+      id: 'name',
       name: 'Name',
       type: 'string',
       required: true,
@@ -818,7 +819,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
       constraints: { minLength: 1, maxLength: 200 }
     },
     {
-      id: 'entity_slug',
+      id: 'slug',
       name: 'Slug',
       type: 'string',
       required: true,

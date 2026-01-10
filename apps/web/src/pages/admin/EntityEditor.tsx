@@ -221,26 +221,16 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
     setManuallyEditedFields(prev => new Set(prev).add(fieldId));
     
     // Auto-populate slug from name field when creating new entity
-    if (isNew && entityType && typeof value === 'string') {
-      const field = entityType.fields.find(f => f.id === fieldId);
+    // All entities must have a 'name' field consistently
+    if (isNew && entityType && fieldId === 'name' && typeof value === 'string') {
+      // Find the slug field
+      const slugField = entityType.fields.find(f => f.id === 'slug');
       
-      // Check if this is a name field (by id or display name)
-      const isNameField = fieldId.toLowerCase().includes('name') || 
-                         field?.name.toLowerCase().includes('name');
-      
-      if (isNameField) {
-        // Find the slug field
-        const slugField = entityType.fields.find(f => 
-          f.id.toLowerCase().includes('slug') || 
-          f.name.toLowerCase().includes('slug')
-        );
-        
-        // Auto-populate slug if it exists and hasn't been manually edited
-        if (slugField && !manuallyEditedFields.has(slugField.id)) {
-          const slugValue = slugify(value);
-          setFormData(prev => ({ ...prev, [slugField.id]: slugValue }));
-          console.log('[EntityEditor] Auto-generated slug from name:', slugValue);
-        }
+      // Auto-populate slug if it exists and hasn't been manually edited
+      if (slugField && !manuallyEditedFields.has(slugField.id)) {
+        const slugValue = slugify(value);
+        setFormData(prev => ({ ...prev, [slugField.id]: slugValue }));
+        console.log('[EntityEditor] Auto-generated slug from name:', slugValue);
       }
     }
     
