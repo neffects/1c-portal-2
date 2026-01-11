@@ -9,12 +9,11 @@ import { useEffect, useState, useRef } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
-import { loadBranding, useBranding } from '../../stores/branding';
+import { loadBranding as loadGlobalBranding } from '../../stores/branding';
 import type { BrandingConfig } from '@1cc/shared';
 
 export function Branding() {
   const { isAuthenticated, isSuperadmin, loading: authLoading } = useAuth();
-  const { branding: brandingStore } = useBranding();
   
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -58,7 +57,7 @@ export function Branding() {
     setError(null);
     
     try {
-      const response = await api.get('/api/platform/branding') as {
+      const response = await api.get('/public/branding') as {
         success: boolean;
         data?: BrandingConfig | null;
         error?: { message: string };
@@ -68,11 +67,11 @@ export function Branding() {
         const branding = response.data;
         setSiteName(branding.siteName || 'OneConsortium');
         setLogoUrl(branding.logoUrl || '/logo.svg');
-        setLogoDarkUrl(branding.logoDarkUrl || '');
-        setFaviconUrl(branding.faviconUrl || '');
-        setPrivacyPolicyUrl(branding.privacyPolicyUrl || '');
-        setPrimaryColor(branding.primaryColor || '');
-        setAccentColor(branding.accentColor || '');
+        setLogoDarkUrl(branding.logoDarkUrl ?? '');
+        setFaviconUrl(branding.faviconUrl ?? '');
+        setPrivacyPolicyUrl(branding.privacyPolicyUrl ?? '');
+        setPrimaryColor(branding.primaryColor ?? '');
+        setAccentColor(branding.accentColor ?? '');
       }
     } catch (err) {
       console.error('[Branding] Error loading branding:', err);
@@ -114,7 +113,7 @@ export function Branding() {
       formData.append('file', file);
       formData.append('type', 'logo');
       
-      const response = await api.upload('/api/files/upload', formData);
+      const response = await api.upload('/files/upload', formData);
       
       console.log('[Branding] Upload response:', response);
       
@@ -181,7 +180,7 @@ export function Branding() {
       formData.append('file', file);
       formData.append('type', 'favicon');
       
-      const response = await api.upload('/api/files/upload', formData);
+      const response = await api.upload('/files/upload', formData);
       
       console.log('[Branding] Favicon upload response:', response);
       
@@ -236,18 +235,30 @@ export function Branding() {
       
       console.log('[Branding] Saving branding config:', branding);
       
-      const response = await api.patch('/api/platform/branding', branding) as {
+      const response = await api.patch('/api/super/platform/branding', branding) as {
         success: boolean;
+        data?: BrandingConfig;
         error?: { message: string; details?: { fields?: Record<string, string[]> } };
       };
       
       console.log('[Branding] Save response:', response);
       
-      if (response.success) {
+      if (response.success && response.data) {
+        // Update state from response data
+        const savedBranding = response.data;
+        setSiteName(savedBranding.siteName || 'OneConsortium');
+        setLogoUrl(savedBranding.logoUrl || '/logo.svg');
+        setLogoDarkUrl(savedBranding.logoDarkUrl ?? '');
+        setFaviconUrl(savedBranding.faviconUrl ?? '');
+        setPrivacyPolicyUrl(savedBranding.privacyPolicyUrl ?? '');
+        setPrimaryColor(savedBranding.primaryColor ?? '');
+        setAccentColor(savedBranding.accentColor ?? '');
+        
         setSuccess(true);
         setTimeout(() => setSuccess(false), 3000);
-        // Reload branding from API to get the saved values
-        await loadBranding();
+        
+        // Also reload the global branding store
+        await loadGlobalBranding();
       } else {
         // Extract detailed error message
         let errorMsg = response.error?.message || 'Failed to save branding';

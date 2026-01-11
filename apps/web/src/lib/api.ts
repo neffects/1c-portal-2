@@ -27,18 +27,11 @@ interface ApiResponse<T = unknown> {
  * Build request headers with auth token
  */
 function getHeaders(): HeadersInit {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:29',message:'getHeaders called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
-  // #endregion
   const headers: HeadersInit = {
     'Content-Type': 'application/json'
   };
   
   const token = getAuthToken();
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:34',message:'getAuthToken result',data:{tokenExists:!!token,tokenLength:token?.length,hasAuthHeader:!!headers['Authorization']},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
-  // #endregion
   
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;

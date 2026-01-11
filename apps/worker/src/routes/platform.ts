@@ -2,66 +2,29 @@
  * Platform Routes
  * 
  * Handles platform-wide configuration:
- * - GET /branding - Get platform branding config
  * - PATCH /branding - Update platform branding config (superadmin only)
  */
 
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../types';
 import { updateBrandingRequestSchema } from '@1cc/shared';
 import { readJSON, writeJSON, getPlatformConfigPath } from '../lib/r2';
-import { requireSuperadmin, optionalAuth } from '../middleware/auth';
 import { ValidationError } from '../middleware/error';
 import type { BrandingConfig, AppConfig } from '@1cc/shared';
 
 export const platformRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 /**
- * GET /branding
- * Get platform branding configuration (public endpoint - optional auth)
- */
-platformRoutes.get('/branding', optionalAuth, async (c) => {
-  console.log('[Platform] Getting branding config');
-  
-  try {
-    // Read platform config from R2
-    const platformConfig = await readJSON<{ branding?: BrandingConfig }>(c.env.R2_BUCKET, getPlatformConfigPath());
-    
-    // Return branding config if it exists, otherwise return null
-    const branding = platformConfig?.branding || null;
-    
-    return c.json({
-      success: true,
-      data: branding
-    });
-  } catch (error) {
-    console.error('[Platform] Error getting branding config:', error);
-    // Return null if file doesn't exist or error occurs
-    return c.json({
-      success: true,
-      data: null
-    });
-  }
-});
-
-/**
  * PATCH /branding
  * Update platform branding configuration (superadmin only)
  */
-platformRoutes.patch('/branding', requireSuperadmin(), async (c) => {
+platformRoutes.patch('/branding', 
+  zValidator('json', updateBrandingRequestSchema),
+  async (c) => {
   console.log('[Platform] Updating branding config');
   
-  const body = await c.req.json();
-  console.log('[Platform] Received branding update:', JSON.stringify(body, null, 2));
-  
-  const result = updateBrandingRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    console.error('[Platform] Validation errors:', JSON.stringify(result.error.errors, null, 2));
-    throw new ValidationError('Invalid branding data', { errors: result.error.errors });
-  }
-  
-  const updates = result.data;
+  const updates = c.req.valid('json');
   
   // Read existing platform config or create new
   let platformConfig = await readJSON<{ branding?: BrandingConfig }>(c.env.R2_BUCKET, getPlatformConfigPath());

@@ -97,7 +97,7 @@ export function FileField({ field, value, onChange, error, disabled }: FileField
         
         xhr.onerror = () => reject(new Error('Upload failed'));
         
-        xhr.open('POST', '/api/files/upload');
+        xhr.open('POST', '/files/upload');
         xhr.send(formData);
       });
       

@@ -47,7 +47,7 @@ export function LogoField({ field, value, onChange, error, disabled }: LogoField
       formData.append('file', file);
       formData.append('type', 'logo');
       
-      const response = await api.upload('/api/files/upload', formData);
+      const response = await api.upload('/files/upload', formData);
       
       if (response.success && response.data) {
         const data = response.data as { url: string };

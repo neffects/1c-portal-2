@@ -15,7 +15,7 @@ const files = new Hono<{ Bindings: Env }>();
 
 /**
  * Upload a file
- * POST /api/files/upload
+ * POST /files/upload
  */
 files.post('/upload', authMiddleware, async (c: Context) => {
   const user = c.get('user');
@@ -135,7 +135,7 @@ files.get('/:path{.+}', async (c: Context) => {
 
 /**
  * Delete a file
- * DELETE /api/files/:path+
+ * DELETE /files/:path+
  */
 files.delete('/:path{.+}', authMiddleware, async (c: Context) => {
   const user = c.get('user');

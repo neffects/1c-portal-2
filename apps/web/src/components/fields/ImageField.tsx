@@ -48,7 +48,7 @@ export function ImageField({ field, value, onChange, error, disabled }: ImageFie
       formData.append('file', file);
       formData.append('type', 'image');
       
-      const response = await api.upload('/api/files/upload', formData);
+      const response = await api.upload('/files/upload', formData);
       
       if (response.success && response.data) {
         const data = response.data as { url: string };
