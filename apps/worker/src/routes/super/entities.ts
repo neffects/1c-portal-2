@@ -116,6 +116,68 @@ superEntityRoutes.post('/entities',
 });
 
 /**
+ * GET /entities/:id
+ * Get any entity by ID (superadmin can access global and org-scoped entities)
+ */
+superEntityRoutes.get('/entities/:id', async (c) => {
+  const entityId = c.req.param('id');
+  
+  console.log('[SuperEntities] GET /entities/:id -', entityId);
+  
+  // Get entity stub to determine organization
+  const stubPath = getEntityStubPath(entityId);
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
+  
+  if (!stub) {
+    console.log('[SuperEntities] Entity stub not found:', entityId);
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  let entity: Entity | null = null;
+  const orgId = stub.organizationId;
+  
+  if (orgId === null) {
+    // Global entity - try authenticated (platform/) path first, then public/
+    for (const visibility of ['authenticated', 'public'] as const) {
+      const latestPath = getEntityLatestPath(visibility, entityId, undefined);
+      const latestPointer = await readJSON<{ version: number }>(c.env.R2_BUCKET, latestPath);
+      
+      if (latestPointer) {
+        const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+        
+        if (entity) {
+          console.log('[SuperEntities] Global entity found in', visibility, 'path');
+          break;
+        }
+      }
+    }
+  } else {
+    // Org-scoped entity - try members path (most common for org entities)
+    const latestPath = getEntityLatestPath('members', entityId, orgId);
+    const latestPointer = await readJSON<{ version: number }>(c.env.R2_BUCKET, latestPath);
+    
+    if (latestPointer) {
+      const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
+      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      console.log('[SuperEntities] Org entity found for org:', orgId);
+    }
+  }
+  
+  if (!entity) {
+    console.log('[SuperEntities] Entity data not found:', entityId);
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  console.log('[SuperEntities] Returning entity:', entityId, 'orgId:', entity.organizationId, 'status:', entity.status);
+  
+  return c.json({
+    success: true,
+    data: entity
+  });
+});
+
+/**
  * GET /entities
  * List entities (supports filtering by organizationId, including null for global entities)
  */

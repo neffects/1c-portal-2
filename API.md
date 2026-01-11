@@ -1118,6 +1118,44 @@ Authorization: Bearer <jwt_token>
 }
 ```
 
+### Get Entity (Any)
+
+**GET** `/api/super/entities/:id`
+
+Get any entity by ID. Superadmins can access both global entities and organization-scoped entities through this endpoint.
+
+**Path Parameters:**
+- `id` (required) - Entity ID
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "ent456",
+    "entityTypeId": "type123",
+    "organizationId": "org789",
+    "version": 1,
+    "status": "published",
+    "visibility": "members",
+    "slug": "internal-doc",
+    "data": {
+      "name": "Internal Document",
+      "description": "Organization document"
+    },
+    "createdAt": "2026-01-10T10:00:00Z",
+    "updatedAt": "2026-01-10T10:00:00Z",
+    "createdBy": "user123",
+    "updatedBy": "user123"
+  }
+}
+```
+
 ### List Entities (All Organizations)
 
 **GET** `/api/super/entities`

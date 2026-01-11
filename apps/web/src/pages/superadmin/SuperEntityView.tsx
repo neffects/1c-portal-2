@@ -46,7 +46,8 @@ export function SuperEntityView({ id }: SuperEntityViewProps) {
     console.log('[SuperEntityView] Loading entity:', id);
     
     try {
-      const response = await api.get(`/api/entities/${id}`) as {
+      // Use super endpoint - can access any entity (global or org-scoped)
+      const response = await api.get(`/api/super/entities/${id}`) as {
         success: boolean;
         data?: Entity;
       };
