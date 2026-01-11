@@ -27,6 +27,7 @@ interface FieldRendererProps {
   onChange: (value: unknown) => void;
   error?: string;
   disabled?: boolean;
+  readOnly?: boolean;
 }
 
 /**
@@ -60,7 +61,7 @@ function getFieldComponent(fieldType: string): React.ComponentType<FieldRenderer
   return null;
 }
 
-export function FieldRenderer({ field, value, onChange, error, disabled }: FieldRendererProps) {
+export function FieldRenderer({ field, value, onChange, error, disabled, readOnly }: FieldRendererProps) {
   // Get component for field type
   const Component = getFieldComponent(field.type);
   
@@ -94,6 +95,7 @@ export function FieldRenderer({ field, value, onChange, error, disabled }: Field
         onChange={onChange}
         error={error}
         disabled={disabled}
+        readOnly={readOnly}
       />
       
       {error && (

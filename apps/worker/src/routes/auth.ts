@@ -9,6 +9,7 @@
  */
 
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../types';
 import { magicLinkRequestSchema, verifyTokenSchema } from '@1cc/shared';
 import { createJWT, verifyJWT, isTokenExpiringSoon } from '../lib/jwt';
@@ -25,17 +26,12 @@ export const authRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
  * POST /auth/magic-link
  * Request a magic link for authentication
  */
-authRoutes.post('/magic-link', async (c) => {
+authRoutes.post('/magic-link',
+  zValidator('json', magicLinkRequestSchema),
+  async (c) => {
   console.log('[Auth] Magic link requested');
   
-  const body = await c.req.json();
-  const result = magicLinkRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid email address');
-  }
-  
-  const { email } = result.data;
+  const { email } = c.req.valid('json');
   
   // Check if user exists and get their organization
   const existingUser = await findUserByEmail(c.env.R2_BUCKET, email);

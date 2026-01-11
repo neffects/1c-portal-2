@@ -11,7 +11,7 @@ import { useSync } from '../../stores/sync';
 import { api } from '../../lib/api';
 import { FieldRenderer } from '../../components/fields';
 import { slugify } from '../../lib/utils';
-import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, VisibilityScope, OrganizationListItem } from '@1cc/shared';
+import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, OrganizationListItem } from '@1cc/shared';
 
 interface EntityEditorProps {
   id?: string;
@@ -19,7 +19,7 @@ interface EntityEditorProps {
 }
 
 export function EntityEditor({ id, typeId }: EntityEditorProps) {
-  const { isAuthenticated, isOrgAdmin, loading: authLoading, organizationId, userId } = useAuth();
+  const { isAuthenticated, isOrgAdmin, isSuperadmin, loading: authLoading, organizationId, userId } = useAuth();
   const { entityTypes } = useSync();
   
   const [entity, setEntity] = useState<Entity | null>(null);
@@ -27,7 +27,6 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
   const [creatableTypes, setCreatableTypes] = useState<EntityTypeListItem[]>([]);
   const [loadingTypes, setLoadingTypes] = useState(false);
   const [formData, setFormData] = useState<Record<string, unknown>>({});
-  const [visibility, setVisibility] = useState<VisibilityScope>('private');
   const [errors, setErrors] = useState<Record<string, string>>({});
   
   const [loading, setLoading] = useState(!!id);
@@ -35,9 +34,11 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const [manuallyEditedFields, setManuallyEditedFields] = useState<Set<string>>(new Set());
+  const [hasBeenSaved, setHasBeenSaved] = useState(false); // Track if entity has been saved at least once
   const [adminOrganizations, setAdminOrganizations] = useState<OrganizationListItem[]>([]);
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(organizationId.value);
   const [loadingOrgs, setLoadingOrgs] = useState(false);
+  const [entityOrgName, setEntityOrgName] = useState<string | null>(null);
   
   const isNew = !id;
   
@@ -55,12 +56,27 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
     }
   }, [isNew, typeId, isOrgAdmin.value]);
   
-  // Load organizations where user is an admin when creating new entity
+  // Load organizations where user is an admin when creating new entity or editing
   useEffect(() => {
-    if (isNew && isOrgAdmin.value) {
+    if (isOrgAdmin.value) {
       loadAdminOrganizations();
     }
-  }, [isNew, isOrgAdmin.value]);
+  }, [isOrgAdmin.value]);
+  
+  // Load organization name when entity is loaded
+  useEffect(() => {
+    if (entity && entity.organizationId && adminOrganizations.length > 0) {
+      const org = adminOrganizations.find(o => o.id === entity.organizationId);
+      if (org) {
+        setEntityOrgName(org.name);
+      } else {
+        // Organization not in admin list, fetch it separately
+        loadOrganizationName(entity.organizationId);
+      }
+    } else if (entity && entity.organizationId === null) {
+      setEntityOrgName(null); // Global entity
+    }
+  }, [entity, adminOrganizations]);
   
   // Update selected org when default organization changes
   useEffect(() => {
@@ -118,10 +134,18 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
       
       if (response.success && response.data) {
         setAdminOrganizations(response.data.items);
-        // Set default to first org or current org
-        if (response.data.items.length > 0 && !selectedOrgId) {
-          const defaultOrg = response.data.items.find(o => o.id === organizationId.value) || response.data.items[0];
-          setSelectedOrgId(defaultOrg.id);
+        // Set default to current org if available, otherwise first org, or null for superadmin
+        if (!selectedOrgId) {
+          if (organizationId.value) {
+            const defaultOrg = response.data.items.find(o => o.id === organizationId.value);
+            if (defaultOrg) {
+              setSelectedOrgId(defaultOrg.id);
+            } else if (response.data.items.length > 0) {
+              setSelectedOrgId(response.data.items[0].id);
+            }
+          } else if (response.data.items.length > 0) {
+            setSelectedOrgId(response.data.items[0].id);
+          }
         }
         console.log('[EntityEditor] Loaded', response.data.items.length, 'admin organizations');
       } else {
@@ -150,10 +174,11 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
         setEntityType(type);
         if (initializeForm) {
           // Only initialize form data for new entities
-          setVisibility(type.defaultVisibility as VisibilityScope);
           initializeFormData(type);
           // Reset manually edited fields for new entity
           setManuallyEditedFields(new Set());
+          // Reset hasBeenSaved for new entity
+          setHasBeenSaved(false);
         }
         console.log('[EntityEditor] Loaded entity type definition:', type.name);
       } else {
@@ -194,6 +219,13 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
       }
     });
     
+    // Auto-generate slug from name if name has a default value
+    // Name and slug are hard-coded required fields that always exist
+    if (data.name && typeof data.name === 'string') {
+      data.slug = slugify(data.name);
+      console.log('[EntityEditor] Auto-generated slug from default name:', data.slug);
+    }
+    
     setFormData(data);
   }
   
@@ -203,9 +235,18 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
     const response = await api.get<Entity>(`/api/entities/${entityId}`);
     
     if (response.success && response.data) {
-      setEntity(response.data);
-      setFormData(response.data.data);
-      setVisibility(response.data.visibility);
+      const loadedEntity = response.data;
+      setEntity(loadedEntity);
+      setFormData(loadedEntity.data);
+      // Entity already exists, so it has been saved
+      setHasBeenSaved(true);
+      
+      // Load organization name if entity has an organization
+      if (loadedEntity.organizationId) {
+        loadOrganizationName(loadedEntity.organizationId);
+      } else {
+        setEntityOrgName(null); // Global entity
+      }
     } else {
       route('/admin');
     }
@@ -213,26 +254,101 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
     setLoading(false);
   }
   
-  function handleFieldChange(fieldId: string, value: unknown) {
-    setFormData(prev => ({ ...prev, [fieldId]: value }));
-    setIsDirty(true);
+  async function loadOrganizationName(orgId: string) {
+    // First try to find in adminOrganizations list
+    const orgInList = adminOrganizations.find(o => o.id === orgId);
+    if (orgInList) {
+      setEntityOrgName(orgInList.name);
+      return;
+    }
     
-    // Mark field as manually edited
-    setManuallyEditedFields(prev => new Set(prev).add(fieldId));
+    // If not found, fetch from API
+    try {
+      const response = await api.get(`/api/organizations/${orgId}`) as {
+        success: boolean;
+        data?: { name: string; id: string };
+      };
+      
+      if (response.success && response.data) {
+        setEntityOrgName(response.data.name);
+        console.log('[EntityEditor] Loaded organization name:', response.data.name);
+      } else {
+        setEntityOrgName(null);
+      }
+    } catch (err) {
+      console.error('[EntityEditor] Error loading organization name:', err);
+      setEntityOrgName(null);
+    }
+  }
+  
+  function handleFieldChange(fieldId: string, value: unknown) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:224',message:'handleFieldChange called',data:{fieldId,valueType:typeof value,valueStr:String(value).substring(0,50),isNew,manuallyEditedFields:Array.from(manuallyEditedFields)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     
     // Auto-populate slug from name field when creating new entity
-    // All entities must have a 'name' field consistently
-    if (isNew && entityType && fieldId === 'name' && typeof value === 'string') {
-      // Find the slug field
-      const slugField = entityType.fields.find(f => f.id === 'slug');
+    // Name and slug are hard-coded required fields that always exist
+    // Find name field by ID or by name property (for backward compatibility)
+    const isNameField = fieldId === 'name' || (entityType && entityType.fields.find(f => f.id === fieldId)?.name?.toLowerCase() === 'name');
+    
+    // Update both name and slug in a single state update for immediate sync
+    // Only auto-generate slug if: creating new entity AND entity hasn't been saved yet
+    if (isNew && !hasBeenSaved && isNameField && typeof value === 'string') {
+      // Find slug field by ID or by name property (for backward compatibility)
+      const slugFieldId = entityType 
+        ? entityType.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug')?.id || 'slug'
+        : 'slug';
       
-      // Auto-populate slug if it exists and hasn't been manually edited
-      if (slugField && !manuallyEditedFields.has(slugField.id)) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:232',message:'Name field condition met',data:{fieldId,value,isNew,slugFieldId,slugManuallyEdited:manuallyEditedFields.has(slugFieldId)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      
+      // Auto-populate slug if it hasn't been manually edited
+      // This allows the slug to auto-update as the user types, but if they manually edit
+      // the slug, it won't be overwritten
+      if (!manuallyEditedFields.has(slugFieldId)) {
         const slugValue = slugify(value);
-        setFormData(prev => ({ ...prev, [slugField.id]: slugValue }));
-        console.log('[EntityEditor] Auto-generated slug from name:', slugValue);
+        // #region agent log
+        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:238',message:'Generating slug',data:{nameValue:value,slugValue,slugFieldId,formDataBefore:JSON.stringify(formData)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        
+        console.log('[EntityEditor] Auto-generating slug from name:', slugValue);
+        // Update both name and slug in a single state update
+        setFormData(prev => {
+          const updated = { 
+            ...prev, 
+            [fieldId]: value,
+            [slugFieldId]: slugValue 
+          };
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:248',message:'setFormData callback - updating slug',data:{fieldId,value,slugValue,slugFieldId,prevSlug:prev[slugFieldId],updatedSlug:updated[slugFieldId]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+          return updated;
+        });
+        // Mark name as manually edited, but NOT slug (so it keeps auto-updating)
+        setManuallyEditedFields(prev => new Set(prev).add(fieldId));
+      } else {
+        // #region agent log
+        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:258',message:'Slug manually edited - skipping auto-gen',data:{fieldId,value,slugFieldId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+        
+        // Just update the name field (slug was manually edited, don't overwrite)
+        setFormData(prev => ({ ...prev, [fieldId]: value }));
+        // Mark name as manually edited
+        setManuallyEditedFields(prev => new Set(prev).add(fieldId));
       }
+    } else {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:266',message:'Name condition not met',data:{fieldId,isNew,isNameField,valueType:typeof value,fieldName:entityType?.fields.find(f => f.id === fieldId)?.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+      // #endregion
+      
+      // Update the field normally
+      setFormData(prev => ({ ...prev, [fieldId]: value }));
+      // Mark field as manually edited
+      setManuallyEditedFields(prev => new Set(prev).add(fieldId));
     }
+    
+    setIsDirty(true);
     
     // Clear error for this field
     if (errors[fieldId]) {
@@ -298,10 +414,14 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
     setSaving(true);
     setSaveError(null);
     
+    // #region agent log
+    const slugField = entityType.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:348',message:'handleSave called',data:{isNew,slugFieldId:slugField?.id,slugFieldPattern:slugField?.constraints?.pattern,slugValue:formData[slugField?.id || 'slug'],allFieldPatterns:entityType.fields.filter(f => f.constraints?.pattern).map(f => ({id:f.id,name:f.name,pattern:f.constraints?.pattern}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'J'})}).catch(()=>{});
+    // #endregion
+    
     try {
       const payload = {
-        data: formData,
-        visibility
+        data: formData
       };
       
       let response;
@@ -312,10 +432,20 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
           ...payload
         };
         
-        // Include organizationId if different from default
-        if (selectedOrgId && selectedOrgId !== organizationId.value) {
+        // Include organizationId in payload
+        // null = global entity (superadmin only), undefined = use default org
+        if (selectedOrgId === null) {
+          // Global entity - explicitly set to null
+          createPayload.organizationId = null;
+        } else if (selectedOrgId && selectedOrgId !== organizationId.value) {
+          // Different organization selected
           createPayload.organizationId = selectedOrgId;
         }
+        // If selectedOrgId matches organizationId.value, don't include it (use default)
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:375',message:'Sending create request',data:{payload:JSON.stringify(createPayload).substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'K'})}).catch(()=>{});
+        // #endregion
         
         response = await api.post<Entity>('/api/entities', createPayload);
       } else {
@@ -324,6 +454,8 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
       
       if (response.success && response.data) {
         setIsDirty(false);
+        // Mark entity as saved - slug should no longer auto-update
+        setHasBeenSaved(true);
         
         if (isNew) {
           route(`/admin/entities/${response.data.id}/edit`);
@@ -523,16 +655,35 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
                 <div class="space-y-6">
                   {sectionFields
                     .sort((a, b) => a.displayOrder - b.displayOrder)
-                    .map(field => (
-                      <FieldRenderer
-                        key={field.id}
-                        field={field}
-                        value={formData[field.id]}
-                        onChange={(value) => handleFieldChange(field.id, value)}
-                        error={errors[field.id]}
-                        disabled={entity?.status !== 'draft' && !!entity}
-                      />
-                    ))
+                    .map(field => {
+                      // Special handling for slug field - show helper text for auto-generation
+                      const isSlugField = field.id === 'slug';
+                      const showSlugHelper = isNew && isSlugField;
+                      
+                      return (
+                        <div key={field.id}>
+                          {/* #region agent log */}
+                          {field.id === 'slug' && (() => {
+                            fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:580',message:'Rendering slug field',data:{fieldId:field.id,formDataSlug:formData.slug,formDataName:formData.name,allFormDataKeys:Object.keys(formData)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+                            return null;
+                          })()}
+                          {/* #endregion */}
+                          <FieldRenderer
+                            field={field}
+                            value={formData[field.id]}
+                            onChange={(value) => handleFieldChange(field.id, value)}
+                            error={errors[field.id]}
+                            disabled={entity?.status !== 'draft' && !!entity}
+                          />
+                          {showSlugHelper && (
+                            <p class="text-xs text-surface-500 mt-1 flex items-center gap-1">
+                              <span class="i-lucide-info"></span>
+                              Auto-generated from name (you can edit if needed)
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })
                   }
                 </div>
               </div>
@@ -542,8 +693,8 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
         
         {/* Sidebar */}
         <div class="lg:col-span-1 space-y-6">
-          {/* Organization selector - only show when creating new entity */}
-          {isNew && adminOrganizations.length > 1 && (
+          {/* Organization selector/display */}
+          {isNew ? (
             <div class="card p-6">
               <h3 class="heading-4 mb-4">Organization</h3>
               {loadingOrgs ? (
@@ -552,11 +703,17 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
                 </div>
               ) : (
                 <select
-                  value={selectedOrgId || ''}
-                  onChange={(e) => setSelectedOrgId((e.target as HTMLSelectElement).value)}
+                  value={selectedOrgId === null ? 'global' : (selectedOrgId || '')}
+                  onChange={(e) => {
+                    const value = (e.target as HTMLSelectElement).value;
+                    setSelectedOrgId(value === 'global' ? null : value);
+                  }}
                   class="input w-full"
                   disabled={saving}
                 >
+                  {isSuperadmin.value && (
+                    <option value="global">Global (Platform-wide)</option>
+                  )}
                   {adminOrganizations.map(org => (
                     <option key={org.id} value={org.id}>
                       {org.name}
@@ -565,67 +722,22 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
                 </select>
               )}
               <p class="text-sm text-surface-500 mt-2">
-                Select the organization this entity belongs to
+                {isSuperadmin.value 
+                  ? 'Select the organization this entity belongs to, or choose Global for platform-wide entities'
+                  : 'Select the organization this entity belongs to'}
               </p>
             </div>
-          )}
-          
-          {/* Visibility - only show when editing existing entity */}
-          {entity && (
+          ) : entity && (
             <div class="card p-6">
-              <h3 class="heading-4 mb-4">Visibility</h3>
-              
-              <div class="space-y-3">
-                <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
-                  <input
-                    type="radio"
-                    name="visibility"
-                    value="private"
-                    checked={visibility === 'private'}
-                    onChange={() => setVisibility('private')}
-                    class="mt-1"
-                    disabled={entity?.status !== 'draft' && !!entity}
-                  />
-                  <div>
-                    <span class="font-medium text-surface-900 dark:text-surface-100">Private</span>
-                    <p class="text-sm text-surface-500">Only visible to your organization</p>
-                  </div>
-                </label>
-                
-                <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
-                  <input
-                    type="radio"
-                    name="visibility"
-                    value="platform"
-                    checked={visibility === 'platform'}
-                    onChange={() => setVisibility('platform')}
-                    class="mt-1"
-                    disabled={entity?.status !== 'draft' && !!entity}
-                  />
-                  <div>
-                    <span class="font-medium text-surface-900 dark:text-surface-100">Platform</span>
-                    <p class="text-sm text-surface-500">Visible to all authenticated users</p>
-                  </div>
-                </label>
-                
-                {entityType?.allowPublic && (
-                  <label class="flex items-start gap-3 p-3 rounded-lg border border-surface-200 dark:border-surface-700 cursor-pointer hover:bg-surface-50 dark:hover:bg-surface-800">
-                    <input
-                      type="radio"
-                      name="visibility"
-                      value="public"
-                      checked={visibility === 'public'}
-                      onChange={() => setVisibility('public')}
-                      class="mt-1"
-                      disabled={entity?.status !== 'draft' && !!entity}
-                    />
-                    <div>
-                      <span class="font-medium text-surface-900 dark:text-surface-100">Public</span>
-                      <p class="text-sm text-surface-500">Visible to everyone, including anonymous users</p>
-                    </div>
-                  </label>
-                )}
+              <h3 class="heading-4 mb-4">Organization</h3>
+              <div class="text-surface-900 dark:text-surface-100">
+                {entity.organizationId === null 
+                  ? <span class="text-primary-600 dark:text-primary-400 font-medium">Global (Platform-wide)</span>
+                  : (entityOrgName || entity.organizationId)}
               </div>
+              <p class="text-sm text-surface-500 mt-2">
+                The organization this entity belongs to
+              </p>
             </div>
           )}
           

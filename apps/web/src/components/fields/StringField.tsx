@@ -12,23 +12,80 @@ interface StringFieldProps {
   onChange: (value: string) => void;
   error?: string;
   disabled?: boolean;
+  readOnly?: boolean;
 }
 
-export function StringField({ field, value, onChange, error, disabled }: StringFieldProps) {
+export function StringField({ field, value, onChange, error, disabled, readOnly }: StringFieldProps) {
   const constraints = field.constraints || {};
+  
+  // HTML5 pattern attribute doesn't need anchors (auto-anchored)
+  // Remove anchors and escape hyphen in character classes for browser compatibility
+  // Escape hyphen to avoid unicodeSets mode issues in newer browsers
+  let htmlPattern: string | undefined = undefined;
+  if (constraints.pattern) {
+    // Remove anchors
+    htmlPattern = constraints.pattern.replace(/^\^/, '').replace(/\$$/, '');
+    
+    // Escape hyphen in character classes for compatibility with unicodeSets mode
+    // Patterns like [-a-z0-9] or [a-z0-9-] become [a-z0-9\-] (hyphen escaped at end)
+    htmlPattern = htmlPattern.replace(/\[([^\]]+)\]/g, (match, content) => {
+      // If hyphen is at the beginning, move it to the end and escape it
+      if (content.startsWith('-')) {
+        // Check if it's just a hyphen or hyphen followed by range
+        // For [-a-z0-9], we want [a-z0-9\-]
+        // For [a-z0-9-], we want [a-z0-9\-]
+        const moved = content.substring(1) + '\\-';
+        return `[${moved}]`;
+      }
+      // If hyphen is at the end, escape it
+      if (content.endsWith('-') && !content.endsWith('\\-')) {
+        return `[${content.slice(0, -1)}\\-]`;
+      }
+      return match;
+    });
+  }
+  
+  // Filter slug field input to only allow a-z, 0-9, and hyphens
+  // Convert to lowercase and remove invalid characters as user types
+  const isSlugField = field.id === 'slug';
+  const handleInput = (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    let inputValue = input.value;
+    
+    if (isSlugField) {
+      // Filter to only allow lowercase letters, numbers, and hyphens
+      inputValue = inputValue
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, '');
+    }
+    
+    onChange(inputValue);
+  };
+  
+  // #region agent log
+  if (constraints.pattern && field.id === 'slug') {
+    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'StringField.tsx:30',message:'Setting pattern on slug field',data:{fieldId:field.id,originalPattern:constraints.pattern,htmlPattern,hasHyphen:constraints.pattern.includes('-'),hyphenPosition:constraints.pattern.indexOf('-')},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'H'})}).catch(()=>{});
+  }
+  // #endregion
   
   return (
     <input
       type="text"
       value={(value as string) || ''}
-      onInput={(e) => onChange((e.target as HTMLInputElement).value)}
-      class={`input ${error ? 'border-red-500 focus:ring-red-500' : ''}`}
+      onInput={handleInput}
+      class={`input ${error ? 'border-red-500 focus:ring-red-500' : ''} ${readOnly ? 'bg-surface-50 dark:bg-surface-800 cursor-not-allowed' : ''}`}
       placeholder={field.placeholder}
       minLength={constraints.minLength}
       maxLength={constraints.maxLength}
-      pattern={constraints.pattern}
+      pattern={htmlPattern}
       required={field.required}
       disabled={disabled}
+      readOnly={readOnly}
+      onInvalid={(e) => {
+        // #region agent log
+        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'StringField.tsx:45',message:'Pattern validation failed',data:{fieldId:field.id,pattern:htmlPattern,value:(e.target as HTMLInputElement).value,validityState:(e.target as HTMLInputElement).validity},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'I'})}).catch(()=>{});
+        // #endregion
+      }}
     />
   );
 }

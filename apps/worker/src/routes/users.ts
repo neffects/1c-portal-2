@@ -15,6 +15,7 @@
  */
 
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../types';
 import { 
   inviteUserRequestSchema, 
@@ -214,17 +215,13 @@ userRoutes.get('/', async (c) => {
  * POST /invite
  * Invite a user to the organization
  */
-userRoutes.post('/invite', requireOrgAdmin, async (c) => {
+userRoutes.post('/invite',
+  requireOrgAdmin,
+  zValidator('json', inviteUserRequestSchema),
+  async (c) => {
   console.log('[Users] Processing invitation');
   
-  const body = await c.req.json();
-  const result = inviteUserRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid invitation data', { errors: result.error.errors });
-  }
-  
-  const { email, role, note } = result.data;
+  const { email, role, note } = c.req.valid('json');
   const userId = c.get('userId')!;
   const userOrgId = c.get('organizationId');
   
@@ -349,7 +346,10 @@ userRoutes.get('/:id', async (c) => {
  * PATCH /:id/role
  * Update user's role in organization
  */
-userRoutes.patch('/:id/role', requireOrgAdmin, async (c) => {
+userRoutes.patch('/:id/role',
+  requireOrgAdmin,
+  zValidator('json', updateUserRoleRequestSchema),
+  async (c) => {
   const targetUserId = c.req.param('id');
   const userOrgId = c.get('organizationId');
   const currentUserId = c.get('userId');
@@ -365,14 +365,7 @@ userRoutes.patch('/:id/role', requireOrgAdmin, async (c) => {
     throw new ForbiddenError('You cannot change your own role');
   }
   
-  const body = await c.req.json();
-  const result = updateUserRoleRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid role data', { errors: result.error.errors });
-  }
-  
-  const { role } = result.data;
+  const { role } = c.req.valid('json');
   
   // Get current membership
   const membershipPath = getUserMembershipPath(userOrgId, targetUserId);
@@ -476,18 +469,13 @@ userRoutes.get('/me/preferences', async (c) => {
  * PATCH /me/preferences
  * Update current user's preferences
  */
-userRoutes.patch('/me/preferences', async (c) => {
+userRoutes.patch('/me/preferences',
+  zValidator('json', updateUserPreferencesRequestSchema),
+  async (c) => {
   const userId = c.get('userId')!;
   console.log('[Users] Updating preferences for:', userId);
   
-  const body = await c.req.json();
-  const result = updateUserPreferencesRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid preferences data', { errors: result.error.errors });
-  }
-  
-  const updates = result.data;
+  const updates = c.req.valid('json');
   
   // Get current preferences
   const prefsPath = getUserPreferencesPath(userId);
@@ -555,18 +543,13 @@ userRoutes.get('/me/flags', async (c) => {
  * POST /me/flags
  * Flag an entity for alerts
  */
-userRoutes.post('/me/flags', async (c) => {
+userRoutes.post('/me/flags',
+  zValidator('json', flagEntityRequestSchema),
+  async (c) => {
   const userId = c.get('userId')!;
   console.log('[Users] Creating flag');
   
-  const body = await c.req.json();
-  const result = flagEntityRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid flag data', { errors: result.error.errors });
-  }
-  
-  const { entityId, note } = result.data;
+  const { entityId, note } = c.req.valid('json');
   
   // Verify entity exists
   const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId));
