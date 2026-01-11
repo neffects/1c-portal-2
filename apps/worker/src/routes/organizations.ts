@@ -23,6 +23,7 @@ import {
   addUserToOrgRequestSchema
 } from '@1cc/shared';
 import { readJSON, writeJSON, listFiles, deleteFile, getOrgProfilePath, getOrgPermissionsPath, getInvitationPath, getUserMembershipPath } from '../lib/r2';
+import { regenerateOrgManifest, regenerateOrgBundles } from '../lib/bundle-invalidation';
 import { createOrgId, createSlug, createInvitationToken } from '../lib/id';
 import { requireSuperadmin, requireOrgAdmin, requireOrgMembership } from '../middleware/auth';
 import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
@@ -427,6 +428,10 @@ organizationRoutes.patch('/:id/permissions',
   await writeJSON(c.env.R2_BUCKET, getOrgPermissionsPath(orgId), updatedPermissions);
   
   console.log('[Orgs] Updated permissions for:', orgId);
+  
+  // Regenerate org bundles and manifest for the new permissions
+  // This ensures the org has bundles for all viewable types
+  await regenerateOrgBundles(c.env.R2_BUCKET, orgId, updatedPermissions.viewable);
   
   return c.json({
     success: true,

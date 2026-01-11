@@ -557,6 +557,50 @@ The project includes automated security testing with:
     - EntityView falls back to this endpoint when org-scoped fails with 404
     - Consistent with API route structure: `/api/*` = authenticated platform content
 
+  - Entity duplicate detection (2026-01-11):
+    - Added duplicate name/slug detection in entity create/edit forms
+    - Scope: Same entity type + same organization (two different types CAN share slug)
+    - **Org bundles now include ALL entity statuses** (draft, pending, published, archived)
+      - Previously only included published entities
+      - Change in `apps/worker/src/routes/manifests.ts` line 381-383
+      - Allows admin users to check duplicates against all entities in their org
+    - **Backend slug validation**: POST `/api/orgs/:orgId/entities` now checks slug uniqueness
+      - Scans actual entities in R2 (not bundle - bundles may be stale)
+      - Checks all entities in org with same entity type
+      - Returns 409 CONFLICT if slug already exists: `Slug 'xyz' already exists for this entity type in this organization`
+      - Change in `apps/worker/src/routes/orgs/entities.ts`
+    - **Frontend duplicate checking**: EntityEditor and SuperEntityEditor now show warnings
+      - Fetches org bundle via `GET /manifests/bundles/org/:orgId/:typeId`
+      - Uses `checkDuplicatesInBundle()` utility from `apps/web/src/lib/utils.ts`
+      - Name duplicate: Yellow warning with link to existing entity (non-blocking)
+      - Slug duplicate: Red error with link, blocks save button (blocking)
+    - **Note**: Global entities (organizationId: null) skip duplicate checking since they don't belong to an org
+
+  - Bundle auto-regeneration system (2026-01-11):
+    - **Problem**: Bundles and manifests were only regenerated on-demand (lazy) or during publish/unpublish
+    - **Solution**: Centralized bundle-invalidation.ts service for synchronous regeneration
+    - **Location**: `apps/worker/src/lib/bundle-invalidation.ts`
+    - **Key functions**:
+      - `regenerateEntityBundles(bucket, typeId, orgId, visibility)` - Regenerate bundles when entity changes
+      - `regenerateManifestsForType(bucket, typeId)` - Regenerate manifests when entity type changes
+      - `regenerateOrgManifest(bucket, orgId)` - Regenerate org manifest
+      - `regenerateOrgBundles(bucket, orgId, typeIds)` - Regenerate all bundles for an org
+    - **Trigger events**:
+      - Entity create/update/delete (entities.ts, orgs/entities.ts)
+      - Entity status transitions (publish/unpublish)
+      - Entity type create/update/archive (entity-types.ts)
+      - Organization permission changes (organizations.ts)
+    - **Bundle types and visibility**:
+      - `public` bundles: Only published entities with public visibility
+      - `authenticated` bundles: Only published entities with public or authenticated visibility
+      - `members` (org) bundles: ALL entities of any status for admin visibility
+    - **Changes by file**:
+      - `entities.ts`: POST /, PATCH /:id, POST /:id/transition, POST /bulk-import
+      - `orgs/entities.ts`: POST /entities, PATCH /entities/:id, POST /entities/:id/transition (new routes)
+      - `entity-types.ts`: POST /, PATCH /:id, DELETE /:id
+      - `organizations.ts`: PATCH /:id/permissions
+    - **Synchronous regeneration**: All regeneration is synchronous for consistency
+
 ## Notes
 
 - Entity IDs are 7-character NanoID (lowercase alphanumeric)
@@ -564,3 +608,5 @@ The project includes automated security testing with:
 - Entity updates use atomic field merging (only changed fields sent)
 - Explicit save model - no auto-save
 - Bundles are pre-aggregated for fast client sync
+- Org bundles include ALL entity statuses for admin visibility
+- Bundle regeneration is synchronous and centralized in `bundle-invalidation.ts`

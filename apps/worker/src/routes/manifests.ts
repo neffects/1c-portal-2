@@ -7,6 +7,10 @@
  * - GET /org/:orgId - Get organization manifest
  * - GET /bundles/:visibility/:typeId - Get entity bundle
  * - POST /sync - Sync check for updates
+ * 
+ * Note: Bundle/manifest regeneration on data changes is handled by
+ * the centralized bundle-invalidation.ts service. This file only handles
+ * lazy generation when a manifest/bundle is requested but doesn't exist yet.
  */
 
 import { Hono } from 'hono';
@@ -378,8 +382,9 @@ async function generateBundle(
     const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile);
     if (!latestPointer) continue;
     
-    // Only include published entities in bundles
-    if (latestPointer.status !== 'published') continue;
+    // Only filter by status for public/authenticated bundles
+    // Org (members) bundles include all statuses for admin visibility and duplicate checking
+    if (visibility !== 'members' && latestPointer.status !== 'published') continue;
     
     // Read entity version
     const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
@@ -416,7 +421,11 @@ async function generateBundle(
 }
 
 /**
- * Regenerate all manifests and bundles (utility function)
+ * Regenerate all manifests (utility function for bulk operations)
+ * 
+ * Note: For incremental updates triggered by data changes, use the
+ * functions in bundle-invalidation.ts instead. This function is for
+ * bulk regeneration scenarios like initial setup or data migration.
  */
 export async function regenerateAllManifests(bucket: R2Bucket): Promise<void> {
   console.log('[Manifests] Regenerating all manifests');

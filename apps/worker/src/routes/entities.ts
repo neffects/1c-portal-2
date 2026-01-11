@@ -28,9 +28,9 @@ import type { BulkImportError } from '@1cc/shared';
 import { 
   readJSON, writeJSON, deleteFile, fileExists, listFiles,
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath,
-  getEntityTypePath, getOrgPermissionsPath, getUserMembershipPath,
-  getBundlePath, getManifestPath
+  getEntityTypePath, getOrgPermissionsPath, getUserMembershipPath
 } from '../lib/r2';
+import { regenerateEntityBundles } from '../lib/bundle-invalidation';
 import { upsertSlugIndex, deleteSlugIndex } from '../lib/slug-index';
 import { R2_PATHS } from '@1cc/shared';
 import { createEntityId, createSlug } from '../lib/id';
@@ -41,7 +41,7 @@ import { validateEntityData, validateEntityFields } from '../lib/entity-validati
 import type { 
   Entity, EntityStub, EntityLatestPointer, EntityListItem,
   EntityType, EntityTypePermissions, VisibilityScope, EntityStatus,
-  OrganizationMembership, EntityBundle, BundleEntity, SiteManifest, ManifestEntityType
+  OrganizationMembership
 } from '@1cc/shared';
 
 export const entityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -209,6 +209,14 @@ entityRoutes.post('/',
   }
   
   console.log('[Entities] Created entity:', entityId);
+  
+  // Regenerate affected bundles synchronously
+  await regenerateEntityBundles(
+    c.env.R2_BUCKET,
+    entityTypeId,
+    targetOrgId,
+    finalVisibility
+  );
   
   return c.json({
     success: true,
@@ -939,6 +947,27 @@ entityRoutes.post('/bulk-import',
   
   console.log('[Entities] Bulk import complete - created:', createdIds.length, 'updated:', updatedIds.length);
   
+  // Regenerate bundles for all affected orgs after bulk import
+  // Collect unique org/visibility combinations
+  const orgVisibilityCombos = new Map<string, Set<VisibilityScope>>();
+  
+  for (const validated of validatedEntities) {
+    const key = validated.organizationId || 'global';
+    if (!orgVisibilityCombos.has(key)) {
+      orgVisibilityCombos.set(key, new Set());
+    }
+    orgVisibilityCombos.get(key)!.add(validated.visibility);
+  }
+  
+  // Regenerate bundles for each org/visibility combination
+  for (const [orgKey, visibilities] of orgVisibilityCombos) {
+    const orgId = orgKey === 'global' ? null : orgKey;
+    for (const visibility of visibilities) {
+      console.log('[Entities] Regenerating bundles for bulk import - org:', orgKey, 'visibility:', visibility);
+      await regenerateEntityBundles(c.env.R2_BUCKET, entityTypeId, orgId, visibility);
+    }
+  }
+  
   return c.json({
     success: true,
     data: {
@@ -1205,6 +1234,25 @@ entityRoutes.patch('/:id',
   
   console.log('[Entities] Updated entity:', entityId, 'to v' + newVersion);
   
+  // Regenerate affected bundles synchronously
+  // If visibility changed, regenerate bundles for both old and new visibility
+  await regenerateEntityBundles(
+    c.env.R2_BUCKET,
+    currentEntity.entityTypeId,
+    stub.organizationId,
+    newVisibility
+  );
+  
+  // If visibility changed from a different scope, also regenerate old visibility bundle
+  if (currentEntity.visibility !== newVisibility) {
+    await regenerateEntityBundles(
+      c.env.R2_BUCKET,
+      currentEntity.entityTypeId,
+      stub.organizationId,
+      currentEntity.visibility
+    );
+  }
+  
   return c.json({
     success: true,
     data: updatedEntity
@@ -1384,13 +1432,16 @@ entityRoutes.post('/:id/transition',
   
   console.log('[Entities] Transitioned entity:', entityId, currentStatus, '->', newStatus);
   
-  // Trigger bundle regeneration for published/unpublished entities
-  // This is async but we don't await it to avoid blocking the response
+  // Regenerate affected bundles synchronously for consistency
+  // This affects bundles when entities become published or are unpublished
   if (newStatus === 'published' || currentStatus === 'published') {
     console.log('[Entities] Triggering bundle regeneration for type:', stub.entityTypeId);
-    regenerateTypeBundle(c.env.R2_BUCKET, stub.entityTypeId, targetVisibility, 
-      targetVisibility === 'members' ? stub.organizationId : undefined)
-      .catch(err => console.error('[Entities] Bundle regeneration failed:', err));
+    await regenerateEntityBundles(
+      c.env.R2_BUCKET,
+      stub.entityTypeId,
+      stub.organizationId,
+      currentEntity.visibility
+    );
   }
   
   return c.json({
@@ -1424,141 +1475,4 @@ entityRoutes.delete('/:id', requireOrgAdmin(), async (c) => {
   });
 });
 
-// Helper functions
-
-/**
- * Regenerate entity bundle for a specific type
- * Called after entity status changes (publish/unpublish)
- */
-async function regenerateTypeBundle(
-  bucket: R2Bucket,
-  typeId: string,
-  visibility: 'public' | 'authenticated' | 'members',
-  orgId?: string
-): Promise<void> {
-  console.log('[Entities] Regenerating bundle for type:', typeId, visibility, orgId || '');
-  
-  // Get entity type
-  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
-  if (!entityType) {
-    console.error('[Entities] Entity type not found:', typeId);
-    return;
-  }
-  
-  // Determine entity path prefix based on visibility
-  let entityPrefix: string;
-  if (visibility === 'members' && orgId) {
-    entityPrefix = `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/`;
-  } else if (visibility === 'authenticated') {
-    entityPrefix = `${R2_PATHS.PLATFORM}entities/`;
-  } else {
-    entityPrefix = `${R2_PATHS.PUBLIC}entities/`;
-  }
-  
-  // List all entity directories
-  const entityFiles = await listFiles(bucket, entityPrefix);
-  const latestFiles = entityFiles.filter(f => f.endsWith('/latest.json'));
-  
-  const entities: BundleEntity[] = [];
-  
-  for (const latestFile of latestFiles) {
-    // Get entity ID from path
-    const entityIdMatch = latestFile.match(/entities\/([^\/]+)\/latest\.json/);
-    if (!entityIdMatch) continue;
-    
-    const entityId = entityIdMatch[1];
-    
-    // Read latest pointer
-    const latestPointer = await readJSON<EntityLatestPointer>(bucket, latestFile);
-    if (!latestPointer) continue;
-    
-    // Only include published entities in bundles
-    if (latestPointer.status !== 'published') continue;
-    
-    // Read entity version
-    const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
-    const entity = await readJSON<Entity>(bucket, versionPath);
-    
-    if (!entity || entity.entityTypeId !== typeId) continue;
-    
-    entities.push({
-      id: entity.id,
-      version: entity.version,
-      status: entity.status,
-      slug: entity.slug,
-      data: entity.data,
-      updatedAt: entity.updatedAt
-    });
-  }
-  
-  const bundle: EntityBundle = {
-    typeId,
-    typeName: entityType.pluralName,
-    generatedAt: new Date().toISOString(),
-    version: Date.now(),
-    entityCount: entities.length,
-    entities
-  };
-  
-  // Save bundle
-  const bundlePath = getBundlePath(visibility, typeId, orgId);
-  await writeJSON(bucket, bundlePath, bundle);
-  
-  console.log('[Entities] Generated bundle with', entities.length, 'entities');
-  
-  // Also update the manifest
-  await updateManifest(bucket, visibility, typeId, bundle, orgId);
-}
-
-/**
- * Update the site manifest after bundle regeneration
- */
-async function updateManifest(
-  bucket: R2Bucket,
-  visibility: 'public' | 'authenticated' | 'members',
-  typeId: string,
-  bundle: EntityBundle,
-  orgId?: string
-): Promise<void> {
-  console.log('[Entities] Updating manifest for:', visibility, orgId || '');
-  
-  const manifestPath = getManifestPath(visibility, orgId);
-  let manifest = await readJSON<SiteManifest>(bucket, manifestPath);
-  
-  if (!manifest) {
-    manifest = {
-      generatedAt: new Date().toISOString(),
-      version: Date.now(),
-      entityTypes: []
-    };
-  }
-  
-  // Get entity type for manifest entry
-  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
-  if (!entityType) return;
-  
-  // Update or add the entity type entry
-  const existingIndex = manifest.entityTypes.findIndex(t => t.id === typeId);
-  const typeEntry: ManifestEntityType = {
-    id: entityType.id,
-    name: entityType.name,
-    pluralName: entityType.pluralName,
-    slug: entityType.slug,
-    description: entityType.description,
-    entityCount: bundle.entityCount,
-    bundleVersion: bundle.version,
-    lastUpdated: bundle.generatedAt
-  };
-  
-  if (existingIndex >= 0) {
-    manifest.entityTypes[existingIndex] = typeEntry;
-  } else {
-    manifest.entityTypes.push(typeEntry);
-  }
-  
-  manifest.generatedAt = new Date().toISOString();
-  manifest.version = Date.now();
-  
-  await writeJSON(bucket, manifestPath, manifest);
-  console.log('[Entities] Manifest updated');
-}
+// Note: Bundle regeneration is now handled by the centralized bundle-invalidation.ts service

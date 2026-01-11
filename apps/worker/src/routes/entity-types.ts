@@ -18,6 +18,7 @@ import {
   entityTypeQueryParamsSchema 
 } from '@1cc/shared';
 import { readJSON, writeJSON, listFiles, getEntityTypePath, getOrgPermissionsPath } from '../lib/r2';
+import { regenerateManifestsForType } from '../lib/bundle-invalidation';
 import { createEntityTypeId, createSlug } from '../lib/id';
 import { requireSuperadmin } from '../middleware/auth';
 import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
@@ -100,6 +101,9 @@ entityTypeRoutes.post('/',
   
   // Auto-grant permissions to all existing organizations
   await grantTypeToAllOrganizations(c.env.R2_BUCKET, typeId, userId);
+  
+  // Regenerate all manifests to include the new type
+  await regenerateManifestsForType(c.env.R2_BUCKET, typeId);
   
   return c.json({
     success: true,
@@ -291,6 +295,18 @@ entityTypeRoutes.patch('/:id',
   
   console.log('[EntityTypes] Updated entity type:', typeId);
   
+  // Regenerate manifests if metadata that appears in manifests changed
+  const metadataChanged = 
+    updates.name !== undefined ||
+    updates.pluralName !== undefined ||
+    updates.slug !== undefined ||
+    updates.description !== undefined;
+    
+  if (metadataChanged) {
+    console.log('[EntityTypes] Metadata changed, regenerating manifests');
+    await regenerateManifestsForType(c.env.R2_BUCKET, typeId);
+  }
+  
   return c.json({
     success: true,
     data: updatedType
@@ -361,6 +377,9 @@ entityTypeRoutes.delete('/:id', requireSuperadmin(), async (c) => {
   await writeJSON(c.env.R2_BUCKET, getEntityTypePath(typeId), updatedType);
   
   console.log('[EntityTypes] Archived entity type:', typeId);
+  
+  // Regenerate manifests to remove the archived type
+  await regenerateManifestsForType(c.env.R2_BUCKET, typeId);
   
   return c.json({
     success: true,

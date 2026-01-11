@@ -10,8 +10,8 @@ import { useAuth } from '../../stores/auth';
 import { useSync } from '../../stores/sync';
 import { api } from '../../lib/api';
 import { FieldRenderer } from '../../components/fields';
-import { slugify } from '../../lib/utils';
-import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, OrganizationListItem } from '@1cc/shared';
+import { slugify, checkDuplicatesInBundle, type DuplicateCheckResult } from '../../lib/utils';
+import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, OrganizationListItem, EntityBundle, BundleEntity } from '@1cc/shared';
 
 interface EntityEditorProps {
   orgSlug?: string;
@@ -54,6 +54,11 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(organizationId.value);
   const [loadingOrgs, setLoadingOrgs] = useState(false);
   const [entityOrgName, setEntityOrgName] = useState<string | null>(null);
+  
+  // Duplicate checking state
+  const [orgBundle, setOrgBundle] = useState<EntityBundle | null>(null);
+  const [loadingBundle, setLoadingBundle] = useState(false);
+  const [duplicateCheck, setDuplicateCheck] = useState<DuplicateCheckResult>({});
   
   const isNew = !id;
   
@@ -110,6 +115,58 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
       loadEntityTypeDefinition(entity.entityTypeId, false);
     }
   }, [typeId, entity, isNew, entityType]);
+  
+  // Load org bundle for duplicate checking when entity type and org are known
+  useEffect(() => {
+    const effectiveTypeId = entityType?.id || typeId;
+    const effectiveOrg = isNew ? selectedOrgId : entity?.organizationId;
+    
+    if (effectiveTypeId && effectiveOrg) {
+      loadOrgBundle(effectiveOrg, effectiveTypeId);
+    }
+  }, [entityType?.id, typeId, selectedOrgId, entity?.organizationId, isNew]);
+  
+  // Run duplicate check when name or slug changes
+  useEffect(() => {
+    if (!orgBundle) {
+      setDuplicateCheck({});
+      return;
+    }
+    
+    const name = (formData.name as string) || '';
+    const slug = (formData.slug as string) || '';
+    const excludeId = isNew ? undefined : entity?.id;
+    
+    const result = checkDuplicatesInBundle(orgBundle, name, slug, excludeId);
+    setDuplicateCheck(result);
+    
+    console.log('[EntityEditor] Duplicate check result:', result);
+  }, [formData.name, formData.slug, orgBundle, isNew, entity?.id]);
+  
+  async function loadOrgBundle(orgId: string, typeId: string) {
+    setLoadingBundle(true);
+    console.log('[EntityEditor] Loading org bundle for duplicate checking:', orgId, typeId);
+    
+    try {
+      const response = await api.get(`/manifests/bundles/org/${orgId}/${typeId}`) as {
+        success: boolean;
+        data?: EntityBundle;
+      };
+      
+      if (response.success && response.data) {
+        setOrgBundle(response.data);
+        console.log('[EntityEditor] Loaded org bundle with', response.data.entities?.length || 0, 'entities');
+      } else {
+        console.log('[EntityEditor] No bundle found or empty response');
+        setOrgBundle(null);
+      }
+    } catch (err) {
+      console.error('[EntityEditor] Error loading org bundle:', err);
+      setOrgBundle(null);
+    } finally {
+      setLoadingBundle(false);
+    }
+  }
   
   async function loadCreatableTypes() {
     setLoadingTypes(true);
@@ -380,6 +437,11 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     
     if (!entityType) return false;
     
+    // Check for duplicate slug (blocking)
+    if (duplicateCheck.slugMatch) {
+      newErrors.slug = 'This slug is already in use. Please choose a different slug.';
+    }
+    
     entityType.fields.forEach(field => {
       const value = formData[field.id];
       
@@ -421,6 +483,9 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   }
+  
+  // Check if save should be blocked due to duplicate slug
+  const hasDuplicateSlug = !!duplicateCheck.slugMatch;
   
   async function handleSave() {
     if (!entityType) return;
@@ -636,7 +701,8 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
             type="button"
             onClick={handleSave}
             class="btn-primary"
-            disabled={saving || !isDirty}
+            disabled={saving || !isDirty || hasDuplicateSlug}
+            title={hasDuplicateSlug ? 'Cannot save: duplicate slug exists' : undefined}
           >
             {saving ? (
               <>
@@ -658,6 +724,44 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
         <div class="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400">
           <span class="i-lucide-alert-circle mr-2"></span>
           {saveError}
+        </div>
+      )}
+      
+      {/* Duplicate name warning banner (non-blocking) */}
+      {duplicateCheck.nameMatch && (
+        <div class="mb-6 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-700 dark:text-amber-400 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="i-lucide-alert-triangle"></span>
+            <span>
+              An entity with this name already exists: <strong>"{duplicateCheck.nameMatch.data?.name}"</strong>
+            </span>
+          </div>
+          <a 
+            href={`/admin/${effectiveOrgId}/entities/${duplicateCheck.nameMatch.id}`}
+            class="text-amber-800 dark:text-amber-300 hover:underline flex items-center gap-1"
+            target="_blank"
+          >
+            View <span class="i-lucide-external-link text-sm"></span>
+          </a>
+        </div>
+      )}
+      
+      {/* Duplicate slug error banner (blocking) */}
+      {duplicateCheck.slugMatch && (
+        <div class="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="i-lucide-alert-circle"></span>
+            <span>
+              This slug is already in use by: <strong>"{duplicateCheck.slugMatch.data?.name}"</strong>. Please choose a different slug.
+            </span>
+          </div>
+          <a 
+            href={`/admin/${effectiveOrgId}/entities/${duplicateCheck.slugMatch.id}`}
+            class="text-red-800 dark:text-red-300 hover:underline flex items-center gap-1"
+            target="_blank"
+          >
+            View <span class="i-lucide-external-link text-sm"></span>
+          </a>
         </div>
       )}
       

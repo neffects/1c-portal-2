@@ -4,6 +4,8 @@
  * Common helpers used across the frontend.
  */
 
+import type { EntityBundle, BundleEntity } from '@1cc/shared';
+
 /**
  * Format a date for display
  */
@@ -167,4 +169,85 @@ export function setQueryParams(params: Record<string, string>): void {
   });
   
   window.history.replaceState({}, '', url.toString());
+}
+
+/**
+ * Duplicate check result for entity name/slug validation
+ */
+export interface DuplicateCheckResult {
+  /** Entity with matching name (if any) */
+  nameMatch?: BundleEntity;
+  /** Entity with matching slug (if any) */
+  slugMatch?: BundleEntity;
+}
+
+/**
+ * Check for duplicate entities in a bundle by name or slug
+ * 
+ * Used for real-time validation in entity create/edit forms.
+ * Checks against the org bundle which contains all entity statuses for admin users.
+ * 
+ * @param bundle - The entity bundle to search (typically org bundle for the entity type)
+ * @param name - The entity name to check for duplicates
+ * @param slug - The entity slug to check for duplicates
+ * @param excludeId - Optional entity ID to exclude (for edit mode)
+ * @returns Object with matching entities for name and slug (if found)
+ */
+export function checkDuplicatesInBundle(
+  bundle: EntityBundle | undefined,
+  name: string,
+  slug: string,
+  excludeId?: string
+): DuplicateCheckResult {
+  const result: DuplicateCheckResult = {};
+  
+  // Return empty result if no bundle or empty values
+  if (!bundle || !bundle.entities || bundle.entities.length === 0) {
+    console.log('[checkDuplicatesInBundle] No bundle or empty entities');
+    return result;
+  }
+  
+  // Normalize for comparison
+  const normalizedName = name.trim().toLowerCase();
+  const normalizedSlug = slug.trim().toLowerCase();
+  
+  // Skip if values are empty
+  if (!normalizedName && !normalizedSlug) {
+    return result;
+  }
+  
+  console.log('[checkDuplicatesInBundle] Checking duplicates in bundle with', bundle.entities.length, 'entities');
+  console.log('[checkDuplicatesInBundle] Looking for name:', normalizedName, 'slug:', normalizedSlug, 'excluding:', excludeId);
+  
+  for (const entity of bundle.entities) {
+    // Skip the current entity when editing
+    if (excludeId && entity.id === excludeId) {
+      continue;
+    }
+    
+    // Check name match (case-insensitive)
+    if (normalizedName && !result.nameMatch) {
+      const entityName = (entity.data?.name as string || '').trim().toLowerCase();
+      if (entityName === normalizedName) {
+        console.log('[checkDuplicatesInBundle] Found name match:', entity.id, entityName);
+        result.nameMatch = entity;
+      }
+    }
+    
+    // Check slug match (case-insensitive, though slugs should be lowercase)
+    if (normalizedSlug && !result.slugMatch) {
+      const entitySlug = (entity.slug || '').trim().toLowerCase();
+      if (entitySlug === normalizedSlug) {
+        console.log('[checkDuplicatesInBundle] Found slug match:', entity.id, entitySlug);
+        result.slugMatch = entity;
+      }
+    }
+    
+    // Early exit if both found
+    if (result.nameMatch && result.slugMatch) {
+      break;
+    }
+  }
+  
+  return result;
 }
