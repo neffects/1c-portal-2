@@ -10,6 +10,7 @@
  */
 
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../types';
 import { 
   createEntityTypeRequestSchema, 
@@ -29,17 +30,13 @@ export const entityTypeRoutes = new Hono<{ Bindings: Env; Variables: Variables }
  * POST /
  * Create a new entity type (superadmin only)
  */
-entityTypeRoutes.post('/', requireSuperadmin, async (c) => {
+entityTypeRoutes.post('/',
+  requireSuperadmin,
+  zValidator('json', createEntityTypeRequestSchema),
+  async (c) => {
   console.log('[EntityTypes] Creating entity type');
   
-  const body = await c.req.json();
-  const result = createEntityTypeRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid entity type data', { errors: result.error.errors });
-  }
-  
-  const data = result.data;
+  const data = c.req.valid('json');
   
   // Check if slug is unique
   const existingType = await findTypeBySlug(c.env.R2_BUCKET, data.slug);
@@ -52,9 +49,13 @@ entityTypeRoutes.post('/', requireSuperadmin, async (c) => {
   const userId = c.get('userId')!;
   
   // Generate IDs for fields and sections
+  // Preserve hard-coded IDs for 'name' and 'slug' fields (required fields)
   const fields: FieldDefinition[] = data.fields.map((field, index) => ({
     ...field,
-    id: `field_${index}_${Date.now()}`
+    // Keep 'name' and 'slug' IDs as-is, generate IDs for other fields
+    id: field.id === 'name' || field.id === 'slug' 
+      ? field.id 
+      : `field_${index}_${Date.now()}`
   }));
   
   const sections: FieldSection[] = data.sections.map((section, index) => ({
@@ -115,10 +116,12 @@ entityTypeRoutes.post('/', requireSuperadmin, async (c) => {
  *   - viewable: types the org can view (for browsing entities)
  *   - creatable: types the org can create (for entity creation forms)
  */
-entityTypeRoutes.get('/', async (c) => {
+entityTypeRoutes.get('/',
+  zValidator('query', entityTypeQueryParamsSchema),
+  async (c) => {
   console.log('[EntityTypes] Listing entity types');
   
-  const query = entityTypeQueryParamsSchema.parse(c.req.query());
+  const query = c.req.valid('query');
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
   
@@ -246,16 +249,12 @@ entityTypeRoutes.get('/:id', async (c) => {
  * PATCH /:id
  * Update entity type (superadmin only)
  */
-entityTypeRoutes.patch('/:id', requireSuperadmin, async (c) => {
+entityTypeRoutes.patch('/:id',
+  requireSuperadmin,
+  zValidator('json', updateEntityTypeRequestSchema),
+  async (c) => {
   const typeId = c.req.param('id');
   console.log('[EntityTypes] Updating entity type:', typeId);
-  
-  const body = await c.req.json();
-  const result = updateEntityTypeRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid entity type data', { errors: result.error.errors });
-  }
   
   const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId));
   
@@ -263,7 +262,7 @@ entityTypeRoutes.patch('/:id', requireSuperadmin, async (c) => {
     throw new NotFoundError('Entity Type', typeId);
   }
   
-  const updates = result.data;
+  const updates = c.req.valid('json');
   
   // Check slug uniqueness if changing
   if (updates.slug && updates.slug !== entityType.slug) {

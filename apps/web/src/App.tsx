@@ -21,6 +21,7 @@ import { NotFoundPage } from './pages/NotFound';
 
 // Admin Pages (lazy loaded in production)
 import { AdminDashboard } from './pages/admin/Dashboard';
+import { EntitiesList } from './pages/admin/EntitiesList';
 import { EntityEditor } from './pages/admin/EntityEditor';
 import { UserManagement } from './pages/admin/UserManagement';
 
@@ -69,6 +70,7 @@ export function App() {
             
             {/* Admin routes */}
             <Route path="/admin" component={AdminDashboard} />
+            <Route path="/admin/entities" component={EntitiesList} />
             <Route path="/admin/entities/new/:typeId" component={EntityEditor} />
             <Route path="/admin/entities/:id/edit" component={EntityEditor} />
             <Route path="/admin/users" component={UserManagement} />

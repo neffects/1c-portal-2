@@ -26,6 +26,7 @@ interface FieldRendererProps {
   onChange: (value: unknown) => void;
   error?: string;
   disabled?: boolean;
+  readOnly?: boolean;
 }
 
 /**
@@ -47,7 +48,7 @@ const FIELD_COMPONENTS: Record<FieldType, React.ComponentType<FieldRendererProps
   country: CountryField
 };
 
-export function FieldRenderer({ field, value, onChange, error, disabled }: FieldRendererProps) {
+export function FieldRenderer({ field, value, onChange, error, disabled, readOnly }: FieldRendererProps) {
   const Component = FIELD_COMPONENTS[field.type];
   
   if (!Component) {
@@ -76,6 +77,7 @@ export function FieldRenderer({ field, value, onChange, error, disabled }: Field
         onChange={onChange}
         error={error}
         disabled={disabled}
+        readOnly={readOnly}
       />
       
       {error && (

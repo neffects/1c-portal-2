@@ -444,6 +444,48 @@ describe('Entity Routes', () => {
       
       expect(response.status).toBe(400);
     });
+    
+    it('should reject invalid field values before merging', async () => {
+      const app = createTestApp({ 
+        userRole: 'org_admin',
+        organizationId: 'org_123' 
+      });
+      
+      // Try to update with invalid field type (number instead of string)
+      const response = await app.request('/entities/ent_123', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          data: { name: 12345 } // Invalid: name should be string
+        })
+      }, mockEnv);
+      
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.success).toBe(false);
+      expect(body.error.code).toBe('VALIDATION_ERROR');
+    });
+    
+    it('should reject fields not defined in entity type', async () => {
+      const app = createTestApp({ 
+        userRole: 'org_admin',
+        organizationId: 'org_123' 
+      });
+      
+      // Try to update with field that doesn't exist in entity type
+      const response = await app.request('/entities/ent_123', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          data: { invalidField: 'value' }
+        })
+      }, mockEnv);
+      
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.success).toBe(false);
+      expect(body.error.code).toBe('VALIDATION_ERROR');
+    });
   });
   
   // ==========================================================================

@@ -13,6 +13,7 @@
  */
 
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../types';
 import { 
   createOrganizationRequestSchema, 
@@ -35,17 +36,13 @@ export const organizationRoutes = new Hono<{ Bindings: Env; Variables: Variables
  * POST /
  * Create a new organization (superadmin only)
  */
-organizationRoutes.post('/', requireSuperadmin, async (c) => {
+organizationRoutes.post('/',
+  requireSuperadmin,
+  zValidator('json', createOrganizationRequestSchema),
+  async (c) => {
   console.log('[Orgs] Creating organization');
   
-  const body = await c.req.json();
-  const result = createOrganizationRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid organization data', { errors: result.error.errors });
-  }
-  
-  const { name, slug, description, domainWhitelist, allowSelfSignup } = result.data;
+  const { name, slug, description, domainWhitelist, allowSelfSignup } = c.req.valid('json');
   
   // Check if slug is unique
   const existingOrg = await findOrgBySlug(c.env.R2_BUCKET, slug);
@@ -213,16 +210,13 @@ organizationRoutes.get('/:id', requireOrgMembership('id'), async (c) => {
  * PATCH /:id
  * Update organization
  */
-organizationRoutes.patch('/:id', requireOrgAdmin, requireOrgMembership('id'), async (c) => {
+organizationRoutes.patch('/:id',
+  requireOrgAdmin,
+  requireOrgMembership('id'),
+  zValidator('json', updateOrganizationRequestSchema),
+  async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Updating organization:', orgId);
-  
-  const body = await c.req.json();
-  const result = updateOrganizationRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid organization data', { errors: result.error.errors });
-  }
   
   const org = await readJSON<Organization>(c.env.R2_BUCKET, getOrgProfilePath(orgId));
   
@@ -230,7 +224,7 @@ organizationRoutes.patch('/:id', requireOrgAdmin, requireOrgMembership('id'), as
     throw new NotFoundError('Organization', orgId);
   }
   
-  const updates = result.data;
+  const updates = c.req.valid('json');
   
   // Check slug uniqueness if changing
   if (updates.slug && updates.slug !== org.slug) {
@@ -334,16 +328,12 @@ organizationRoutes.get('/:id/permissions', requireOrgMembership('id'), async (c)
  * PATCH /:id/permissions
  * Update entity type permissions (superadmin only)
  */
-organizationRoutes.patch('/:id/permissions', requireSuperadmin, async (c) => {
+organizationRoutes.patch('/:id/permissions',
+  requireSuperadmin,
+  zValidator('json', updateEntityTypePermissionsRequestSchema),
+  async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Updating permissions for:', orgId);
-  
-  const body = await c.req.json();
-  const result = updateEntityTypePermissionsRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid permissions data', { errors: result.error.errors });
-  }
   
   // Verify org exists
   const org = await readJSON<Organization>(c.env.R2_BUCKET, getOrgProfilePath(orgId));
@@ -356,7 +346,7 @@ organizationRoutes.patch('/:id/permissions', requireSuperadmin, async (c) => {
     getOrgPermissionsPath(orgId)
   );
   
-  const updates = result.data;
+  const updates = c.req.valid('json');
   const now = new Date().toISOString();
   
   const updatedPermissions: EntityTypePermissions = {
@@ -391,18 +381,14 @@ organizationRoutes.patch('/:id/permissions', requireSuperadmin, async (c) => {
  * organization and a notification email is sent (no acceptance required).
  * If the user doesn't exist, an invitation email with magic link is sent.
  */
-organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
+organizationRoutes.post('/:id/users/invite',
+  requireSuperadmin,
+  zValidator('json', inviteUserRequestSchema),
+  async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Superadmin inviting user to org:', orgId);
   
-  const body = await c.req.json();
-  const result = inviteUserRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid invitation data', { errors: result.error.errors });
-  }
-  
-  const { email, role } = result.data;
+  const { email, role } = c.req.valid('json');
   const currentUserId = c.get('userId')!;
   
   // Verify organization exists
@@ -525,18 +511,14 @@ organizationRoutes.post('/:id/users/invite', requireSuperadmin, async (c) => {
  * This is different from invite - it adds the user immediately without sending an email
  * Used to add existing users (including superadmins) to organizations
  */
-organizationRoutes.post('/:id/users/add', requireSuperadmin, async (c) => {
+organizationRoutes.post('/:id/users/add',
+  requireSuperadmin,
+  zValidator('json', addUserToOrgRequestSchema),
+  async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Superadmin adding existing user to org:', orgId);
   
-  const body = await c.req.json();
-  const result = addUserToOrgRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid user data', { errors: result.error.errors });
-  }
-  
-  const { email, role } = result.data;
+  const { email, role } = c.req.valid('json');
   const currentUserId = c.get('userId')!;
   
   // Verify organization exists

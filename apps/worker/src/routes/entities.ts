@@ -11,6 +11,7 @@
  */
 
 import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../types';
 import { 
   createEntityRequestSchema, 
@@ -30,6 +31,7 @@ import { createEntityId, createSlug } from '../lib/id';
 import { requireOrgAdmin, requireSuperadmin } from '../middleware/auth';
 import { NotFoundError, ForbiddenError, ValidationError, AppError } from '../middleware/error';
 import { isValidTransition, getAllowedTransitions } from '@1cc/xstate-machines';
+import { validateEntityData, validateEntityFields } from '../lib/entity-validation';
 import type { 
   Entity, EntityStub, EntityLatestPointer, EntityListItem,
   EntityType, EntityTypePermissions, VisibilityScope, EntityStatus,
@@ -42,17 +44,13 @@ export const entityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
  * POST /
  * Create a new entity
  */
-entityRoutes.post('/', requireOrgAdmin, async (c) => {
+entityRoutes.post('/', 
+  requireOrgAdmin,
+  zValidator('json', createEntityRequestSchema),
+  async (c) => {
   console.log('[Entities] Creating entity');
   
-  const body = await c.req.json();
-  const result = createEntityRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid entity data', { errors: result.error.errors });
-  }
-  
-  const { entityTypeId, data, visibility, organizationId: requestedOrgId } = result.data;
+  const { entityTypeId, data, visibility, organizationId: requestedOrgId } = c.req.valid('json');
   const userId = c.get('userId')!;
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
@@ -60,7 +58,13 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   // Determine which organization to use
   let targetOrgId: string | null;
   
-  if (requestedOrgId) {
+  // Handle global entities (null organizationId) - superadmin only
+  if (requestedOrgId === null) {
+    if (userRole !== 'superadmin') {
+      throw new ForbiddenError('Only superadmins can create global entities');
+    }
+    targetOrgId = null;
+  } else if (requestedOrgId) {
     // Verify user is an admin of the requested organization
     if (userRole !== 'superadmin') {
       // Check if user is an admin of the requested org
@@ -83,13 +87,16 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   }
   
   // Check if user can create this entity type for the target organization
-  const permissions = await readJSON<EntityTypePermissions>(
-    c.env.R2_BUCKET,
-    getOrgPermissionsPath(targetOrgId)
-  );
-  
-  if (!permissions?.creatable.includes(entityTypeId)) {
-    throw new ForbiddenError('This organization cannot create entities of this type');
+  // Skip permission check for global entities (null organizationId)
+  if (targetOrgId !== null) {
+    const permissions = await readJSON<EntityTypePermissions>(
+      c.env.R2_BUCKET,
+      getOrgPermissionsPath(targetOrgId)
+    );
+    
+    if (!permissions?.creatable.includes(entityTypeId)) {
+      throw new ForbiddenError('This organization cannot create entities of this type');
+    }
   }
   
   // Get entity type definition
@@ -102,11 +109,20 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
     throw new NotFoundError('Entity Type', entityTypeId);
   }
   
-  // Validate data against schema
-  validateEntityData(data, entityType);
+  // Validate each field individually before creating entity
+  const validatedData = validateEntityFields(data, entityType);
+  
+  // Final validation to ensure required fields are present
+  validateEntityData(validatedData, entityType);
   
   // Determine visibility (public, authenticated, members)
-  const finalVisibility: VisibilityScope = visibility || entityType.defaultVisibility;
+  // For global entities, force visibility to 'public' or 'authenticated' (not 'members')
+  let finalVisibility: VisibilityScope = visibility || entityType.defaultVisibility;
+  if (targetOrgId === null && finalVisibility === 'members') {
+    // Global entities cannot be 'members' visibility - default to 'authenticated'
+    finalVisibility = 'authenticated';
+    console.log('[Entities] Global entity visibility changed from members to authenticated');
+  }
   
   // Generate entity ID and slug
   const entityId = createEntityId();
@@ -123,7 +139,7 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
     status: 'draft',
     visibility: finalVisibility,
     slug,
-    data,
+    data: validatedData,
     createdAt: now,
     updatedAt: now,
     createdBy: userId,
@@ -140,9 +156,11 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
   
   await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub);
   
-  // Write entity version (stored in members location for drafts)
-  // Use targetOrgId (the entity's org) not userOrgId (the logged-in user's org)
-  const versionPath = getEntityVersionPath('members', entityId, 1, targetOrgId);
+  // Write entity version
+  // For global entities (null orgId), use visibility-based path (not org-specific)
+  // For org entities, use members/orgs/{orgId}/ path for drafts
+  const storageVisibility: VisibilityScope = targetOrgId === null ? finalVisibility : 'members';
+  const versionPath = getEntityVersionPath(storageVisibility, entityId, 1, targetOrgId || undefined);
   await writeJSON(c.env.R2_BUCKET, versionPath, entity);
   
   // Write latest pointer
@@ -153,7 +171,7 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
     updatedAt: now
   };
   
-  const latestPath = getEntityLatestPath('members', entityId, targetOrgId);
+  const latestPath = getEntityLatestPath(storageVisibility, entityId, targetOrgId || undefined);
   await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
   
   console.log('[Entities] Created entity:', entityId);
@@ -168,10 +186,12 @@ entityRoutes.post('/', requireOrgAdmin, async (c) => {
  * GET /
  * List entities with filtering
  */
-entityRoutes.get('/', async (c) => {
+entityRoutes.get('/',
+  zValidator('query', entityQueryParamsSchema),
+  async (c) => {
   console.log('[Entities] Listing entities');
   
-  const query = entityQueryParamsSchema.parse(c.req.query());
+  const query = c.req.valid('query');
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
   
@@ -208,12 +228,30 @@ entityRoutes.get('/', async (c) => {
     if (query.typeId && stub.entityTypeId !== query.typeId) continue;
     
     // Filter by organization if specified
-    if (query.organizationId && stub.organizationId !== query.organizationId) continue;
+    // null organizationId means global entity - only match if query.organizationId is explicitly null
+    if (query.organizationId !== undefined) {
+      if (query.organizationId === null && stub.organizationId !== null) continue;
+      if (query.organizationId !== null && stub.organizationId !== query.organizationId) continue;
+    }
     
     // Access control: non-superadmins can only see their own org's entities
     // or published public/platform entities
-    const latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
-    const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    // For global entities (null orgId), try visibility-based paths first
+    let latestPath: string | null = null;
+    let latestPointer: EntityLatestPointer | null = null;
+    
+    if (stub.organizationId === null) {
+      // Global entity - try public and authenticated paths
+      for (const visibility of ['public', 'authenticated'] as const) {
+        latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
+        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+        if (latestPointer) break;
+      }
+    } else {
+      // Org entity - use members path
+      latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    }
     
     if (!latestPointer) continue;
     
@@ -229,12 +267,16 @@ entityRoutes.get('/', async (c) => {
       const isPublished = latestPointer.status === 'published';
       const isPublicOrPlatform = latestPointer.visibility === 'public' || latestPointer.visibility === 'authenticated';
       
-      // Can only see: own org entities OR published public/platform entities
+      // Can only see: own org entities OR published public/platform entities (including global entities)
       if (!isOwnOrg && !(isPublished && isPublicOrPlatform)) continue;
     }
     
     // Get full entity for display data
-    const entityPath = getEntityVersionPath('members', stub.entityId, latestPointer.version, stub.organizationId);
+    // Determine storage visibility based on entity type
+    const storageVisibility: VisibilityScope = stub.organizationId === null 
+      ? latestPointer.visibility 
+      : 'members';
+    const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
     const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
     
     if (!entity) continue;
@@ -360,9 +402,11 @@ entityRoutes.get('/search', async (c) => {
  * GET /:id
  * Get entity by ID (latest or specific version)
  */
-entityRoutes.get('/:id', async (c) => {
+entityRoutes.get('/:id',
+  zValidator('query', entityVersionQuerySchema),
+  async (c) => {
   const entityId = c.req.param('id');
-  const versionQuery = entityVersionQuerySchema.parse(c.req.query());
+  const versionQuery = c.req.valid('query');
   
   console.log('[Entities] Getting entity:', entityId, versionQuery.version ? `v${versionQuery.version}` : 'latest');
   
@@ -378,8 +422,22 @@ entityRoutes.get('/:id', async (c) => {
   const userOrgId = c.get('organizationId');
   
   // Get latest pointer to determine visibility
-  const latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
-  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  // For global entities (null orgId), try visibility-based paths
+  let latestPath: string | null = null;
+  let latestPointer: EntityLatestPointer | null = null;
+  
+  if (stub.organizationId === null) {
+    // Global entity - try public and authenticated paths
+    for (const visibility of ['public', 'authenticated'] as const) {
+      latestPath = getEntityLatestPath(visibility, entityId, undefined);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      if (latestPointer) break;
+    }
+  } else {
+    // Org entity - use members path
+    latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  }
   
   if (!latestPointer) {
     throw new NotFoundError('Entity', entityId);
@@ -401,10 +459,13 @@ entityRoutes.get('/:id', async (c) => {
   const version = versionQuery.version || latestPointer.version;
   
   // Determine storage location based on status and visibility
-  // Draft/pending entities are always stored in members (private) location
-  // Published entities are stored based on their visibility setting
+  // Draft/pending entities are always stored in members (private) location for org entities
+  // Global entities use visibility-based paths
   let versionPath: string;
-  if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
+  if (stub.organizationId === null) {
+    // Global entity - use visibility-based path
+    versionPath = getEntityVersionPath(latestPointer.visibility, entityId, version);
+  } else if (latestPointer.status === 'draft' || latestPointer.status === 'pending_approval') {
     // Drafts and pending entities are always in the org's private space
     versionPath = getEntityVersionPath('members', entityId, version, stub.organizationId);
   } else if (latestPointer.visibility === 'members') {
@@ -429,18 +490,14 @@ entityRoutes.get('/:id', async (c) => {
  * PATCH /:id
  * Update entity with atomic field merge
  */
-entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
+entityRoutes.patch('/:id',
+  requireOrgAdmin,
+  zValidator('json', updateEntityRequestSchema),
+  async (c) => {
   const entityId = c.req.param('id');
   console.log('[Entities] Updating entity:', entityId);
   
-  const body = await c.req.json();
-  const result = updateEntityRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid update data', { errors: result.error.errors });
-  }
-  
-  const updates = result.data;
+  const updates = c.req.valid('json');
   const userId = c.get('userId')!;
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
@@ -484,13 +541,17 @@ entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
     getEntityTypePath(currentEntity.entityTypeId)
   );
   
-  // Atomic merge of data fields
-  const newData = updates.data 
-    ? { ...currentEntity.data, ...updates.data }
-    : currentEntity.data;
+  if (!entityType) {
+    throw new NotFoundError('Entity Type', currentEntity.entityTypeId);
+  }
   
-  // Validate updated data
-  if (entityType) {
+  // Validate each field individually before merging
+  let newData = currentEntity.data;
+  if (updates.data) {
+    const validatedUpdates = validateEntityFields(updates.data, entityType);
+    // Merge only validated fields
+    newData = { ...currentEntity.data, ...validatedUpdates };
+    // Final validation to ensure required fields are still present
     validateEntityData(newData, entityType);
   }
   
@@ -500,10 +561,9 @@ entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
   // Get the new visibility for the entity
   const newVisibility = updates.visibility || currentEntity.visibility;
   
-  // Update slug if name changed
-  const newSlug = (newData.name as string) !== (currentEntity.data.name as string)
-    ? createSlug(newData.name as string)
-    : currentEntity.slug;
+  // Use slug from request data if provided, otherwise keep existing slug
+  // Slug should NOT auto-update from name changes after entity has been saved
+  const newSlug = (newData.slug as string) || currentEntity.slug;
   
   // Create new version
   const updatedEntity: Entity = {
@@ -542,18 +602,13 @@ entityRoutes.patch('/:id', requireOrgAdmin, async (c) => {
  * POST /:id/transition
  * Handle status transitions (submit, approve, reject, archive, restore, delete)
  */
-entityRoutes.post('/:id/transition', async (c) => {
+entityRoutes.post('/:id/transition',
+  zValidator('json', entityTransitionRequestSchema),
+  async (c) => {
   const entityId = c.req.param('id');
   console.log('[Entities] Processing transition for:', entityId);
   
-  const body = await c.req.json();
-  const result = entityTransitionRequestSchema.safeParse(body);
-  
-  if (!result.success) {
-    throw new ValidationError('Invalid transition data', { errors: result.error.errors });
-  }
-  
-  const { action, feedback } = result.data;
+  const { action, feedback } = c.req.valid('json');
   const userId = c.get('userId')!;
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
@@ -704,90 +759,6 @@ entityRoutes.delete('/:id', requireOrgAdmin, async (c) => {
 });
 
 // Helper functions
-
-/**
- * Validate entity data against type schema
- */
-function validateEntityData(data: Record<string, unknown>, entityType: EntityType): void {
-  const errors: string[] = [];
-  
-  for (const field of entityType.fields) {
-    const value = data[field.id];
-    
-    // Check required fields
-    if (field.required && (value === undefined || value === null || value === '')) {
-      errors.push(`Field '${field.name}' is required`);
-      continue;
-    }
-    
-    if (value === undefined || value === null) continue;
-    
-    // Type-specific validation
-    const constraints = field.constraints || {};
-    
-    switch (field.type) {
-      case 'string':
-      case 'text':
-      case 'markdown':
-        if (typeof value !== 'string') {
-          errors.push(`Field '${field.name}' must be a string`);
-        } else {
-          if (constraints.minLength && value.length < constraints.minLength) {
-            errors.push(`Field '${field.name}' must be at least ${constraints.minLength} characters`);
-          }
-          if (constraints.maxLength && value.length > constraints.maxLength) {
-            errors.push(`Field '${field.name}' must not exceed ${constraints.maxLength} characters`);
-          }
-        }
-        break;
-        
-      case 'number':
-        if (typeof value !== 'number') {
-          errors.push(`Field '${field.name}' must be a number`);
-        } else {
-          if (constraints.minValue !== undefined && value < constraints.minValue) {
-            errors.push(`Field '${field.name}' must be at least ${constraints.minValue}`);
-          }
-          if (constraints.maxValue !== undefined && value > constraints.maxValue) {
-            errors.push(`Field '${field.name}' must not exceed ${constraints.maxValue}`);
-          }
-        }
-        break;
-        
-      case 'boolean':
-        if (typeof value !== 'boolean') {
-          errors.push(`Field '${field.name}' must be a boolean`);
-        }
-        break;
-        
-      case 'select':
-        if (constraints.options) {
-          const validValues = constraints.options.map(o => o.value);
-          if (!validValues.includes(value as string)) {
-            errors.push(`Field '${field.name}' must be one of: ${validValues.join(', ')}`);
-          }
-        }
-        break;
-        
-      case 'multiselect':
-        if (!Array.isArray(value)) {
-          errors.push(`Field '${field.name}' must be an array`);
-        } else if (constraints.options) {
-          const validValues = constraints.options.map(o => o.value);
-          for (const v of value) {
-            if (!validValues.includes(v as string)) {
-              errors.push(`Field '${field.name}' contains invalid value: ${v}`);
-            }
-          }
-        }
-        break;
-    }
-  }
-  
-  if (errors.length > 0) {
-    throw new ValidationError('Entity data validation failed', { fields: errors });
-  }
-}
 
 /**
  * Regenerate entity bundle for a specific type

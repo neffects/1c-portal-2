@@ -293,6 +293,21 @@ The project includes automated security testing with:
   - Automated penetration testing in CI/CD
 
 ### Recently Completed
+- ✅ Organization selection and global entities (2026-01-10):
+  - Users can now select which organization to create entities for when they're members of multiple orgs
+  - Superadmins can create global/platform-wide entities (organizationId = null)
+  - Organization selector always visible when creating new entities
+  - Global entities are stored in platform/ or public/ paths (not org-specific)
+  - Global entities cannot use 'members' visibility (automatically changed to 'authenticated')
+  - Backend validates superadmin permissions for global entity creation
+  - Entity types updated to support null organizationId
+- ✅ Admin entities list page (2026-01-10):
+  - Added `/admin/entities` route with full entity listing page
+  - Includes filtering by type, status, and search query
+  - Pagination support for large entity lists
+  - Breadcrumb navigation linking from EntityEditor
+  - Displays entity name, type, status, and last updated date
+  - Links to edit individual entities
 - ✅ Simplified user management with email autocomplete (2026-01-10):
   - Single "Add Member" form with email autocomplete for existing users
   - As you type, suggestions show existing users (including superadmins)
@@ -357,11 +372,23 @@ The project includes automated security testing with:
     - Approval queue now displays `entity.data.name` instead of entity IDs
     - Fetches and displays organization names alongside entity information
     - Backend API includes `organizationId` in `EntityListItem` response
-    - Standardized entity name field convention across the system:
+      - Standardized entity name field convention across the system:
       - All entity types now use `data.name` consistently (not `entity_name`, `title`, etc.)
       - TypeBuilder creates fields with standard IDs: `name` and `slug`
       - EntityEditor strictly checks `fieldId === 'name'` for auto-slug generation
       - Enforces convention: all entities must have `data.name` field
+  - Entity slug auto-generation (NEF-7):
+    - Slug field is automatically generated from the name field when creating new entities
+    - Slug field is editable - users can manually edit the auto-generated slug if needed
+    - Slug auto-updates in real-time as the user types in the name field (for new entities only)
+    - Once the entity has been saved, the slug will NOT auto-update even if the name changes
+    - Once the user manually edits the slug, it won't be overwritten by name changes
+    - Slug field displays helper text: "Auto-generated from name (you can edit if needed)"
+    - Slug input is filtered to only allow characters: a-z, 0-9, and hyphens (-)
+    - Backend auto-generates slug from name if not provided in create request (POST only)
+    - Backend does NOT update slug from name changes in update requests (PATCH)
+    - Slug generation uses `slugify()` utility: lowercase, hyphens for spaces, removes special chars
+    - Both name and slug are required fields for all entity types
 
 ## Notes
 

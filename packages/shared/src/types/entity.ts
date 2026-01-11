@@ -26,8 +26,8 @@ export interface Entity {
   id: string;
   /** Entity type identifier */
   entityTypeId: string;
-  /** Organization that owns this entity */
-  organizationId: string;
+  /** Organization that owns this entity (null for global/platform entities) */
+  organizationId: string | null;
   /** Version number (increments on each save) */
   version: number;
   /** Current status in the lifecycle */
@@ -61,8 +61,8 @@ export interface Entity {
 export interface EntityStub {
   /** Entity ID */
   entityId: string;
-  /** Organization that owns this entity */
-  organizationId: string;
+  /** Organization that owns this entity (null for global/platform entities) */
+  organizationId: string | null;
   /** Entity type identifier */
   entityTypeId: string;
   /** When the entity was created (ISO 8601) */
@@ -122,7 +122,7 @@ export interface EntityTransitionRequest {
 export interface EntityListItem {
   id: string;
   entityTypeId: string;
-  organizationId: string;
+  organizationId: string | null;
   slug: string;
   status: EntityStatus;
   visibility: VisibilityScope;

@@ -827,7 +827,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
       displayOrder: 1,
       sectionId: mainSectionId,
       showInTable: false,
-      constraints: { pattern: '^[a-z0-9-]+$' }
+      constraints: { pattern: '^[-a-z0-9]+$' }
     }
   ];
   
