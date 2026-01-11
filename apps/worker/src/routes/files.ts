@@ -56,6 +56,9 @@ files.post('/upload', authMiddleware, async (c: Context) => {
       case 'logo':
         path = `uploads/logos/${filename}`;
         break;
+      case 'favicon':
+        path = `uploads/favicons/${filename}`;
+        break;
       default:
         path = `uploads/files/${filename}`;
     }

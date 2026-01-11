@@ -38,6 +38,11 @@ export default defineConfig({
       '/manifests': {
         target: 'http://localhost:8787',
         changeOrigin: true
+      },
+      // Proxy file uploads/downloads to worker
+      '/files': {
+        target: 'http://localhost:8787',
+        changeOrigin: true
       }
     }
   },

@@ -99,6 +99,17 @@ export function SuperadminDashboard() {
           <p class="text-sm text-surface-500">Review pending content</p>
         </a>
         
+        <a href="/super/branding" class="card-hover p-6">
+          <div class="w-12 h-12 rounded-xl bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center mb-4">
+            <span class="i-lucide-palette text-2xl text-purple-600 dark:text-purple-400"></span>
+          </div>
+          <h3 class="font-semibold text-surface-900 dark:text-surface-100 mb-1">Branding</h3>
+          <p class="text-sm text-surface-500">Configure platform branding</p>
+        </a>
+      </div>
+      
+      {/* Platform Health */}
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
         <div class="card p-6">
           <div class="w-12 h-12 rounded-xl bg-green-100 dark:bg-green-900/30 flex items-center justify-center mb-4">
             <span class="i-lucide-activity text-2xl text-green-600 dark:text-green-400"></span>

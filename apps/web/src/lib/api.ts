@@ -207,10 +207,31 @@ async function upload<T>(path: string, formData: FormData): Promise<ApiResponse<
       body: formData
     });
     
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch (parseError) {
+      console.error('[API] UPLOAD JSON parse error:', path, parseError);
+      const text = await response.text();
+      console.error('[API] UPLOAD response text:', text);
+      return {
+        success: false,
+        error: {
+          code: 'PARSE_ERROR',
+          message: 'Failed to parse server response'
+        }
+      };
+    }
     
     if (!response.ok) {
-      console.error('[API] UPLOAD error:', path, data);
+      console.error('[API] UPLOAD error:', path, response.status, data);
+      return {
+        success: false,
+        error: data.error || {
+          code: 'UPLOAD_ERROR',
+          message: data.message || `Upload failed with status ${response.status}`
+        }
+      };
     }
     
     return data;

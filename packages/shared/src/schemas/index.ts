@@ -6,5 +6,6 @@
 export * from './auth';
 export * from './user';
 export * from './organization';
+export * from './config';
 export * from './entity';
 export * from './entity-type';
