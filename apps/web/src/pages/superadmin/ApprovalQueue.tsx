@@ -127,6 +127,7 @@ export function ApprovalQueue() {
         <div class="space-y-4">
           {pendingEntities.map(entity => {
             const org = organizations.get(entity.organizationId);
+            
             return (
               <div key={entity.id} class="card p-6">
                 <div class="flex items-start justify-between gap-4">

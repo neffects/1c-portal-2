@@ -179,6 +179,21 @@ entityRoutes.get('/', async (c) => {
   
   const items: EntityListItem[] = [];
   
+  // Cache entity types to avoid multiple reads (keyed by entityTypeId)
+  const entityTypeCache = new Map<string, EntityType>();
+  
+  // Helper to get entity type (with caching)
+  async function getEntityType(typeId: string): Promise<EntityType | null> {
+    if (entityTypeCache.has(typeId)) {
+      return entityTypeCache.get(typeId)!;
+    }
+    const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId));
+    if (entityType) {
+      entityTypeCache.set(typeId, entityType);
+    }
+    return entityType;
+  }
+  
   // Get all entity stubs to find entities
   const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
   console.log('[Entities] Found', stubFiles.length, 'entity stubs');
@@ -224,16 +239,42 @@ entityRoutes.get('/', async (c) => {
     
     if (!entity) continue;
     
+    // Get entity type to find the name field
+    const entityType = await getEntityType(entity.entityTypeId);
+    
+    // Extract name field value - try multiple strategies:
+    // 1. Direct entity.data.name (if field ID is 'name')
+    // 2. First field in entity type (typically the name field)
+    // 3. Fallback to entity ID
+    let nameValue: string | undefined;
+    if (entity.data.name) {
+      nameValue = entity.data.name as string;
+    } else if (entityType && entityType.fields.length > 0) {
+      // Use the first field's ID (typically the name field)
+      const nameFieldId = entityType.fields[0].id;
+      nameValue = entity.data[nameFieldId] as string | undefined;
+    }
+    
+    // Extract description field value similarly
+    let descriptionValue: string | undefined;
+    if (entity.data.description) {
+      descriptionValue = entity.data.description as string;
+    } else if (entityType && entityType.fields.length > 1) {
+      // Try second field as description (common pattern)
+      const descFieldId = entityType.fields[1].id;
+      descriptionValue = entity.data[descFieldId] as string | undefined;
+    }
+    
     // Filter by search query
     if (query.search) {
       const searchLower = query.search.toLowerCase();
-      const name = (entity.data.name as string || '').toLowerCase();
-      const description = (entity.data.description as string || '').toLowerCase();
+      const name = (nameValue || '').toLowerCase();
+      const description = (descriptionValue || '').toLowerCase();
       
       if (!name.includes(searchLower) && !description.includes(searchLower)) continue;
     }
     
-    items.push({
+    const listItem = {
       id: entity.id,
       entityTypeId: entity.entityTypeId,
       organizationId: entity.organizationId,
@@ -241,12 +282,14 @@ entityRoutes.get('/', async (c) => {
       status: entity.status,
       visibility: entity.visibility,
       data: {
-        name: entity.data.name as string || `Entity ${entity.id}`,
-        description: entity.data.description as string || undefined
+        name: nameValue || `Entity ${entity.id}`,
+        description: descriptionValue
       },
       version: entity.version,
       updatedAt: entity.updatedAt
-    });
+    };
+    
+    items.push(listItem);
   }
   
   // Sort by updatedAt descending
