@@ -17,6 +17,8 @@ import { LoginPage } from './pages/Login';
 import { AuthCallbackPage } from './pages/AuthCallback';
 import { BrowsePage } from './pages/Browse';
 import { EntityDetailPage } from './pages/EntityDetail';
+import { OrgHomePage } from './pages/OrgHomePage';
+import { TypeListingPage } from './pages/TypeListingPage';
 import { AlertsPage } from './pages/Alerts';
 import { NotFoundPage } from './pages/NotFound';
 
@@ -72,8 +74,6 @@ export function App() {
             <Route path="/" component={HomePage} />
             <Route path="/login" component={LoginPage} />
             <Route path="/auth/callback" component={AuthCallbackPage} />
-            <Route path="/browse/:typeSlug" component={BrowsePage} />
-            <Route path="/browse/:typeSlug/:entitySlug" component={EntityDetailPage} />
             
             {/* Authenticated routes */}
             <Route path="/alerts" component={AlertsPage} />
@@ -83,6 +83,7 @@ export function App() {
             <Route path="/admin/entities" component={EntitiesList} />
             <Route path="/admin/entity-types/:typeId" component={EntityTypeView} />
             <Route path="/admin/entities/new/:typeId" component={EntityEditor} />
+            <Route path="/admin/entities/new" component={EntityEditor} />
             <Route path="/admin/entities/:id/edit" component={EntityEditor} />
             <Route path="/admin/entities/:id" component={EntityView} />
             <Route path="/admin/users" component={UserManagement} />
@@ -97,6 +98,11 @@ export function App() {
             <Route path="/super/approvals" component={ApprovalQueue} />
             <Route path="/super/branding" component={Branding} />
             <Route path="/super/import-export" component={EntityImportExport} />
+            
+            {/* Deep link routes - MUST be last to avoid catching other routes */}
+            <Route path="/:orgSlug/:typeSlug/:entitySlug" component={EntityDetailPage} />
+            <Route path="/:orgSlug/:typeSlug" component={TypeListingPage} />
+            <Route path="/:orgSlug" component={OrgHomePage} />
             
             {/* 404 fallback */}
             <Route default component={NotFoundPage} />

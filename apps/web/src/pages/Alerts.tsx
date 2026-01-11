@@ -37,7 +37,7 @@ export function AlertsPage() {
     setLoading(true);
     setError(null);
     
-    const response = await api.get('/api/users/me/flags') as { success: boolean; data?: { items: EntityFlag[] }; error?: { message: string } };
+    const response = await api.get('/api/user/flags') as { success: boolean; data?: { items: EntityFlag[] }; error?: { message: string } };
     
     if (response.success && response.data) {
       setFlags(response.data.items);

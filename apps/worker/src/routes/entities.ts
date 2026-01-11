@@ -31,6 +31,7 @@ import {
   getEntityTypePath, getOrgPermissionsPath, getUserMembershipPath,
   getBundlePath, getManifestPath
 } from '../lib/r2';
+import { upsertSlugIndex, deleteSlugIndex } from '../lib/slug-index';
 import { R2_PATHS } from '@1cc/shared';
 import { createEntityId, createSlug } from '../lib/id';
 import { requireOrgAdmin, requireSuperadmin } from '../middleware/auth';
@@ -190,6 +191,22 @@ entityRoutes.post('/',
   
   const latestPath = getEntityLatestPath(storageVisibility, entityId, targetOrgId || undefined);
   await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
+  
+  // Create slug index for deep linking (only for public visibility entities)
+  if (finalVisibility === 'public') {
+    await upsertSlugIndex(
+      c.env.R2_BUCKET,
+      targetOrgId,
+      entityType.slug,
+      slug,
+      {
+        entityId,
+        visibility: finalVisibility,
+        organizationId: targetOrgId,
+        entityTypeId
+      }
+    );
+  }
   
   console.log('[Entities] Created entity:', entityId);
   
@@ -1167,6 +1184,24 @@ entityRoutes.patch('/:id',
   
   // Update latest pointer at the new location
   await writeJSON(c.env.R2_BUCKET, newLatestPath, newPointer);
+  
+  // Update slug index if visibility is public and slug or visibility changed
+  if (newVisibility === 'public') {
+    // Delete old slug index if slug changed
+    if (currentEntity.slug !== newSlug && currentEntity.visibility === 'public') {
+      await deleteSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, currentEntity.slug);
+    }
+    // Create/update slug index
+    await upsertSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, newSlug, {
+      entityId,
+      visibility: newVisibility,
+      organizationId: stub.organizationId,
+      entityTypeId: currentEntity.entityTypeId
+    });
+  } else if (currentEntity.visibility === 'public' && newVisibility !== 'public') {
+    // Visibility changed from public to non-public - delete slug index
+    await deleteSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, currentEntity.slug);
+  }
   
   console.log('[Entities] Updated entity:', entityId, 'to v' + newVersion);
   

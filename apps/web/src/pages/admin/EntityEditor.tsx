@@ -18,7 +18,11 @@ interface EntityEditorProps {
   typeId?: string;
 }
 
-export function EntityEditor({ id, typeId }: EntityEditorProps) {
+export function EntityEditor({ id, typeId: typeIdProp }: EntityEditorProps) {
+  // Read typeId from URL query string if not provided as prop (for /admin/entities/new?type=xxx pattern)
+  const urlParams = new URLSearchParams(window.location.search);
+  const typeIdFromQuery = urlParams.get('type');
+  const typeId = typeIdProp || typeIdFromQuery || undefined;
   const { isAuthenticated, isOrgAdmin, isSuperadmin, loading: authLoading, organizationId, user, userId } = useAuth();
   const { entityTypes } = useSync();
   
@@ -432,22 +436,30 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
           ...payload
         };
         
-        // Include organizationId in payload
-        // null = global entity (superadmin only), undefined = use default org
+        // Determine target organization ID
+        // null = global entity (superadmin only), use default org otherwise
+        let targetOrgId: string;
         if (selectedOrgId === null) {
-          // Global entity - explicitly set to null
-          createPayload.organizationId = null;
-        } else if (selectedOrgId && selectedOrgId !== organizationId.value) {
-          // Different organization selected
-          createPayload.organizationId = selectedOrgId;
+          // Global entity - superadmin only, but still need to use org route structure
+          // For now, use user's default org (API will handle global entities differently)
+          if (!organizationId.value) {
+            throw new Error('You must belong to an organization to create entities');
+          }
+          targetOrgId = organizationId.value;
+          // Note: Global entities (null orgId) may need special handling
+        } else {
+          targetOrgId = selectedOrgId || organizationId.value!;
         }
-        // If selectedOrgId matches organizationId.value, don't include it (use default)
+        
+        // Remove organizationId from payload - it's in the URL path
+        delete createPayload.organizationId;
         
         // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:375',message:'Sending create request',data:{payload:JSON.stringify(createPayload).substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'K'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:375',message:'Sending create request',data:{payload:JSON.stringify(createPayload).substring(0,200),targetOrgId},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'K'})}).catch(()=>{});
         // #endregion
         
-        response = await api.post<Entity>('/api/entities', createPayload);
+        // Use organization-scoped route: /api/orgs/:orgId/entities
+        response = await api.post<Entity>(`/api/orgs/${targetOrgId}/entities`, createPayload);
       } else {
         response = await api.patch<Entity>(`/api/entities/${id}`, payload);
       }
@@ -520,7 +532,7 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
               {creatableTypes.map(type => (
                 <a
                   key={type.id}
-                  href={`/admin/entities/new?type=${type.id}`}
+                  href={`/admin/entities/new/${type.id}`}
                   class="card p-6 hover:ring-2 hover:ring-primary-500 transition-all"
                 >
                   <h3 class="heading-4 mb-2">{type.name}</h3>

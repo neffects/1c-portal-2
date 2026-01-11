@@ -10,6 +10,7 @@ import { api } from '../lib/api';
 import { useState } from 'preact/hooks';
 
 interface EntityDetailPageProps {
+  orgSlug?: string;
   typeSlug?: string;
   entitySlug?: string;
 }
@@ -74,7 +75,7 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
   return <span>{String(value)}</span>;
 }
 
-export function EntityDetailPage({ typeSlug, entitySlug }: EntityDetailPageProps) {
+export function EntityDetailPage({ orgSlug, typeSlug, entitySlug }: EntityDetailPageProps) {
   const { getEntityType, getEntityBySlug, syncing } = useSync();
   const { isAuthenticated, user } = useAuth();
   

@@ -17,16 +17,15 @@ import { prettyJSON } from 'hono/pretty-json';
 
 // Import route modules
 import { authRoutes } from './routes/auth';
-import { organizationRoutes } from './routes/organizations';
-import { entityTypeRoutes } from './routes/entity-types';
-import { entityRoutes } from './routes/entities';
-import { userRoutes } from './routes/users';
-import { manifestRoutes } from './routes/manifests';
+import { publicRoutes } from './routes/public';
+import { apiRoutes } from './routes/api';
+import { userRoutes } from './routes/user';
+import { orgRoutes } from './routes/orgs';
+import { superRoutes } from './routes/super';
 import fileRoutes from './routes/files';
-import { platformRoutes } from './routes/platform';
 
 // Import middleware
-import { authMiddleware } from './middleware/auth';
+import { authMiddleware, requireSuperadmin, requireOrgMembership } from './middleware/auth';
 import { errorHandler } from './middleware/error';
 
 // Import types
@@ -72,30 +71,25 @@ app.get('/', (c) => {
 
 // Public routes (no auth required)
 app.route('/auth', authRoutes);
+app.route('/public', publicRoutes);
 
-// Public manifest routes
-app.route('/manifests', manifestRoutes);
+// User-specific routes - auth required
+app.use('/api/user/*', authMiddleware);
+app.route('/api/user', userRoutes);
 
-// Platform routes - GET /branding is public (uses optionalAuth middleware)
-app.route('/api/platform', platformRoutes);
+// Org routes - auth + org membership required
+app.use('/api/orgs/:orgId/*', authMiddleware);
+app.use('/api/orgs/:orgId/*', requireOrgMembership('orgId'));
+app.route('/api/orgs', orgRoutes);
 
-// Protected routes (auth required)
-// Skip auth for platform routes which use optionalAuth
-app.use('/api/*', async (c, next) => {
-  // Skip auth middleware for platform routes (they use optionalAuth)
-  if (c.req.path.startsWith('/api/platform')) {
-    console.log('[API] Skipping auth middleware for platform route:', c.req.path);
-    return next();
-  }
-  console.log('[API] Applying auth middleware for route:', c.req.path);
-  return authMiddleware(c, next);
-});
+// Superadmin routes - auth + superadmin required
+app.use('/api/super/*', authMiddleware);
+app.use('/api/super/*', requireSuperadmin());
+app.route('/api/super', superRoutes);
 
-app.route('/api/organizations', organizationRoutes);
-app.route('/api/entity-types', entityTypeRoutes);
-app.route('/api/entities', entityRoutes);
-app.route('/api/users', userRoutes);
-app.route('/api/files', fileRoutes);
+// General authenticated routes - auth required
+app.use('/api/*', authMiddleware);
+app.route('/api', apiRoutes);
 
 // File serving route (public, with auth check in route)
 app.route('/files', fileRoutes);

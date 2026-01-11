@@ -100,7 +100,7 @@ async function loadSession() {
     }
     
     // Validate token with server and refresh organizations list
-    const response = await api.get('/auth/me') as { 
+    const response = await api.get('/api/user/me') as { 
       success: boolean; 
       data?: { 
         id: string; 

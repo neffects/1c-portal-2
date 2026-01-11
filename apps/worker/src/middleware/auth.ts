@@ -10,7 +10,8 @@
 import { Context, Next } from 'hono';
 import type { Env, Variables } from '../types';
 import { verifyJWT } from '../lib/jwt';
-import { userOrgStubExists, isSuperadminEmail } from '../lib/user-stubs';
+import { userOrgStubExists, isSuperadminEmail, listUserOrganizations } from '../lib/user-stubs';
+import { defineAbilityFor } from '../lib/abilities';
 import type { JWTPayload, UserRole } from '@1cc/shared';
 
 /**
@@ -66,6 +67,15 @@ export async function authMiddleware(
     // Set userRole for compatibility - superadmins have 'superadmin' role
     c.set('userRole', superadmin ? 'superadmin' : undefined);
     // organizationId is not set here - it's context-specific and set per request
+    
+    // Build CASL ability for user
+    const userOrgs = await listUserOrganizations(c.env.R2_BUCKET, payload.email, payload.sub);
+    const ability = defineAbilityFor({
+      isSuperadmin: superadmin,
+      orgMemberships: userOrgs.map(org => ({ orgId: org.orgId, role: org.role })),
+      currentOrgId: undefined // Will be set by org middleware
+    });
+    c.set('ability', ability);
     
     console.log('[AuthMiddleware] Authenticated user:', {
       userId: payload.sub,

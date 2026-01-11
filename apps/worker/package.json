@@ -13,6 +13,7 @@
   "dependencies": {
     "@1cc/shared": "*",
     "@1cc/xstate-machines": "*",
+    "@casl/ability": "^6.7.5",
     "@hono/zod-validator": "^0.4.0",
     "hono": "^4.4.0",
     "nanoid": "^5.0.7",

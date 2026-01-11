@@ -111,18 +111,78 @@ secret/ROOT.json          # Root config
 
 ## API Endpoints
 
+### Route Structure
+
+Routes are organized by access level and map directly to R2 storage paths:
+
+- `/public/*` - Public routes (no auth) → `public/` in R2
+- `/api/*` - Authenticated routes → `platform/` in R2
+- `/api/user/*` - User-specific routes → `private/users/:userId/` in R2
+- `/api/orgs/:orgId/*` - Org-scoped routes → `private/orgs/:orgId/` in R2
+- `/api/super/*` - Superadmin routes → `private/`, `config/`, `secret/` in R2
+
+### Deep Linking
+
+SEO-friendly URLs using slugs:
+- `/:orgSlug` - Organization landing page
+- `/:orgSlug/:typeSlug` - List entities of type in org
+- `/:orgSlug/:typeSlug/:entitySlug` - Get specific entity by slug chain
+
+Slug indexes stored at `stubs/slug-index/{orgId}-{typeSlug}-{entitySlug}.json` for fast lookups.
+
 ### Authentication
 - `POST /auth/magic-link` - Request magic link
 - `GET /auth/verify` - Verify token
 - `POST /auth/refresh` - Refresh JWT
-- `GET /auth/me` - Get current user
+- `GET /api/user/me` - Get current user (moved from /auth/me)
 
-### Organizations
-- `POST /api/organizations` - Create org (superadmin)
-- `GET /api/organizations` - List orgs
-- `PATCH /api/organizations/:id` - Update org
-- `PATCH /api/organizations/:id/permissions` - Update entity type permissions
-- `POST /api/organizations/:id/users/invite` - Invite user to org (superadmin)
+### Public Routes
+- `GET /public/branding` - Get platform branding config
+- `GET /public/manifests/site` - Get public site manifest
+- `GET /public/bundles/:typeId` - Get public entity bundle
+- `GET /public/entities/:id` - Get public entity by ID
+- `GET /:orgSlug/:typeSlug/:entitySlug` - Deep link to entity
+
+### Authenticated Routes
+- `GET /api/manifests/site` - Get platform manifest
+- `GET /api/bundles/:typeId` - Get platform entity bundle
+- `GET /api/entities` - List entities (platform content)
+- `GET /api/entity-types` - List entity types
+
+### User Routes
+- `GET /api/user/me` - Get current user info
+- `GET /api/user/preferences` - Get user preferences
+- `PATCH /api/user/preferences` - Update preferences
+- `GET /api/user/flags` - Get flagged entities
+- `POST /api/user/flags` - Flag an entity
+- `DELETE /api/user/flags/:entityId` - Unflag an entity
+
+### Organization Routes (Authenticated)
+- `GET /api/organizations` - List organizations (superadmin: all orgs, others: own org)
+- `GET /api/organizations/:id` - Get organization details
+- `PATCH /api/organizations/:id` - Update organization
+- `POST /api/organizations/:id/users/invite` - Invite user to organization
+- `POST /api/organizations/:id/users/add` - Add existing user to organization
+- `GET /api/organizations/:id/permissions` - Get entity type permissions for org
+- `PATCH /api/organizations/:id/permissions` - Update entity type permissions for org
+- `POST /api/organizations` - Create organization (superadmin only)
+- `DELETE /api/organizations/:id` - Soft delete organization (superadmin only)
+
+### Organization-Scoped Routes
+- `POST /api/orgs/:orgId/entities` - Create entity in org
+- `GET /api/orgs/:orgId/entities` - List entities in org
+- `GET /api/orgs/:orgId/users` - List users in org
+- `GET /api/orgs/:orgId/manifests/site` - Get org manifest
+- `GET /api/orgs/:orgId/bundles/:typeId` - Get org bundle
+
+### Superadmin Routes
+- `POST /api/super/organizations` - Create organization (alternative endpoint)
+- `GET /api/super/organizations` - List all organizations (alternative endpoint)
+- `POST /api/super/entity-types` - Create entity type
+- `PATCH /api/super/platform/branding` - Update platform branding
+
+**Note (2026-01-14)**: Fixed missing `/api/organizations` endpoint:
+- **Bug fix**: Added missing mount for `organizationRoutes` in `/api` routes aggregator. The routes existed in `routes/organizations.ts` but were not mounted, causing 404 errors when the frontend called `GET /api/organizations`. The routes are now properly mounted at `/api/organizations`.
 
 **Note (2026-01-11)**: Fixed organization listing bug and superadmin organization assignment:
 - **Bug fix**: Auth middleware now sets `userRole` to 'superadmin' for superadmin users. Previously `userRole` was undefined, causing the listing endpoint to return early with empty results.

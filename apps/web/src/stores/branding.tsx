@@ -21,7 +21,7 @@ export async function loadBranding() {
   error.value = null;
   
   try {
-    const response = await api.get('/api/platform/branding') as {
+    const response = await api.get('/public/branding') as {
       success: boolean;
       data?: BrandingConfig | null;
       error?: { message: string };

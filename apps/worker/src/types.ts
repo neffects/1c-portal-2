@@ -3,6 +3,7 @@
  */
 
 import type { JWTPayload, User, UserRole } from '@1cc/shared';
+import type { AppAbility } from './lib/abilities';
 
 /**
  * Cloudflare Worker environment bindings
@@ -41,6 +42,13 @@ export interface Variables {
   
   // Set by auth middleware (checked against env)
   isSuperadmin?: boolean;
+  
+  // Set by ability middleware (CASL)
+  ability?: AppAbility;
+  
+  // Legacy compatibility fields (set by middleware)
+  userRole?: 'superadmin' | 'org_admin' | 'org_member';
+  organizationId?: string | null;
   
   // Request tracking
   requestId?: string;
