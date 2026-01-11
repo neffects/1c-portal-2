@@ -23,11 +23,8 @@ function Header() {
       <div class="container-wide">
         <div class="flex items-center justify-between h-16">
           {/* Logo */}
-          <a href="/" class="flex items-center gap-2 font-display font-bold text-xl text-primary-700 dark:text-primary-400">
-            <svg class="w-8 h-8" viewBox="0 0 32 32" fill="currentColor">
-              <path d="M16 2L4 8v16l12 6 12-6V8L16 2zm0 2.5L25 9l-9 4.5L7 9l9-4.5zM6 10.5l9 4.5v10l-9-4.5v-10zm20 0v10l-9 4.5v-10l9-4.5z"/>
-            </svg>
-            <span>1C Portal</span>
+          <a href="/" class="flex items-center gap-2 font-display font-bold text-xl text-primary-900 dark:text-primary-50">
+            <img src="/logo.svg" alt="OneConsortium" class="h-8" />
           </a>
           
           {/* Navigation */}
@@ -121,7 +118,7 @@ function Footer() {
       <div class="container-wide py-8">
         <div class="flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-surface-500 dark:text-surface-400">
           <div class="flex items-center gap-2">
-            <span>© {new Date().getFullYear()} 1C Portal</span>
+            <span>© {new Date().getFullYear()} OneConsortium</span>
             <span class="hidden md:inline">·</span>
             <span class="hidden md:inline">Multi-tenant Content Management</span>
           </div>

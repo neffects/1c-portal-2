@@ -1,6 +1,6 @@
 # AI Agent Instructions
 
-This document provides guidelines for AI agents (Cursor, Claude, etc.) working on the 1C Portal codebase.
+This document provides guidelines for AI agents (Cursor, Claude, etc.) working on the OneConsortium Portal codebase.
 
 ## Before Starting Work
 

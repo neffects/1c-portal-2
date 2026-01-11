@@ -30,7 +30,7 @@ export async function sendEmail(
     from?: string;
   }
 ): Promise<{ success: boolean; id?: string; error?: string }> {
-  const { to, subject, html, text, from = '1C Portal <noreply@1c-portal.com>' } = options;
+  const { to, subject, html, text, from = 'OneConsortium <noreply@oneconsortium.org>' } = options;
   
   console.log('[Email] Sending email to:', to, 'subject:', subject);
   
@@ -98,13 +98,13 @@ export async function sendMagicLinkEmail(
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="text-align: center; margin-bottom: 30px;">
-        <h1 style="color: #1a1a1a; font-size: 24px; margin-bottom: 10px;">1C Portal</h1>
+        <h1 style="color: #1a1a1a; font-size: 24px; margin-bottom: 10px;">OneConsortium</h1>
       </div>
       
       <div style="background: #f8f9fa; border-radius: 8px; padding: 30px; margin-bottom: 20px;">
         <h2 style="color: #1a1a1a; font-size: 20px; margin-top: 0;">Sign in to your account</h2>
         <p style="color: #4a4a4a; line-height: 1.6;">
-          Click the button below to securely sign in to your 1C Portal account. 
+          Click the button below to securely sign in to your OneConsortium account. 
           This link will expire in ${expiresInMinutes} minutes.
         </p>
         
@@ -132,7 +132,7 @@ export async function sendMagicLinkEmail(
   
   return sendEmail(apiKey, {
     to: email,
-    subject: 'Sign in to 1C Portal',
+    subject: 'Sign in to OneConsortium',
     html
   });
 }
@@ -156,13 +156,13 @@ export async function sendInvitationEmail(
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="text-align: center; margin-bottom: 30px;">
-        <h1 style="color: #1a1a1a; font-size: 24px; margin-bottom: 10px;">1C Portal</h1>
+        <h1 style="color: #1a1a1a; font-size: 24px; margin-bottom: 10px;">OneConsortium</h1>
       </div>
       
       <div style="background: #f8f9fa; border-radius: 8px; padding: 30px; margin-bottom: 20px;">
         <h2 style="color: #1a1a1a; font-size: 20px; margin-top: 0;">You've been invited!</h2>
         <p style="color: #4a4a4a; line-height: 1.6;">
-          <strong>${inviterName}</strong> has invited you to join <strong>${organizationName}</strong> on 1C Portal.
+          <strong>${inviterName}</strong> has invited you to join <strong>${organizationName}</strong> on OneConsortium.
         </p>
         
         <div style="text-align: center; margin: 30px 0;">
@@ -210,7 +210,7 @@ export async function sendApprovalNotification(
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="text-align: center; margin-bottom: 30px;">
-        <h1 style="color: #1a1a1a; font-size: 24px; margin-bottom: 10px;">1C Portal</h1>
+        <h1 style="color: #1a1a1a; font-size: 24px; margin-bottom: 10px;">OneConsortium</h1>
       </div>
       
       <div style="background: #f8f9fa; border-radius: 8px; padding: 30px; margin-bottom: 20px;">

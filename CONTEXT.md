@@ -1,8 +1,8 @@
-# 1C Portal - Project Context
+# OneConsortium Portal - Project Context
 
 ## Overview
 
-1C Portal is a multi-tenant content management system (CMS) built on Cloudflare's edge infrastructure. It enables organizations to create, manage, and publish content with sophisticated access controls and approval workflows.
+OneConsortium Portal is a multi-tenant content management system (CMS) built on Cloudflare's edge infrastructure. It enables organizations to create, manage, and publish content with sophisticated access controls and approval workflows.
 
 ## Architecture
 

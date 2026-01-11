@@ -1,5 +1,5 @@
 /**
- * 1C Portal API - Cloudflare Worker Entry Point
+ * OneConsortium API - Cloudflare Worker Entry Point
  * 
  * Main entry point for the API that handles:
  * - Authentication (magic links, JWT)
@@ -63,7 +63,7 @@ app.get('/health', (c) => {
 app.get('/', (c) => {
   console.log('[API] Root endpoint accessed');
   return c.json({
-    name: '1C Portal API',
+    name: 'OneConsortium API',
     version: '1.0.0',
     documentation: '/docs'
   });

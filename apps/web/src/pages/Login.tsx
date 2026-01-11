@@ -86,7 +86,7 @@ export function LoginPage() {
             <div class="w-16 h-16 rounded-2xl bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center mx-auto mb-4">
               <span class="i-lucide-key-round text-3xl text-primary-600 dark:text-primary-400"></span>
             </div>
-            <h1 class="heading-3">Sign in to 1C Portal</h1>
+            <h1 class="heading-3">Sign in to OneConsortium</h1>
             <p class="body-text mt-2">
               Enter your email to receive a magic link
             </p>

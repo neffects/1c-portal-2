@@ -1,5 +1,5 @@
 /**
- * 1C Portal Frontend Entry Point
+ * OneConsortium Frontend Entry Point
  * 
  * Initializes the Preact application with:
  * - UnoCSS styles
@@ -18,14 +18,14 @@ import 'virtual:uno.css';
 import './styles/global.css';
 
 // Debug logging
-console.log('[1C Portal] Starting application...');
+console.log('[OneConsortium] Starting application...');
 
 // Render app
 const root = document.getElementById('app');
 
 if (root) {
   render(<App />, root);
-  console.log('[1C Portal] Application rendered');
+  console.log('[OneConsortium] Application rendered');
 } else {
-  console.error('[1C Portal] Root element not found');
+  console.error('[OneConsortium] Root element not found');
 }

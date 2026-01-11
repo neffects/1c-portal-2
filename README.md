@@ -1,4 +1,4 @@
-# 1C Portal
+# OneConsortium Portal
 
 A multi-tenant content management system built on Cloudflare's edge infrastructure.
 

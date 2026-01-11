@@ -1,7 +1,7 @@
 import { defineConfig, presetUno, presetIcons, presetTypography } from 'unocss';
 
 /**
- * UnoCSS configuration for 1C Portal
+ * UnoCSS configuration for OneConsortium
  * Utility-first CSS with custom design tokens
  */
 export default defineConfig({
@@ -20,47 +20,47 @@ export default defineConfig({
   // Custom theme extending defaults
   theme: {
     colors: {
-      // Primary brand colors - Deep teal/cyan
+      // Primary brand colors - Black and white
       primary: {
-        50: '#ecfeff',
-        100: '#cffafe',
-        200: '#a5f3fc',
-        300: '#67e8f9',
-        400: '#22d3ee',
-        500: '#06b6d4',
-        600: '#0891b2',
-        700: '#0e7490',
-        800: '#155e75',
-        900: '#164e63',
-        950: '#083344'
+        50: '#f5f5f5',
+        100: '#e6e6e6',
+        200: '#cccccc',
+        300: '#b3b3b3',
+        400: '#999999',
+        500: '#808080',
+        600: '#666666',
+        700: '#4d4d4d',
+        800: '#333333',
+        900: '#1a1a1a',
+        950: '#000000'
       },
-      // Accent colors - Warm amber
+      // Accent colors - Gray tones
       accent: {
-        50: '#fffbeb',
-        100: '#fef3c7',
-        200: '#fde68a',
-        300: '#fcd34d',
-        400: '#fbbf24',
-        500: '#f59e0b',
-        600: '#d97706',
-        700: '#b45309',
-        800: '#92400e',
-        900: '#78350f',
-        950: '#451a03'
+        50: '#fafafa',
+        100: '#f5f5f5',
+        200: '#e5e5e5',
+        300: '#d4d4d4',
+        400: '#a3a3a3',
+        500: '#737373',
+        600: '#525252',
+        700: '#404040',
+        800: '#262626',
+        900: '#171717',
+        950: '#0a0a0a'
       },
-      // Neutral grays - Slate
+      // Neutral grays
       surface: {
-        50: '#f8fafc',
-        100: '#f1f5f9',
-        200: '#e2e8f0',
-        300: '#cbd5e1',
-        400: '#94a3b8',
-        500: '#64748b',
-        600: '#475569',
-        700: '#334155',
-        800: '#1e293b',
-        900: '#0f172a',
-        950: '#020617'
+        50: '#fafafa',
+        100: '#f5f5f5',
+        200: '#e5e5e5',
+        300: '#d4d4d4',
+        400: '#a3a3a3',
+        500: '#737373',
+        600: '#525252',
+        700: '#404040',
+        800: '#262626',
+        900: '#171717',
+        950: '#0a0a0a'
       }
     },
     fontFamily: {
