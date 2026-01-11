@@ -39,6 +39,10 @@ import { OrgWizard } from './pages/superadmin/OrgWizard';
 import { ApprovalQueue } from './pages/superadmin/ApprovalQueue';
 import { Branding } from './pages/superadmin/Branding';
 import { EntityImportExport } from './pages/superadmin/EntityImportExport';
+import { SuperEntitiesList } from './pages/superadmin/SuperEntitiesList';
+import { SuperEntityTypeView } from './pages/superadmin/SuperEntityTypeView';
+import { SuperEntityView } from './pages/superadmin/SuperEntityView';
+import { SuperEntityEditor } from './pages/superadmin/SuperEntityEditor';
 
 // Auth and state
 import { AuthProvider } from './stores/auth';
@@ -98,6 +102,12 @@ export function App() {
             <Route path="/super/approvals" component={ApprovalQueue} />
             <Route path="/super/branding" component={Branding} />
             <Route path="/super/import-export" component={EntityImportExport} />
+            <Route path="/super/entities" component={SuperEntitiesList} />
+            <Route path="/super/entity-types/:typeId" component={SuperEntityTypeView} />
+            <Route path="/super/entities/new" component={SuperEntityEditor} />
+            <Route path="/super/entities/new/:typeId" component={SuperEntityEditor} />
+            <Route path="/super/entities/:id/edit" component={SuperEntityEditor} />
+            <Route path="/super/entities/:id" component={SuperEntityView} />
             
             {/* Deep link routes - MUST be last to avoid catching other routes */}
             <Route path="/:orgSlug/:typeSlug/:entitySlug" component={EntityDetailPage} />

@@ -74,7 +74,15 @@ export function SuperadminDashboard() {
       </div>
       
       {/* Quick links */}
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-12">
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
+        <a href="/super/entities" class="card-hover p-6">
+          <div class="w-12 h-12 rounded-xl bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center mb-4">
+            <span class="i-lucide-file-text text-2xl text-blue-600 dark:text-blue-400"></span>
+          </div>
+          <h3 class="font-semibold text-surface-900 dark:text-surface-100 mb-1">Entities</h3>
+          <p class="text-sm text-surface-500">Manage all entities & global content</p>
+        </a>
+        
         <a href="/super/types" class="card-hover p-6">
           <div class="w-12 h-12 rounded-xl bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center mb-4">
             <span class="i-lucide-boxes text-2xl text-primary-600 dark:text-primary-400"></span>
@@ -157,6 +165,10 @@ export function SuperadminDashboard() {
         <div class="card p-6">
           <h2 class="heading-4 mb-4">Quick Actions</h2>
           <div class="space-y-3">
+            <a href="/super/entities/new" class="flex items-center gap-3 p-3 rounded-lg hover:bg-surface-50 dark:hover:bg-surface-800 transition-colors">
+              <span class="i-lucide-plus-circle text-xl text-primary-500"></span>
+              <span class="text-surface-900 dark:text-surface-100">Create Entity</span>
+            </a>
             <a href="/super/types/new" class="flex items-center gap-3 p-3 rounded-lg hover:bg-surface-50 dark:hover:bg-surface-800 transition-colors">
               <span class="i-lucide-plus-circle text-xl text-primary-500"></span>
               <span class="text-surface-900 dark:text-surface-100">Create Entity Type</span>
