@@ -94,6 +94,11 @@ const FIELD_TYPE_META: Record<FieldType, { label: string; icon: string; descript
     icon: 'i-lucide-link', 
     description: 'Reference to another entity' 
   },
+  weblink: { 
+    label: 'Web Link', 
+    icon: 'i-lucide-external-link', 
+    description: 'URL with optional display text' 
+  },
   image: { 
     label: 'Image', 
     icon: 'i-lucide-image', 
@@ -305,6 +310,33 @@ function FieldConstraintsEditor({
               class="w-4 h-4 rounded border-surface-300"
             />
             <span class="text-sm text-surface-700 dark:text-surface-300">Allow multiple links</span>
+          </label>
+        </div>
+      );
+    
+    case 'weblink':
+      return (
+        <div class="space-y-4">
+          <label class="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={constraints.allowAlias ?? true}
+              onChange={(e) => updateConstraint('allowAlias', (e.target as HTMLInputElement).checked)}
+              class="w-4 h-4 rounded border-surface-300"
+            />
+            <span class="text-sm text-surface-700 dark:text-surface-300">Allow custom display text (alias)</span>
+          </label>
+          <p class="text-xs text-surface-500 -mt-2">
+            When enabled, users can provide custom text to display instead of the URL
+          </p>
+          <label class="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={constraints.requireHttps ?? false}
+              onChange={(e) => updateConstraint('requireHttps', (e.target as HTMLInputElement).checked)}
+              class="w-4 h-4 rounded border-surface-300"
+            />
+            <span class="text-sm text-surface-700 dark:text-surface-300">Require HTTPS URLs only</span>
           </label>
         </div>
       );
@@ -556,7 +588,7 @@ function FieldEditorModal({
   // Check if field type has constraints
   const hasConstraints = editingField.type && [
     'string', 'text', 'markdown', 'number', 'select', 'multiselect', 
-    'image', 'logo', 'file', 'country', 'link'
+    'image', 'logo', 'file', 'country', 'link', 'weblink'
   ].includes(editingField.type);
   
   return (
