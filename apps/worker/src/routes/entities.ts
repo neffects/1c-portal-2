@@ -526,11 +526,26 @@ entityRoutes.patch('/:id',
     throw new ForbiddenError('You can only edit entities from your organization');
   }
   
-  // Get current entity
-  const latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
-  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  // Get latest pointer - handle global entities (null orgId) vs org entities
+  // For global entities, try visibility-based paths (public, authenticated)
+  // For org entities, use members path
+  let latestPath: string | null = null;
+  let latestPointer: EntityLatestPointer | null = null;
   
-  if (!latestPointer) {
+  if (stub.organizationId === null) {
+    // Global entity - try public and authenticated paths
+    for (const visibility of ['public', 'authenticated'] as const) {
+      latestPath = getEntityLatestPath(visibility, entityId, undefined);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      if (latestPointer) break;
+    }
+  } else {
+    // Org entity - use members path
+    latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  }
+  
+  if (!latestPointer || !latestPath) {
     throw new NotFoundError('Entity', entityId);
   }
   
@@ -539,8 +554,14 @@ entityRoutes.patch('/:id',
     throw new AppError('INVALID_STATUS', 'Only draft entities can be edited', 400);
   }
   
+  // Determine storage visibility based on entity type
+  // Global entities use visibility-based paths, org entities use 'members'
+  const storageVisibility: VisibilityScope = stub.organizationId === null 
+    ? latestPointer.visibility 
+    : 'members';
+  
   // Get current version
-  const currentPath = getEntityVersionPath('members', entityId, latestPointer.version, stub.organizationId);
+  const currentPath = getEntityVersionPath(storageVisibility, entityId, latestPointer.version, stub.organizationId || undefined);
   const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath);
   
   if (!currentEntity) {
@@ -573,9 +594,13 @@ entityRoutes.patch('/:id',
   // Get the new visibility for the entity
   const newVisibility = updates.visibility || currentEntity.visibility;
   
-  // Use slug from request data if provided, otherwise keep existing slug
+  // Extract slug from data if provided (slug is top-level, not in entity.data)
   // Slug should NOT auto-update from name changes after entity has been saved
-  const newSlug = (newData.slug as string) || currentEntity.slug;
+  let newSlug = currentEntity.slug;
+  if (newData.slug && typeof newData.slug === 'string') {
+    newSlug = newData.slug;
+    delete newData.slug; // Remove slug from data (it's stored at top level)
+  }
   
   // Create new version
   const updatedEntity: Entity = {
@@ -588,8 +613,14 @@ entityRoutes.patch('/:id',
     updatedBy: userId
   };
   
+  // Determine storage visibility for new version
+  // Global entities use visibility-based paths, org entities use 'members'
+  const newStorageVisibility: VisibilityScope = stub.organizationId === null 
+    ? newVisibility 
+    : 'members';
+  
   // Write new version
-  const newVersionPath = getEntityVersionPath('members', entityId, newVersion, stub.organizationId);
+  const newVersionPath = getEntityVersionPath(newStorageVisibility, entityId, newVersion, stub.organizationId || undefined);
   await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
   
   // Update latest pointer
@@ -600,7 +631,20 @@ entityRoutes.patch('/:id',
     updatedAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  // Determine latest pointer location
+  // For global entities, if visibility changed, update to new location
+  // For org entities, always use members path
+  let newLatestPath: string;
+  if (stub.organizationId === null) {
+    // Global entity - use new visibility location
+    newLatestPath = getEntityLatestPath(newVisibility, entityId, undefined);
+  } else {
+    // Org entity - always use members path
+    newLatestPath = latestPath!;
+  }
+  
+  // Update latest pointer at the new location
+  await writeJSON(c.env.R2_BUCKET, newLatestPath, newPointer);
   
   console.log('[Entities] Updated entity:', entityId, 'to v' + newVersion);
   
@@ -632,11 +676,26 @@ entityRoutes.post('/:id/transition',
     throw new NotFoundError('Entity', entityId);
   }
   
-  // Get current entity state
-  const latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
-  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  // Get current entity state - handle global entities (null orgId) vs org entities
+  // For global entities, try visibility-based paths (public, authenticated)
+  // For org entities, use members path
+  let latestPath: string | null = null;
+  let latestPointer: EntityLatestPointer | null = null;
   
-  if (!latestPointer) {
+  if (stub.organizationId === null) {
+    // Global entity - try public and authenticated paths
+    for (const visibility of ['public', 'authenticated'] as const) {
+      latestPath = getEntityLatestPath(visibility, entityId, undefined);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      if (latestPointer) break;
+    }
+  } else {
+    // Org entity - use members path
+    latestPath = getEntityLatestPath('members', entityId, stub.organizationId);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  }
+  
+  if (!latestPointer || !latestPath) {
     throw new NotFoundError('Entity', entityId);
   }
   
@@ -673,8 +732,26 @@ entityRoutes.post('/:id/transition',
   
   const newStatus = statusMap[action];
   
+  // Determine storage visibility for current entity version
+  // Global entities use visibility-based paths
+  // Org entities: drafts/pending/members visibility use 'members', published public/authenticated use visibility-based paths
+  let storageVisibility: VisibilityScope;
+  if (stub.organizationId === null) {
+    // Global entity - use visibility-based path
+    storageVisibility = latestPointer.visibility;
+  } else if (latestPointer.status === 'draft' || latestPointer.status === 'pending_approval') {
+    // Drafts and pending entities are always in the org's private space
+    storageVisibility = 'members';
+  } else if (latestPointer.visibility === 'members') {
+    // Published entities with members visibility
+    storageVisibility = 'members';
+  } else {
+    // Published entities with public/authenticated visibility
+    storageVisibility = latestPointer.visibility;
+  }
+  
   // Get current entity version
-  const currentPath = getEntityVersionPath('members', entityId, latestPointer.version, stub.organizationId);
+  const currentPath = getEntityVersionPath(storageVisibility, entityId, latestPointer.version, stub.organizationId || undefined);
   const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath);
   
   if (!currentEntity) {
@@ -700,10 +777,15 @@ entityRoutes.post('/:id/transition',
   };
   
   // Determine storage location based on new status and visibility
-  let targetVisibility: 'public' | 'authenticated' | 'members' = 'members';
+  // For global entities, use visibility-based paths; for org entities, use 'members' for drafts/pending
+  let targetVisibility: VisibilityScope;
   
-  if (newStatus === 'published') {
+  if (stub.organizationId === null) {
+    // Global entity - always use visibility-based paths
     targetVisibility = currentEntity.visibility;
+  } else {
+    // Org entity - use 'members' for drafts/pending, visibility-based for published
+    targetVisibility = newStatus === 'published' ? currentEntity.visibility : 'members';
   }
   
   // Write new version to appropriate location
@@ -719,13 +801,28 @@ entityRoutes.post('/:id/transition',
     updatedAt: now
   };
   
-  // Latest pointer stays in private for org reference
-  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  // Determine latest pointer location
+  // For global entities, always use visibility-based path
+  // For org entities, use 'members' path for drafts/pending, visibility-based for published
+  let newLatestPath: string;
+  if (stub.organizationId === null) {
+    // Global entity - use visibility-based path
+    newLatestPath = getEntityLatestPath(currentEntity.visibility, entityId, undefined);
+  } else {
+    // Org entity - use members path for drafts/pending, visibility-based for published
+    if (newStatus === 'published' && targetVisibility !== 'members') {
+      newLatestPath = getEntityLatestPath(targetVisibility, entityId, undefined);
+    } else {
+      newLatestPath = latestPath!;
+    }
+  }
   
-  // If publishing to public/authenticated, also write latest there
-  if (newStatus === 'published' && targetVisibility !== 'members') {
-    const publicLatestPath = getEntityLatestPath(targetVisibility, entityId);
-    await writeJSON(c.env.R2_BUCKET, publicLatestPath, newPointer);
+  // Update latest pointer at the appropriate location
+  await writeJSON(c.env.R2_BUCKET, newLatestPath, newPointer);
+  
+  // For org entities publishing to public/authenticated, also keep latest pointer in members path for reference
+  if (stub.organizationId !== null && newStatus === 'published' && targetVisibility !== 'members') {
+    await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
   }
   
   console.log('[Entities] Transitioned entity:', entityId, currentStatus, '->', newStatus);

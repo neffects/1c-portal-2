@@ -126,14 +126,24 @@ async function loadSession() {
       session.value = updatedSession;
       localStorage.setItem('session', JSON.stringify(updatedSession));
       
-      // Verify current org is still valid
-      const orgStillValid = response.data.organizations.some(o => o.id === currentOrgId.value);
-      if (!orgStillValid && response.data.organizations.length > 0) {
-        currentOrgId.value = response.data.organizations[0].id;
-        localStorage.setItem('currentOrgId', currentOrgId.value);
+      // Ensure currentOrgId is set if we have organizations
+      if (response.data.organizations.length > 0) {
+        // Verify current org is still valid
+        const orgStillValid = currentOrgId.value && response.data.organizations.some(o => o.id === currentOrgId.value);
+        
+        // If no current org or current org is invalid, set to first organization
+        if (!orgStillValid) {
+          currentOrgId.value = response.data.organizations[0].id;
+          localStorage.setItem('currentOrgId', currentOrgId.value);
+          console.log('[Auth] Set default organization to:', currentOrgId.value);
+        }
+      } else {
+        // No organizations - clear current org
+        currentOrgId.value = null;
+        localStorage.removeItem('currentOrgId');
       }
       
-      console.log('[Auth] Session loaded:', parsed.user.id, 'orgs:', response.data.organizations.length);
+      console.log('[Auth] Session loaded:', parsed.user.id, 'orgs:', response.data.organizations.length, 'currentOrg:', currentOrgId.value);
     } else {
       console.log('[Auth] Session invalid, clearing');
       session.value = null;

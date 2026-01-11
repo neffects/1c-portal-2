@@ -76,11 +76,20 @@ app.route('/auth', authRoutes);
 // Public manifest routes
 app.route('/manifests', manifestRoutes);
 
-// Protected routes (auth required)
-app.use('/api/*', authMiddleware);
-
-// Platform routes - GET /branding is public (no auth middleware on route)
+// Platform routes - GET /branding is public (uses optionalAuth middleware)
 app.route('/api/platform', platformRoutes);
+
+// Protected routes (auth required)
+// Skip auth for platform routes which use optionalAuth
+app.use('/api/*', async (c, next) => {
+  // Skip auth middleware for platform routes (they use optionalAuth)
+  if (c.req.path.startsWith('/api/platform')) {
+    console.log('[API] Skipping auth middleware for platform route:', c.req.path);
+    return next();
+  }
+  console.log('[API] Applying auth middleware for route:', c.req.path);
+  return authMiddleware(c, next);
+});
 
 app.route('/api/organizations', organizationRoutes);
 app.route('/api/entity-types', entityTypeRoutes);

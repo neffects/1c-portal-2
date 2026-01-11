@@ -14,7 +14,7 @@ import { useEffect, useState, useRef } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
-import type { EntityListItem, EntityTypeListItem } from '@1cc/shared';
+import type { EntityListItem, EntityTypeListItem, OrganizationListItem } from '@1cc/shared';
 
 export function AdminDashboard() {
   const { 
@@ -41,6 +41,10 @@ export function AdminDashboard() {
   const [showOrgSwitcher, setShowOrgSwitcher] = useState(false);
   const orgSwitcherRef = useRef<HTMLDivElement>(null);
   
+  // For superadmins, fetch organizations if not in auth store
+  const [fetchedOrganizations, setFetchedOrganizations] = useState<OrganizationListItem[]>([]);
+  const [loadingOrgs, setLoadingOrgs] = useState(false);
+  
   // Redirect if not admin
   useEffect(() => {
     if (!authLoading.value && (!isAuthenticated.value || !isOrgAdmin.value)) {
@@ -49,26 +53,40 @@ export function AdminDashboard() {
     }
   }, [authLoading.value, isAuthenticated.value, isOrgAdmin.value]);
   
+  // For superadmins, fetch organizations from API if not in auth store
+  useEffect(() => {
+    if (isSuperadmin.value && organizations.value.length === 0 && !authLoading.value) {
+      loadOrganizationsForSuperadmin();
+    }
+  }, [isSuperadmin.value, organizations.value.length, authLoading.value]);
+  
   // Fetch entity types from API (filtered by org permissions)
+  // Reload when organization changes to get types for the new org
   useEffect(() => {
-    if (isOrgAdmin.value) {
+    if (isOrgAdmin.value && organizationId.value) {
       loadEntityTypes();
+    } else {
+      setEntityTypes([]);
     }
-  }, [isOrgAdmin.value]);
+  }, [isOrgAdmin.value, organizationId.value]);
   
-  // Load entity counts for each type after types are loaded
+  // Load entity counts for each type after types are loaded and organization is set
   useEffect(() => {
-    if (isOrgAdmin.value && entityTypes.length > 0) {
+    if (isOrgAdmin.value && entityTypes.length > 0 && organizationId.value) {
       loadEntityCounts();
+    } else {
+      setEntityCounts({});
     }
-  }, [isOrgAdmin.value, entityTypes.length]);
+  }, [isOrgAdmin.value, entityTypes.length, organizationId.value]);
   
-  // Load recent entities
+  // Load recent entities when org admin status or organization changes
   useEffect(() => {
-    if (isOrgAdmin.value) {
+    if (isOrgAdmin.value && organizationId.value) {
       loadRecentEntities();
+    } else {
+      setRecentEntities([]);
     }
-  }, [isOrgAdmin.value]);
+  }, [isOrgAdmin.value, organizationId.value]);
   
   // Re-load data when organization changes
   useEffect(() => {
@@ -121,18 +139,26 @@ export function AdminDashboard() {
   
   // Load entity counts per type for the organization
   async function loadEntityCounts() {
+    if (!organizationId.value) {
+      console.log('[AdminDashboard] No organization selected, skipping entity counts');
+      setEntityCounts({});
+      setLoadingCounts(false);
+      return;
+    }
+    
     setLoadingCounts(true);
-    console.log('[AdminDashboard] Fetching entity counts per type...');
+    console.log('[AdminDashboard] Fetching entity counts per type for org:', organizationId.value);
     
     const counts: Record<string, number> = {};
     
     try {
-      // Fetch counts for each entity type
+      // Fetch counts for each entity type, filtered by organization
       await Promise.all(
         entityTypes.map(async (type) => {
           try {
-            // Fetch with pageSize=1 to get total count efficiently
-            const response = await api.get(`/api/entities?typeId=${type.id}&pageSize=1`) as {
+            // Fetch with pageSize=1 to get total count efficiently, filtered by organization
+            const orgIdParam = `organizationId=${organizationId.value}`;
+            const response = await api.get(`/api/entities?typeId=${type.id}&${orgIdParam}&pageSize=1`) as {
               success: boolean;
               data?: {
                 items: EntityListItem[];
@@ -142,7 +168,7 @@ export function AdminDashboard() {
             
             if (response.success && response.data) {
               counts[type.id] = response.data.total || 0;
-              console.log(`[AdminDashboard] Type ${type.name}: ${counts[type.id]} entities`);
+              console.log(`[AdminDashboard] Type ${type.name}: ${counts[type.id]} entities for org ${organizationId.value}`);
             } else {
               counts[type.id] = 0;
             }
@@ -163,13 +189,49 @@ export function AdminDashboard() {
   }
   
   async function loadRecentEntities() {
+    if (!organizationId.value) {
+      console.log('[AdminDashboard] No organization selected, skipping entity load');
+      setRecentEntities([]);
+      setLoading(false);
+      return;
+    }
+    
     setLoading(true);
-    const response = await api.get('/api/entities?pageSize=5') as { success: boolean; data?: { items: EntityListItem[] } };
+    const orgIdParam = `organizationId=${organizationId.value}`;
+    const response = await api.get(`/api/entities?${orgIdParam}&pageSize=5`) as { success: boolean; data?: { items: EntityListItem[] } };
     
     if (response.success && response.data) {
       setRecentEntities(response.data.items);
+      console.log('[AdminDashboard] Loaded', response.data.items.length, 'entities for org:', organizationId.value);
     }
     setLoading(false);
+  }
+  
+  // For superadmins: fetch organizations from API if not in auth store
+  async function loadOrganizationsForSuperadmin() {
+    setLoadingOrgs(true);
+    console.log('[AdminDashboard] Fetching organizations for superadmin...');
+    
+    try {
+      const response = await api.get('/api/organizations?adminOnly=true') as {
+        success: boolean;
+        data?: { items: Array<{ id: string; name: string; slug: string }> };
+      };
+      
+      if (response.success && response.data) {
+        setFetchedOrganizations(response.data.items);
+        console.log('[AdminDashboard] Loaded', response.data.items.length, 'organizations for superadmin');
+        
+        // If no current org is set, set the first one
+        if (!organizationId.value && response.data.items.length > 0) {
+          switchOrganization(response.data.items[0].id);
+        }
+      }
+    } catch (err) {
+      console.error('[AdminDashboard] Error loading organizations:', err);
+    } finally {
+      setLoadingOrgs(false);
+    }
   }
   
   // Handle organization switch - uses auth store's switchOrganization
@@ -183,11 +245,26 @@ export function AdminDashboard() {
     // Data will reload via useEffect when organizationId.value changes
   }
   
-  // Get organizations the user can admin (from auth store)
-  // If superadmin, they can admin any org they're in; otherwise filter by role
-  const adminOrganizations = organizations.value.filter(
+  // Get organizations the user can admin
+  // For superadmins, use fetched organizations if auth store is empty, otherwise use auth store
+  // For regular admins, filter by role from auth store
+  const availableOrgs = isSuperadmin.value && organizations.value.length === 0 
+    ? fetchedOrganizations.map(org => ({
+        id: org.id,
+        name: org.name,
+        slug: org.slug,
+        role: 'org_admin' as const // Superadmins have admin role in all orgs
+      }))
+    : organizations.value;
+  
+  const adminOrganizations = availableOrgs.filter(
     org => isSuperadmin.value || org.role === 'org_admin'
   );
+  
+  // Current organization - check both auth store and fetched orgs
+  const currentOrg = currentOrganization.value || 
+    (organizationId.value ? adminOrganizations.find(o => o.id === organizationId.value) : null) ||
+    (adminOrganizations.length > 0 ? adminOrganizations[0] : null);
   
   if (authLoading.value) {
     return (
@@ -206,10 +283,10 @@ export function AdminDashboard() {
       <div class="flex items-start justify-between mb-8">
         <div class="flex-1">
           <h1 class="heading-1 mb-2">Admin Dashboard</h1>
-          {/* Organization name and switcher from auth store */}
-          {currentOrganization.value ? (
+          {/* Organization name and switcher */}
+          {currentOrg ? (
             <div class="flex items-center gap-3">
-              <p class="body-text text-surface-600 dark:text-surface-400">{currentOrganization.value.name}</p>
+              <p class="body-text text-surface-600 dark:text-surface-400">{currentOrg.name}</p>
               {adminOrganizations.length > 1 && (
                 <div class="relative" ref={orgSwitcherRef}>
                   <button
@@ -247,12 +324,50 @@ export function AdminDashboard() {
               )}
             </div>
           ) : (
-            <p class="body-text text-surface-500">
-              {organizations.value.length === 0 
-                ? 'No organization assigned. Contact your administrator.'
-                : 'Select an organization to manage.'
-              }
-            </p>
+            <div class="flex items-center gap-3">
+              {adminOrganizations.length > 0 ? (
+                <>
+                  <p class="body-text text-surface-500">Select an organization to manage:</p>
+                  <div class="relative" ref={orgSwitcherRef}>
+                    <button
+                      onClick={() => setShowOrgSwitcher(!showOrgSwitcher)}
+                      class="btn-secondary text-sm flex items-center gap-2"
+                      title="Select organization"
+                    >
+                      <span class="i-lucide-building-2"></span>
+                      <span>Select Organization</span>
+                      <span class={`i-lucide-chevron-down transition-transform ${showOrgSwitcher ? 'rotate-180' : ''}`}></span>
+                    </button>
+                    
+                    {showOrgSwitcher && (
+                      <div class="absolute top-full left-0 mt-2 bg-surface-0 dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg shadow-lg z-50 min-w-[200px] max-h-[300px] overflow-y-auto">
+                        {adminOrganizations.map(org => (
+                          <button
+                            key={org.id}
+                            onClick={() => handleSwitchOrganization(org.id)}
+                            class={`w-full text-left px-4 py-3 hover:bg-surface-100 dark:hover:bg-surface-700 transition-colors flex items-center justify-between ${
+                              org.id === organizationId.value ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-surface-900 dark:text-surface-100'
+                            }`}
+                          >
+                            <div class="flex flex-col">
+                              <span class="font-medium">{org.name}</span>
+                              <span class="text-xs text-surface-400">{org.role}</span>
+                            </div>
+                            {org.id === organizationId.value && (
+                              <span class="i-lucide-check text-primary-600"></span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <p class="body-text text-surface-500">
+                  No organization assigned. Contact your administrator.
+                </p>
+              )}
+            </div>
           )}
         </div>
       </div>

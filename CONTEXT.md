@@ -124,7 +124,7 @@ secret/ROOT.json          # Root config
 - `PATCH /api/organizations/:id/permissions` - Update entity type permissions
 - `POST /api/organizations/:id/users/invite` - Invite user to org (superadmin)
 
-**Note (2026-01-11)**: Fixed organization listing bug and added comprehensive debugging:
+**Note (2026-01-11)**: Fixed organization listing bug and superadmin organization assignment:
 - **Bug fix**: Auth middleware now sets `userRole` to 'superadmin' for superadmin users. Previously `userRole` was undefined, causing the listing endpoint to return early with empty results.
 - **Creation**: Verifies organization file is written and readable immediately after creation, logs file paths
 - **Slug uniqueness check**: Enhanced `findOrgBySlug` with improved filtering logic (matching listing endpoint) and detailed logging
@@ -132,6 +132,7 @@ secret/ROOT.json          # Root config
 - **Frontend**: Logs API response, organization IDs received, and detailed error messages
 - This fixes the issue where newly created organizations weren't appearing in the list
 - Also helps debug 409 Conflict errors when creating organizations (slug uniqueness checks)
+- **Superadmin org assignment fix**: Auth store now ensures superadmins with multiple organizations always have a default organization selected (first org if none selected). Dashboard shows organization switcher when multiple orgs are available.
 
 ### Entity Types
 - `POST /api/entity-types` - Create type (superadmin)
@@ -155,6 +156,10 @@ secret/ROOT.json          # Root config
 - `GET /manifests/public` - Public manifest
 - `GET /manifests/platform` - Platform manifest
 - `GET /manifests/bundles/:visibility/:typeId` - Entity bundle
+
+### Platform
+- `GET /api/platform/branding` - Get platform branding config (public, uses optionalAuth)
+- `PATCH /api/platform/branding` - Update platform branding config (superadmin only)
 
 ## Development
 
@@ -465,6 +470,11 @@ The project includes automated security testing with:
     - Backend does NOT update slug from name changes in update requests (PATCH)
     - Slug generation uses `slugify()` utility: lowercase, hyphens for spaces, removes special chars
     - Both name and slug are required fields for all entity types
+  - Fixed platform branding endpoint 401 error (2026-01-11):
+    - Platform routes now bypass global auth middleware to allow public access
+    - GET /api/platform/branding uses optionalAuth middleware (works with or without token)
+    - Global auth middleware now skips /api/platform routes
+    - This allows branding to load on public pages before user authentication
 
 ## Notes
 
