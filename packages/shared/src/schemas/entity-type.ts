@@ -39,6 +39,10 @@ export const fieldConstraintsSchema = z.object({
   linkEntityTypeId: z.string().length(7).optional(),
   allowMultiple: z.boolean().optional(),
   
+  // WebLink
+  allowAlias: z.boolean().optional(),
+  requireHttps: z.boolean().optional(),
+  
   // File/Image/Logo
   fileTypes: z.array(z.string()).optional(),
   maxFileSize: z.number().int().positive().optional(),

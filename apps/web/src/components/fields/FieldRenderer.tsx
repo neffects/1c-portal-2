@@ -15,6 +15,7 @@ import { DateField } from './DateField';
 import { SelectField } from './SelectField';
 import { MultiSelectField } from './MultiSelectField';
 import { LinkField } from './LinkField';
+import { WebLinkField } from './WebLinkField';
 import { ImageField } from './ImageField';
 import { LogoField } from './LogoField';
 import { FileField } from './FileField';
@@ -41,6 +42,7 @@ const FIELD_COMPONENTS: Record<FieldType, React.ComponentType<FieldRendererProps
   select: SelectField,
   multiselect: MultiSelectField,
   link: LinkField,
+  weblink: WebLinkField,
   image: ImageField,
   logo: LogoField,
   file: FileField,

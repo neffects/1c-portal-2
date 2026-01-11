@@ -39,6 +39,7 @@ export const FIELD_TYPES = [
   'select',
   'multiselect',
   'link',
+  'weblink',
   'image',
   'logo',
   'file',

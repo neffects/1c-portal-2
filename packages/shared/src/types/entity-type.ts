@@ -89,6 +89,10 @@ export interface FieldConstraints {
   linkEntityTypeId?: string;
   allowMultiple?: boolean;
   
+  // WebLink constraints
+  allowAlias?: boolean;
+  requireHttps?: boolean;
+  
   // File/Image/Logo constraints
   fileTypes?: string[];
   maxFileSize?: number; // bytes
