@@ -124,10 +124,22 @@ entityRoutes.post('/',
     console.log('[Entities] Global entity visibility changed from members to authenticated');
   }
   
-  // Generate entity ID and slug
+  // Generate entity ID
   const entityId = createEntityId();
   const entityName = (data.name as string) || `Entity ${entityId}`;
-  const slug = createSlug(entityName);
+  
+  // Use provided slug if valid, otherwise auto-generate from name
+  // Slug is stored at entity.slug (top-level), not in entity.data
+  let slug: string;
+  if (validatedData.slug && typeof validatedData.slug === 'string') {
+    // User provided a slug - use it and remove it from data
+    slug = validatedData.slug;
+    delete validatedData.slug;
+  } else {
+    // No slug provided - auto-generate from name
+    slug = createSlug(entityName);
+  }
+  
   const now = new Date().toISOString();
   
   // Create entity
