@@ -1,12 +1,14 @@
 /**
  * Auth Callback Page
  * 
- * Handles the magic link verification redirect and stores the JWT token
+ * Handles the magic link verification redirect and stores the JWT token.
+ * Now supports multi-organization auth with organizations passed as JSON.
  */
 
 import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../stores/auth';
+import type { UserOrganization } from '@1cc/shared';
 
 export function AuthCallbackPage() {
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
@@ -29,32 +31,42 @@ export function AuthCallbackPage() {
         return;
       }
       
-      // Get auth data from URL params
+      // Get auth data from URL params (new format)
       const token = urlParams.get('token');
       const userId = urlParams.get('userId');
       const email = urlParams.get('email');
-      const role = urlParams.get('role');
-      const orgId = urlParams.get('orgId');
-      const orgName = urlParams.get('orgName');
+      const isSuperadminStr = urlParams.get('isSuperadmin');
+      const organizationsStr = urlParams.get('organizations');
       const expiresAt = urlParams.get('expiresAt');
       
-      if (!token || !userId || !email || !role) {
+      if (!token || !userId || !email) {
         console.log('[AuthCallback] Missing required params');
         setStatus('error');
         setError('Invalid authentication response');
         return;
       }
       
-      // Build user object
+      // Parse organizations JSON
+      let organizations: UserOrganization[] = [];
+      if (organizationsStr) {
+        try {
+          organizations = JSON.parse(organizationsStr);
+        } catch (e) {
+          console.error('[AuthCallback] Failed to parse organizations:', e);
+        }
+      }
+      
+      const isSuperadmin = isSuperadminStr === 'true';
+      
+      // Build user object (new format)
       const userData = {
         id: userId,
         email,
-        role: role as 'superadmin' | 'org_admin' | 'org_member',
-        organizationId: orgId || null,
-        organizationName: orgName || undefined
+        isSuperadmin,
+        organizations
       };
       
-      console.log('[AuthCallback] User authenticated:', userData);
+      console.log('[AuthCallback] User authenticated:', userData.id, 'superadmin:', isSuperadmin, 'orgs:', organizations.length);
       
       // Store token and user info
       login(token, userData, expiresAt || undefined);
@@ -66,9 +78,9 @@ export function AuthCallbackPage() {
       
       // Redirect based on role
       setTimeout(() => {
-        if (role === 'superadmin') {
+        if (isSuperadmin) {
           route('/super');
-        } else if (role === 'org_admin') {
+        } else if (organizations.some(o => o.role === 'org_admin')) {
           route('/admin');
         } else {
           route('/');

@@ -5,7 +5,7 @@
  * compatible with Cloudflare Workers runtime.
  */
 
-import type { JWTPayload, UserRole } from '@1cc/shared';
+import type { JWTPayload } from '@1cc/shared';
 import { JWT_EXPIRY_SECONDS } from '@1cc/shared';
 
 /**
@@ -67,13 +67,14 @@ async function verifySignature(
 
 /**
  * Create a JWT token
+ * 
+ * Minimal payload: only user identification (sub + email).
+ * Role and organization context are looked up from user-org stubs per request.
  */
 export async function createJWT(
   payload: {
     userId: string;
     email: string;
-    role: UserRole;
-    organizationId: string | null;
   },
   secret: string,
   expiresIn: number = JWT_EXPIRY_SECONDS
@@ -85,11 +86,11 @@ export async function createJWT(
     typ: 'JWT'
   };
   
+  // JWT payload is minimal - just user ID and email
+  // Organization membership and roles are stored in user-org stubs
   const jwtPayload: JWTPayload = {
     sub: payload.userId,
     email: payload.email,
-    role: payload.role,
-    organizationId: payload.organizationId,
     iat: now,
     exp: now + expiresIn
   };

@@ -34,6 +34,16 @@ export function EntitiesList() {
     }
   }, [authLoading.value, isAuthenticated.value, isOrgAdmin.value]);
   
+  // Parse URL params on mount to initialize filters
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const typeId = urlParams.get('typeId');
+    if (typeId) {
+      setSelectedTypeId(typeId);
+      console.log('[EntitiesList] Initialized typeId from URL:', typeId);
+    }
+  }, []);
+  
   // Load entity types
   useEffect(() => {
     if (isOrgAdmin.value) {
@@ -73,6 +83,47 @@ export function EntitiesList() {
   async function loadEntities() {
     setLoading(true);
     console.log('[EntitiesList] Fetching entities...');
+    
+    // Read URL params to sync with current URL (in case of navigation)
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlTypeId = urlParams.get('typeId');
+    
+    // Sync selectedTypeId with URL if different
+    if (urlTypeId && urlTypeId !== selectedTypeId) {
+      setSelectedTypeId(urlTypeId);
+      // Use URL value for this request
+      const params = new URLSearchParams();
+      params.set('typeId', urlTypeId);
+      if (selectedStatus) params.set('status', selectedStatus);
+      if (searchQuery) params.set('search', searchQuery);
+      params.set('page', currentPage.toString());
+      params.set('pageSize', pageSize.toString());
+      params.set('sortBy', 'updatedAt');
+      params.set('sortDirection', 'desc');
+      
+      const response = await api.get(`/api/entities?${params.toString()}`) as { 
+        success: boolean; 
+        data?: { 
+          items: EntityListItem[];
+          pagination?: {
+            page: number;
+            pageSize: number;
+            total: number;
+            totalPages: number;
+          };
+        } 
+      };
+      
+      if (response.success && response.data) {
+        setEntities(response.data.items);
+        if (response.data.pagination) {
+          setTotalPages(response.data.pagination.totalPages);
+        }
+        console.log('[EntitiesList] Loaded', response.data.items.length, 'entities');
+      }
+      setLoading(false);
+      return;
+    }
     
     try {
       const params = new URLSearchParams();
@@ -123,6 +174,9 @@ export function EntitiesList() {
     );
   }
   
+  // Get selected entity type name for display
+  const selectedEntityType = entityTypes.find(t => t.id === selectedTypeId);
+  
   return (
     <div class="container-default py-12">
       {/* Header */}
@@ -131,10 +185,18 @@ export function EntitiesList() {
           <nav class="flex items-center gap-2 text-sm text-surface-500 dark:text-surface-400 mb-2">
             <a href="/admin" class="hover:text-surface-700 dark:hover:text-surface-200">Admin</a>
             <span class="i-lucide-chevron-right"></span>
-            <span class="text-surface-900 dark:text-surface-100">Entities</span>
+            <span class="text-surface-900 dark:text-surface-100">
+              {selectedEntityType ? selectedEntityType.pluralName : 'Entities'}
+            </span>
           </nav>
-          <h1 class="heading-1 mb-2">All Entities</h1>
-          <p class="body-text">Manage and view all your organization's entities.</p>
+          <h1 class="heading-1 mb-2">
+            {selectedEntityType ? selectedEntityType.pluralName : 'All Entities'}
+          </h1>
+          <p class="body-text">
+            {selectedEntityType 
+              ? `Manage and view all ${selectedEntityType.pluralName.toLowerCase()} for your organization.`
+              : 'Manage and view all your organization\'s entities.'}
+          </p>
         </div>
         <a href="/admin" class="btn-secondary">
           <span class="i-lucide-arrow-left"></span>
@@ -232,7 +294,13 @@ export function EntitiesList() {
                 {entities.map(entity => {
                   const entityType = entityTypes.find(t => t.id === entity.entityTypeId);
                   return (
-                    <tr key={entity.id} class="hover:bg-surface-50 dark:hover:bg-surface-800/50">
+                    <tr 
+                      key={entity.id} 
+                      class="hover:bg-surface-50 dark:hover:bg-surface-800/50 cursor-pointer"
+                      onClick={() => {
+                        route(`/admin/entities/${entity.id}`);
+                      }}
+                    >
                       <td class="px-4 py-3">
                         <span class="font-medium text-surface-900 dark:text-surface-100">
                           {(entity.data.name as string) || entity.id}
@@ -247,7 +315,7 @@ export function EntitiesList() {
                       <td class="px-4 py-3 text-sm text-surface-500">
                         {new Date(entity.updatedAt).toLocaleDateString()}
                       </td>
-                      <td class="px-4 py-3 text-right">
+                      <td class="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                         <a 
                           href={`/admin/entities/${entity.id}/edit`}
                           class="text-primary-600 hover:text-primary-700 text-sm font-medium"

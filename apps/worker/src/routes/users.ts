@@ -28,6 +28,7 @@ import {
   getUserMembershipPath, getOrgProfilePath, getInvitationPath,
   getUserFlagsPath, getUserPreferencesPath, getEntityStubPath
 } from '../lib/r2';
+import { deleteUserOrgStub, updateUserOrgStubRole } from '../lib/user-stubs';
 import { createUserId, createInvitationToken } from '../lib/id';
 import { sendInvitationEmail } from '../lib/email';
 import { requireOrgAdmin, requireOrgMembership, requireSuperadmin } from '../middleware/auth';
@@ -35,7 +36,7 @@ import { NotFoundError, ConflictError, ForbiddenError, ValidationError } from '.
 import { R2_PATHS } from '@1cc/shared';
 import type { 
   OrganizationMembership, UserInvitation, UserPreferences, 
-  EntityFlag, Organization, EntityStub 
+  EntityFlag, Organization, EntityStub, UserRole 
 } from '@1cc/shared';
 
 // Type for users across the system
@@ -55,7 +56,7 @@ export const userRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
  * List all users across all organizations (superadmin only)
  * Used for adding existing users to organizations
  */
-userRoutes.get('/all', requireSuperadmin, async (c) => {
+userRoutes.get('/all', requireSuperadmin(), async (c) => {
   console.log('[Users] Listing all users across system');
   
   const users: SystemUser[] = [];
@@ -216,7 +217,7 @@ userRoutes.get('/', async (c) => {
  * Invite a user to the organization
  */
 userRoutes.post('/invite',
-  requireOrgAdmin,
+  requireOrgAdmin(),
   zValidator('json', inviteUserRequestSchema),
   async (c) => {
   console.log('[Users] Processing invitation');
@@ -347,7 +348,7 @@ userRoutes.get('/:id', async (c) => {
  * Update user's role in organization
  */
 userRoutes.patch('/:id/role',
-  requireOrgAdmin,
+  requireOrgAdmin(),
   zValidator('json', updateUserRoleRequestSchema),
   async (c) => {
   const targetUserId = c.req.param('id');
@@ -383,6 +384,9 @@ userRoutes.patch('/:id/role',
   
   await writeJSON(c.env.R2_BUCKET, membershipPath, updatedMembership);
   
+  // Update user-org stub with new role
+  await updateUserOrgStubRole(c.env.R2_BUCKET, membership.email, targetUserId, userOrgId, role as UserRole);
+  
   console.log('[Users] Updated role for:', targetUserId, 'to:', role);
   
   return c.json({
@@ -395,15 +399,19 @@ userRoutes.patch('/:id/role',
  * DELETE /:id
  * Remove user from organization
  */
-userRoutes.delete('/:id', requireOrgAdmin, async (c) => {
+userRoutes.delete('/:id', requireOrgAdmin('orgId'), async (c) => {
   const targetUserId = c.req.param('id');
-  const userOrgId = c.get('organizationId');
+  const userEmail = c.get('userEmail');
   const currentUserId = c.get('userId');
+  const isSuperadmin = c.get('isSuperadmin');
   
-  console.log('[Users] Removing user:', targetUserId);
+  // Get org ID from query param (required for new middleware)
+  const orgId = c.req.query('orgId');
   
-  if (!userOrgId) {
-    throw new ForbiddenError('You must belong to an organization');
+  console.log('[Users] Removing user:', targetUserId, 'from org:', orgId);
+  
+  if (!orgId) {
+    throw new ForbiddenError('Organization ID is required');
   }
   
   // Can't remove self
@@ -412,7 +420,7 @@ userRoutes.delete('/:id', requireOrgAdmin, async (c) => {
   }
   
   // Get membership
-  const membershipPath = getUserMembershipPath(userOrgId, targetUserId);
+  const membershipPath = getUserMembershipPath(orgId, targetUserId);
   const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, membershipPath);
   
   if (!membership) {
@@ -422,7 +430,10 @@ userRoutes.delete('/:id', requireOrgAdmin, async (c) => {
   // Delete membership
   await deleteFile(c.env.R2_BUCKET, membershipPath);
   
-  console.log('[Users] Removed user:', targetUserId, 'from org:', userOrgId);
+  // Delete user-org stub
+  await deleteUserOrgStub(c.env.R2_BUCKET, membership.email, targetUserId, orgId);
+  
+  console.log('[Users] Removed user:', targetUserId, 'from org:', orgId);
   
   return c.json({
     success: true,

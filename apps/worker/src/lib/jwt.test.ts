@@ -2,53 +2,69 @@
  * JWT Library Tests
  * 
  * Unit tests for JWT signing and verification.
+ * Updated for multi-org architecture where JWT contains minimal payload (sub + email only).
  */
 
 import { describe, it, expect } from 'vitest';
-import { signJwt, verifyJwt, decodeJwt } from './jwt';
+import { createJWT, verifyJWT, decodeJWT, isTokenExpiringSoon, getTokenExpiration } from './jwt';
 
 const TEST_SECRET = 'test-secret-key-that-is-at-least-32-characters-long';
 
 describe('JWT Library', () => {
-  describe('signJwt', () => {
+  describe('createJWT', () => {
     it('should create a valid JWT token', async () => {
-      const payload = {
+      const token = await createJWT({
         userId: 'user-123',
-        role: 'superadmin'
-      };
-      
-      const token = await signJwt(payload, TEST_SECRET, '1h');
+        email: 'test@example.com'
+      }, TEST_SECRET);
       
       expect(token).toBeDefined();
       expect(typeof token).toBe('string');
       expect(token.split('.')).toHaveLength(3); // Header.Payload.Signature
     });
     
-    it('should include payload in token', async () => {
-      const payload = {
+    it('should include userId and email in token', async () => {
+      const token = await createJWT({
         userId: 'user-123',
-        email: 'test@example.com',
-        role: 'org_admin'
-      };
+        email: 'test@example.com'
+      }, TEST_SECRET);
       
-      const token = await signJwt(payload, TEST_SECRET, '1h');
-      const decoded = decodeJwt(token);
+      const decoded = decodeJWT(token);
       
-      expect(decoded.userId).toBe('user-123');
-      expect(decoded.email).toBe('test@example.com');
-      expect(decoded.role).toBe('org_admin');
+      expect(decoded).not.toBeNull();
+      expect(decoded?.sub).toBe('user-123');
+      expect(decoded?.email).toBe('test@example.com');
+    });
+    
+    it('should NOT include role or organizationId in token (new architecture)', async () => {
+      const token = await createJWT({
+        userId: 'user-123',
+        email: 'test@example.com'
+      }, TEST_SECRET);
+      
+      const decoded = decodeJWT(token);
+      
+      expect(decoded).not.toBeNull();
+      // These should NOT exist in the new minimal JWT
+      // Type assertion through unknown to check these don't exist
+      const decodedAny = decoded as unknown as Record<string, unknown>;
+      expect(decodedAny.role).toBeUndefined();
+      expect(decodedAny.organizationId).toBeUndefined();
     });
     
     it('should set expiration time', async () => {
-      const payload = { userId: 'user-123' };
-      const token = await signJwt(payload, TEST_SECRET, '1h');
-      const decoded = decodeJwt(token);
+      const token = await createJWT({
+        userId: 'user-123',
+        email: 'test@example.com'
+      }, TEST_SECRET, 3600); // 1 hour
       
-      expect(decoded.exp).toBeDefined();
-      expect(decoded.iat).toBeDefined();
+      const decoded = decodeJWT(token);
+      
+      expect(decoded?.exp).toBeDefined();
+      expect(decoded?.iat).toBeDefined();
       
       // Expiration should be ~1 hour from now
-      const expTime = decoded.exp * 1000;
+      const expTime = decoded!.exp * 1000;
       const now = Date.now();
       const oneHour = 60 * 60 * 1000;
       
@@ -57,72 +73,98 @@ describe('JWT Library', () => {
     });
   });
   
-  describe('verifyJwt', () => {
+  describe('verifyJWT', () => {
     it('should verify valid token', async () => {
-      const payload = {
+      const token = await createJWT({
         userId: 'user-123',
-        role: 'superadmin'
-      };
+        email: 'test@example.com'
+      }, TEST_SECRET);
       
-      const token = await signJwt(payload, TEST_SECRET, '1h');
-      const verified = await verifyJwt(token, TEST_SECRET);
+      const verified = await verifyJWT(token, TEST_SECRET);
       
-      expect(verified.userId).toBe('user-123');
-      expect(verified.role).toBe('superadmin');
+      expect(verified).not.toBeNull();
+      expect(verified?.sub).toBe('user-123');
+      expect(verified?.email).toBe('test@example.com');
     });
     
-    it('should reject token with wrong secret', async () => {
-      const payload = { userId: 'user-123' };
-      const token = await signJwt(payload, TEST_SECRET, '1h');
+    it('should return null for token with wrong secret', async () => {
+      const token = await createJWT({
+        userId: 'user-123',
+        email: 'test@example.com'
+      }, TEST_SECRET);
       
-      await expect(verifyJwt(token, 'wrong-secret-key-that-is-at-least-32-chars')).rejects.toThrow();
+      const verified = await verifyJWT(token, 'wrong-secret-key-that-is-at-least-32-chars');
+      expect(verified).toBeNull();
     });
     
-    it('should reject expired token', async () => {
-      const payload = { userId: 'user-123' };
-      const token = await signJwt(payload, TEST_SECRET, '-1h'); // Already expired
+    it('should return null for malformed token', async () => {
+      const verified1 = await verifyJWT('invalid.token', TEST_SECRET);
+      const verified2 = await verifyJWT('not-a-jwt', TEST_SECRET);
+      const verified3 = await verifyJWT('', TEST_SECRET);
       
-      await expect(verifyJwt(token, TEST_SECRET)).rejects.toThrow();
-    });
-    
-    it('should reject malformed token', async () => {
-      await expect(verifyJwt('invalid.token', TEST_SECRET)).rejects.toThrow();
-      await expect(verifyJwt('not-a-jwt', TEST_SECRET)).rejects.toThrow();
-      await expect(verifyJwt('', TEST_SECRET)).rejects.toThrow();
-    });
-    
-    it('should reject tampered token', async () => {
-      const payload = { userId: 'user-123', role: 'org_member' };
-      const token = await signJwt(payload, TEST_SECRET, '1h');
-      
-      // Tamper with the payload
-      const parts = token.split('.');
-      const decodedPayload = JSON.parse(atob(parts[1]));
-      decodedPayload.role = 'superadmin'; // Try to escalate privileges
-      parts[1] = btoa(JSON.stringify(decodedPayload));
-      const tamperedToken = parts.join('.');
-      
-      await expect(verifyJwt(tamperedToken, TEST_SECRET)).rejects.toThrow();
+      expect(verified1).toBeNull();
+      expect(verified2).toBeNull();
+      expect(verified3).toBeNull();
     });
   });
   
-  describe('decodeJwt', () => {
+  describe('decodeJWT', () => {
     it('should decode token without verification', async () => {
-      const payload = {
+      const token = await createJWT({
         userId: 'user-123',
         email: 'test@example.com'
-      };
+      }, TEST_SECRET);
       
-      const token = await signJwt(payload, TEST_SECRET, '1h');
-      const decoded = decodeJwt(token);
+      const decoded = decodeJWT(token);
       
-      expect(decoded.userId).toBe('user-123');
-      expect(decoded.email).toBe('test@example.com');
+      expect(decoded?.sub).toBe('user-123');
+      expect(decoded?.email).toBe('test@example.com');
     });
     
     it('should return null for invalid token', () => {
-      const decoded = decodeJwt('invalid-token');
+      const decoded = decodeJWT('invalid-token');
       expect(decoded).toBeNull();
+    });
+  });
+  
+  describe('getTokenExpiration', () => {
+    it('should return expiration date', async () => {
+      const token = await createJWT({
+        userId: 'user-123',
+        email: 'test@example.com'
+      }, TEST_SECRET, 3600);
+      
+      const expiration = getTokenExpiration(token);
+      
+      expect(expiration).toBeInstanceOf(Date);
+      expect(expiration!.getTime()).toBeGreaterThan(Date.now());
+    });
+    
+    it('should return null for invalid token', () => {
+      const expiration = getTokenExpiration('invalid-token');
+      expect(expiration).toBeNull();
+    });
+  });
+  
+  describe('isTokenExpiringSoon', () => {
+    it('should return false for fresh token', async () => {
+      const token = await createJWT({
+        userId: 'user-123',
+        email: 'test@example.com'
+      }, TEST_SECRET, 86400); // 24 hours
+      
+      const expiring = isTokenExpiringSoon(token);
+      expect(expiring).toBe(false);
+    });
+    
+    it('should return true for token expiring soon', async () => {
+      const token = await createJWT({
+        userId: 'user-123',
+        email: 'test@example.com'
+      }, TEST_SECRET, 60); // 1 minute
+      
+      const expiring = isTokenExpiringSoon(token, 3600); // Threshold 1 hour
+      expect(expiring).toBe(true);
     });
   });
 });

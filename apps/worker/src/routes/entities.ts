@@ -44,8 +44,8 @@ export const entityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
  * POST /
  * Create a new entity
  */
-entityRoutes.post('/', 
-  requireOrgAdmin,
+entityRoutes.post('/',
+  requireOrgAdmin(),
   zValidator('json', createEntityRequestSchema),
   async (c) => {
   console.log('[Entities] Creating entity');
@@ -503,7 +503,7 @@ entityRoutes.get('/:id',
  * Update entity with atomic field merge
  */
 entityRoutes.patch('/:id',
-  requireOrgAdmin,
+  requireOrgAdmin(),
   zValidator('json', updateEntityRequestSchema),
   async (c) => {
   const entityId = c.req.param('id');
@@ -757,7 +757,7 @@ entityRoutes.post('/:id/transition',
  * DELETE /:id
  * Soft delete entity
  */
-entityRoutes.delete('/:id', requireOrgAdmin, async (c) => {
+entityRoutes.delete('/:id', requireOrgAdmin(), async (c) => {
   const entityId = c.req.param('id');
   
   // Redirect to transition endpoint with delete action

@@ -22,13 +22,14 @@ import {
   inviteUserRequestSchema,
   addUserToOrgRequestSchema
 } from '@1cc/shared';
-import { readJSON, writeJSON, listFiles, getOrgProfilePath, getOrgPermissionsPath, getInvitationPath, getUserMembershipPath } from '../lib/r2';
+import { readJSON, writeJSON, listFiles, deleteFile, getOrgProfilePath, getOrgPermissionsPath, getInvitationPath, getUserMembershipPath } from '../lib/r2';
 import { createOrgId, createSlug, createInvitationToken } from '../lib/id';
 import { requireSuperadmin, requireOrgAdmin, requireOrgMembership } from '../middleware/auth';
 import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
 import { sendInvitationEmail } from '../lib/email';
+import { createUserOrgStub, deleteUserOrgStub, updateUserOrgStubRole } from '../lib/user-stubs';
 import { R2_PATHS } from '@1cc/shared';
-import type { Organization, EntityTypePermissions, OrganizationListItem, UserInvitation, OrganizationMembership } from '@1cc/shared';
+import type { Organization, EntityTypePermissions, OrganizationListItem, UserInvitation, OrganizationMembership, UserRole } from '@1cc/shared';
 
 export const organizationRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -37,18 +38,26 @@ export const organizationRoutes = new Hono<{ Bindings: Env; Variables: Variables
  * Create a new organization (superadmin only)
  */
 organizationRoutes.post('/',
-  requireSuperadmin,
+  requireSuperadmin(),
   zValidator('json', createOrganizationRequestSchema),
   async (c) => {
   console.log('[Orgs] Creating organization');
   
   const { name, slug, description, domainWhitelist, allowSelfSignup } = c.req.valid('json');
+  console.log('[Orgs] Creating organization with name:', name, 'slug:', slug);
   
   // Check if slug is unique
+  console.log('[Orgs] Checking slug uniqueness for:', slug);
   const existingOrg = await findOrgBySlug(c.env.R2_BUCKET, slug);
   if (existingOrg) {
+    console.log('[Orgs] Conflict detected - organization with slug already exists:');
+    console.log('[Orgs]   Existing org ID:', existingOrg.id);
+    console.log('[Orgs]   Existing org name:', existingOrg.name);
+    console.log('[Orgs]   Existing org slug:', existingOrg.slug);
+    console.log('[Orgs]   Existing org path:', getOrgProfilePath(existingOrg.id));
     throw new ConflictError(`Organization with slug '${slug}' already exists`);
   }
+  console.log('[Orgs] Slug is unique, proceeding with creation');
   
   const orgId = createOrgId();
   const now = new Date().toISOString();
@@ -70,7 +79,17 @@ organizationRoutes.post('/',
   };
   
   // Save organization profile
-  await writeJSON(c.env.R2_BUCKET, getOrgProfilePath(orgId), organization);
+  const profilePath = getOrgProfilePath(orgId);
+  console.log('[Orgs] Saving organization profile to:', profilePath);
+  await writeJSON(c.env.R2_BUCKET, profilePath, organization);
+  
+  // Verify the file was written by reading it back
+  const verifyOrg = await readJSON<Organization>(c.env.R2_BUCKET, profilePath);
+  if (verifyOrg) {
+    console.log('[Orgs] Verified organization file exists:', verifyOrg.id, verifyOrg.name);
+  } else {
+    console.error('[Orgs] WARNING: Organization file was not found after write!');
+  }
   
   // Initialize empty entity type permissions
   const permissions: EntityTypePermissions = {
@@ -81,9 +100,11 @@ organizationRoutes.post('/',
     updatedBy: c.get('userId')!
   };
   
-  await writeJSON(c.env.R2_BUCKET, getOrgPermissionsPath(orgId), permissions);
+  const permissionsPath = getOrgPermissionsPath(orgId);
+  console.log('[Orgs] Saving permissions to:', permissionsPath);
+  await writeJSON(c.env.R2_BUCKET, permissionsPath, permissions);
   
-  console.log('[Orgs] Created organization:', orgId);
+  console.log('[Orgs] Created organization:', orgId, 'at path:', profilePath);
   
   return c.json({
     success: true,
@@ -105,6 +126,14 @@ organizationRoutes.get('/', async (c) => {
   const query = c.req.query();
   const adminOnly = query.adminOnly === 'true';
   
+  console.log('[Orgs] Listing params:', {
+    userRole,
+    userId,
+    userOrgId,
+    adminOnly,
+    isSuperadmin: userRole === 'superadmin'
+  });
+  
   // If requesting admin-only orgs, return organizations where user is an admin
   if (adminOnly && userId) {
     const adminOrgs = await findAdminOrganizations(c.env.R2_BUCKET, userId, userRole === 'superadmin');
@@ -119,7 +148,9 @@ organizationRoutes.get('/', async (c) => {
   
   // Non-superadmins can only see their own organization
   if (userRole !== 'superadmin') {
+    console.log('[Orgs] User is not superadmin, returning own org only');
     if (!userOrgId) {
+      console.log('[Orgs] No userOrgId, returning empty list');
       return c.json({
         success: true,
         data: { items: [], total: 0 }
@@ -152,14 +183,46 @@ organizationRoutes.get('/', async (c) => {
   }
   
   // Superadmin: list all organizations
-  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
-  const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
+  console.log('[Orgs] User is superadmin, listing all organizations');
+  const prefix = `${R2_PATHS.PRIVATE}orgs/`;
+  console.log('[Orgs] Listing files with prefix:', prefix);
+  const orgFiles = await listFiles(c.env.R2_BUCKET, prefix);
+  console.log('[Orgs] Raw files from R2:', orgFiles.length, 'files');
+  if (orgFiles.length > 0) {
+    console.log('[Orgs] All files returned:', orgFiles);
+    console.log('[Orgs] Sample files (first 10):', orgFiles.slice(0, 10));
+  } else {
+    console.warn('[Orgs] No files found with prefix:', prefix);
+  }
+  
+  // Filter for profile.json files - must be in format: private/orgs/{orgId}/profile.json
+  const profileFiles = orgFiles.filter(f => {
+    // Check both with and without leading slash
+    const endsWithProfile = f.endsWith('/profile.json') || f.endsWith('profile.json');
+    const hasOrgs = f.includes('/orgs/') || f.includes('orgs/');
+    const isProfileFile = endsWithProfile && hasOrgs;
+    
+    if (!isProfileFile && (f.includes('orgs/') || f.includes('/orgs/'))) {
+      console.log('[Orgs] Skipping non-profile file:', f, '(endsWith /profile.json:', f.endsWith('/profile.json'), ', endsWith profile.json:', f.endsWith('profile.json'), ')');
+    }
+    return isProfileFile;
+  });
+  console.log('[Orgs] Profile files after filter:', profileFiles.length, 'files');
+  if (profileFiles.length > 0) {
+    console.log('[Orgs] Profile file paths:', profileFiles);
+  } else if (orgFiles.length > 0) {
+    console.error('[Orgs] ERROR: Found', orgFiles.length, 'files but none matched profile.json filter!');
+  }
   
   const items: OrganizationListItem[] = [];
   
   for (const file of profileFiles) {
     const org = await readJSON<Organization>(c.env.R2_BUCKET, file);
-    if (!org) continue;
+    if (!org) {
+      console.log('[Orgs] Failed to read org from file:', file);
+      continue;
+    }
+    console.log('[Orgs] Loaded org:', org.id, org.name);
     
     items.push({
       id: org.id,
@@ -211,8 +274,7 @@ organizationRoutes.get('/:id', requireOrgMembership('id'), async (c) => {
  * Update organization
  */
 organizationRoutes.patch('/:id',
-  requireOrgAdmin,
-  requireOrgMembership('id'),
+  requireOrgAdmin('id'),
   zValidator('json', updateOrganizationRequestSchema),
   async (c) => {
   const orgId = c.req.param('id');
@@ -264,7 +326,7 @@ organizationRoutes.patch('/:id',
  * DELETE /:id
  * Soft delete organization (superadmin only)
  */
-organizationRoutes.delete('/:id', requireSuperadmin, async (c) => {
+organizationRoutes.delete('/:id', requireSuperadmin(), async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Deleting organization:', orgId);
   
@@ -329,7 +391,7 @@ organizationRoutes.get('/:id/permissions', requireOrgMembership('id'), async (c)
  * Update entity type permissions (superadmin only)
  */
 organizationRoutes.patch('/:id/permissions',
-  requireSuperadmin,
+  requireSuperadmin(),
   zValidator('json', updateEntityTypePermissionsRequestSchema),
   async (c) => {
   const orgId = c.req.param('id');
@@ -382,7 +444,7 @@ organizationRoutes.patch('/:id/permissions',
  * If the user doesn't exist, an invitation email with magic link is sent.
  */
 organizationRoutes.post('/:id/users/invite',
-  requireSuperadmin,
+  requireSuperadmin(),
   zValidator('json', inviteUserRequestSchema),
   async (c) => {
   const orgId = c.req.param('id');
@@ -428,6 +490,9 @@ organizationRoutes.post('/:id/users/invite',
     
     // Save membership to org
     await writeJSON(c.env.R2_BUCKET, getUserMembershipPath(orgId, existingUser.id), membership);
+    
+    // Create user-org stub for fast membership lookup
+    await createUserOrgStub(c.env.R2_BUCKET, email, existingUser.id, orgId, role as UserRole);
     
     // Send notification email (not an invitation - they're already added)
     if (c.env.RESEND_API_KEY) {
@@ -512,7 +577,7 @@ organizationRoutes.post('/:id/users/invite',
  * Used to add existing users (including superadmins) to organizations
  */
 organizationRoutes.post('/:id/users/add',
-  requireSuperadmin,
+  requireSuperadmin(),
   zValidator('json', addUserToOrgRequestSchema),
   async (c) => {
   const orgId = c.req.param('id');
@@ -561,6 +626,9 @@ organizationRoutes.post('/:id/users/add',
   // Save membership to org
   await writeJSON(c.env.R2_BUCKET, getUserMembershipPath(orgId, userId), membership);
   
+  // Create user-org stub for fast membership lookup
+  await createUserOrgStub(c.env.R2_BUCKET, email, userId, orgId, role as UserRole);
+  
   console.log('[Orgs] User added to org:', email, 'as', role);
   
   return c.json({
@@ -576,7 +644,7 @@ organizationRoutes.post('/:id/users/add',
  * GET /:id/users
  * List all users in an organization (superadmin only for any org)
  */
-organizationRoutes.get('/:id/users', requireSuperadmin, async (c) => {
+organizationRoutes.get('/:id/users', requireSuperadmin(), async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Listing users for org:', orgId);
   
@@ -688,16 +756,32 @@ async function findUserAcrossSystem(
  * Find organization by slug
  */
 async function findOrgBySlug(bucket: R2Bucket, slug: string): Promise<Organization | null> {
-  const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
-  const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
+  console.log('[Orgs] Finding organization by slug:', slug);
+  const prefix = `${R2_PATHS.PRIVATE}orgs/`;
+  const orgFiles = await listFiles(bucket, prefix);
+  
+  // Use the same improved filtering logic as the listing endpoint
+  const profileFiles = orgFiles.filter(f => {
+    // Check both with and without leading slash
+    const endsWithProfile = f.endsWith('/profile.json') || f.endsWith('profile.json');
+    const hasOrgs = f.includes('/orgs/') || f.includes('orgs/');
+    return endsWithProfile && hasOrgs;
+  });
+  
+  console.log('[Orgs] Checking', profileFiles.length, 'profile files for slug:', slug);
   
   for (const file of profileFiles) {
     const org = await readJSON<Organization>(bucket, file);
-    if (org && org.slug === slug) {
-      return org;
+    if (org) {
+      console.log('[Orgs] Checking org:', org.id, 'slug:', org.slug, 'matches?', org.slug === slug);
+      if (org.slug === slug) {
+        console.log('[Orgs] Found matching organization:', org.id, org.name);
+        return org;
+      }
     }
   }
   
+  console.log('[Orgs] No organization found with slug:', slug);
   return null;
 }
 
@@ -734,8 +818,15 @@ async function findAdminOrganizations(
   
   // Superadmins have access to all organizations
   if (isSuperadmin) {
-    const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
-    const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
+    const prefix = `${R2_PATHS.PRIVATE}orgs/`;
+    const orgFiles = await listFiles(bucket, prefix);
+    
+    // Use the same improved filtering logic as the listing endpoint
+    const profileFiles = orgFiles.filter(f => {
+      const endsWithProfile = f.endsWith('/profile.json') || f.endsWith('profile.json');
+      const hasOrgs = f.includes('/orgs/') || f.includes('orgs/');
+      return endsWithProfile && hasOrgs;
+    });
     
     for (const file of profileFiles) {
       const org = await readJSON<Organization>(bucket, file);

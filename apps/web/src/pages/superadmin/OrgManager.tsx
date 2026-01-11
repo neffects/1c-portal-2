@@ -89,10 +89,16 @@ export function OrgManager() {
   
   async function loadOrgs() {
     setLoading(true);
-    const response = await api.get('/api/organizations') as { success: boolean; data?: { items: OrganizationListItem[] } };
+    const response = await api.get('/api/organizations') as { success: boolean; data?: { items: OrganizationListItem[]; total?: number } };
+    
+    console.log('[OrgManager] Load organizations response:', response);
     
     if (response.success && response.data) {
-      setOrgs(response.data.items);
+      console.log('[OrgManager] Loaded', response.data.items?.length || 0, 'organizations');
+      console.log('[OrgManager] Organization IDs:', response.data.items?.map(o => o.id));
+      setOrgs(response.data.items || []);
+    } else {
+      console.error('[OrgManager] Failed to load organizations:', response);
     }
     setLoading(false);
   }

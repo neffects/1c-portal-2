@@ -48,7 +48,7 @@ platformRoutes.get('/branding', optionalAuth, async (c) => {
  * PATCH /branding
  * Update platform branding configuration (superadmin only)
  */
-platformRoutes.patch('/branding', requireSuperadmin, async (c) => {
+platformRoutes.patch('/branding', requireSuperadmin(), async (c) => {
   console.log('[Platform] Updating branding config');
   
   const body = await c.req.json();

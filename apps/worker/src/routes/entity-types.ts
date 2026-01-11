@@ -31,7 +31,7 @@ export const entityTypeRoutes = new Hono<{ Bindings: Env; Variables: Variables }
  * Create a new entity type (superadmin only)
  */
 entityTypeRoutes.post('/',
-  requireSuperadmin,
+  requireSuperadmin(),
   zValidator('json', createEntityTypeRequestSchema),
   async (c) => {
   console.log('[EntityTypes] Creating entity type');
@@ -250,7 +250,7 @@ entityTypeRoutes.get('/:id', async (c) => {
  * Update entity type (superadmin only)
  */
 entityTypeRoutes.patch('/:id',
-  requireSuperadmin,
+  requireSuperadmin(),
   zValidator('json', updateEntityTypeRequestSchema),
   async (c) => {
   const typeId = c.req.param('id');
@@ -302,7 +302,7 @@ entityTypeRoutes.patch('/:id',
  * Grant all existing entity types to all organizations (superadmin only)
  * One-time migration endpoint
  */
-entityTypeRoutes.post('/migrate-permissions', requireSuperadmin, async (c) => {
+entityTypeRoutes.post('/migrate-permissions', requireSuperadmin(), async (c) => {
   console.log('[EntityTypes] Running permissions migration...');
   
   const userId = c.get('userId')!;
@@ -340,7 +340,7 @@ entityTypeRoutes.post('/migrate-permissions', requireSuperadmin, async (c) => {
  * DELETE /:id
  * Archive entity type (superadmin only)
  */
-entityTypeRoutes.delete('/:id', requireSuperadmin, async (c) => {
+entityTypeRoutes.delete('/:id', requireSuperadmin(), async (c) => {
   const typeId = c.req.param('id');
   console.log('[EntityTypes] Archiving entity type:', typeId);
   

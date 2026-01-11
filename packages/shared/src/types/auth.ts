@@ -1,25 +1,42 @@
 /**
  * Authentication types for magic link flow and JWT tokens
+ * 
+ * Note: JWT is user-level (email only), not organization-specific.
+ * User's organization memberships and roles are stored in user-org stub files.
  */
 
 import type { UserRole } from './user';
 
 /**
  * JWT payload structure embedded in authentication tokens
+ * 
+ * Minimal payload: only user identification (sub + email).
+ * Role and organization are looked up from user-org stubs per request.
  */
 export interface JWTPayload {
   /** User's unique identifier */
   sub: string;
   /** User's email address */
   email: string;
-  /** User's role in the system */
-  role: UserRole;
-  /** Organization ID the user belongs to (null for superadmins) */
-  organizationId: string | null;
   /** Token issued at timestamp (Unix epoch seconds) */
   iat: number;
   /** Token expiration timestamp (Unix epoch seconds) */
   exp: number;
+}
+
+/**
+ * Organization membership info for a user
+ * Returned by /auth/me endpoint
+ */
+export interface UserOrganization {
+  /** Organization ID */
+  id: string;
+  /** Organization name */
+  name: string;
+  /** Organization slug */
+  slug: string;
+  /** User's role in this organization */
+  role: UserRole;
 }
 
 /**
@@ -64,9 +81,10 @@ export interface AuthResponse {
   user: {
     id: string;
     email: string;
-    role: UserRole;
-    organizationId: string | null;
-    organizationName?: string;
+    /** Whether user is a superadmin (not organization-specific) */
+    isSuperadmin: boolean;
+    /** Organizations the user belongs to with their roles */
+    organizations: UserOrganization[];
   };
   expiresAt: string;
 }
@@ -79,8 +97,12 @@ export interface Session {
   user: {
     id: string;
     email: string;
-    role: UserRole;
-    organizationId: string | null;
+    /** Whether user is a superadmin */
+    isSuperadmin: boolean;
+    /** Organizations the user belongs to with their roles */
+    organizations: UserOrganization[];
   };
+  /** Currently selected organization ID (client-side context) */
+  currentOrganizationId: string | null;
   expiresAt: string;
 }

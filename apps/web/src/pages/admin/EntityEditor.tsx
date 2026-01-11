@@ -19,7 +19,7 @@ interface EntityEditorProps {
 }
 
 export function EntityEditor({ id, typeId }: EntityEditorProps) {
-  const { isAuthenticated, isOrgAdmin, isSuperadmin, loading: authLoading, organizationId, userId } = useAuth();
+  const { isAuthenticated, isOrgAdmin, isSuperadmin, loading: authLoading, organizationId, user, userId } = useAuth();
   const { entityTypes } = useSync();
   
   const [entity, setEntity] = useState<Entity | null>(null);
@@ -581,6 +581,20 @@ export function EntityEditor({ id, typeId }: EntityEditorProps) {
           <h1 class="heading-1">
             {isNew ? `New ${entityType?.name}` : `Edit ${entityType?.name}`}
           </h1>
+          <div class="mt-2 flex items-center gap-4 text-sm text-surface-500 dark:text-surface-400">
+            <span class="flex items-center gap-1">
+              <span class="i-lucide-building-2 text-base"></span>
+              {isNew ? (
+                selectedOrgId === null 
+                  ? <span class="text-primary-600 dark:text-primary-400 font-medium">Global (Platform-wide)</span>
+                  : (adminOrganizations.find(o => o.id === selectedOrgId)?.name || user.value?.organizationName || 'Your Organization')
+              ) : (
+                entity?.organizationId === null 
+                  ? <span class="text-primary-600 dark:text-primary-400 font-medium">Global (Platform-wide)</span>
+                  : (entityOrgName || user.value?.organizationName || entity?.organizationId || 'Organization')
+              )}
+            </span>
+          </div>
         </div>
         
         <div class="flex items-center gap-3">

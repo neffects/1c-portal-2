@@ -168,7 +168,9 @@ export function OrgWizard({ onComplete, onCancel }: OrgWizardProps) {
       });
       
       if (!orgResponse.success) {
-        throw new Error(orgResponse.error?.message || 'Failed to create organization');
+        const errorMessage = orgResponse.error?.message || 'Failed to create organization';
+        console.error('[OrgWizard] Failed to create organization:', orgResponse.error);
+        throw new Error(errorMessage);
       }
       
       const orgData = orgResponse.data as { id: string };

@@ -24,17 +24,39 @@ interface TypeBuilderProps {
   id?: string;
 }
 
-// Generate a valid snake_case ID from a name
-function generateId(name: string, prefix: string = ''): string {
-  const base = name
+/**
+ * Generate a deterministic, human-readable snake_case ID from a name
+ * Example: "Product Name" -> "product_name"
+ */
+function slugify(name: string): string {
+  return name
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .replace(/\s+/g, '_')
-    .substring(0, 30);
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+    .replace(/[\s-]+/g, '_')       // Replace spaces/hyphens with underscores
+    .replace(/^_+|_+$/g, '')       // Trim leading/trailing underscores
+    .substring(0, 50);             // Limit length
+}
+
+/**
+ * Generate a unique ID from a name, checking against existing IDs
+ * If a collision occurs, adds a numeric suffix (e.g., "field_name_2")
+ */
+function generateUniqueId(name: string, existingIds: string[]): string {
+  const baseId = slugify(name) || 'field';
   
-  // Add a short timestamp suffix to ensure uniqueness
-  const suffix = Date.now().toString(36).slice(-4);
-  return prefix ? `${prefix}_${base}_${suffix}` : `${base}_${suffix}`;
+  // If the base ID doesn't exist, use it
+  if (!existingIds.includes(baseId)) {
+    return baseId;
+  }
+  
+  // Find the next available numeric suffix
+  let counter = 2;
+  while (existingIds.includes(`${baseId}_${counter}`)) {
+    counter++;
+  }
+  
+  return `${baseId}_${counter}`;
 }
 
 // Default field template
@@ -987,9 +1009,12 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
   
   // Add a new section
   function handleAddSection() {
+    // Generate a deterministic, human-readable ID for the section
+    const existingSectionIds = sections.map(s => s.id);
+    const sectionName = `Section ${sections.length + 1}`;
     const newSection: FieldSection = {
-      id: generateId('section', 'sec'),
-      name: `Section ${sections.length + 1}`,
+      id: generateUniqueId(sectionName, existingSectionIds),
+      name: sectionName,
       displayOrder: sections.length
     };
     console.log('[TypeBuilder] Adding section:', newSection);
@@ -1084,13 +1109,16 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
         f.id === fieldData.id ? { ...f, ...fieldData } as FieldDefinition : f
       ));
     } else {
-      // Add new field with generated ID
+      // Add new field with deterministic, human-readable ID
+      // Generate from the field name (e.g., "Product Name" -> "product_name")
       console.log('[TypeBuilder] Adding new field');
+      const existingFieldIds = fields.map(f => f.id);
       const newField: FieldDefinition = {
         ...fieldData,
-        id: generateId(fieldData.name || 'field', 'fld'),
+        id: generateUniqueId(fieldData.name || 'field', existingFieldIds),
         displayOrder: fields.length
       } as FieldDefinition;
+      console.log('[TypeBuilder] Generated field ID:', newField.id);
       setFields([...fields, newField]);
     }
     

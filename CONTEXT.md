@@ -65,6 +65,38 @@ Draft → Pending → Published → Archived
 - **Authenticated**: All logged-in users on the platform
 - **Members**: Organization members only
 
+### Multi-Organization Authentication Architecture
+
+The system supports users belonging to multiple organizations with different roles:
+
+```
+JWT Token (Minimal):
+├── sub: userId
+└── email: user@example.com
+    (NO organization or role info - looked up per request)
+
+User-Org Stubs (R2):
+└── private/user-stubs/
+    └── [email-hash]-[user-id]-[org-id]-[role].json
+        ├── Fast membership check (file existence)
+        └── Role encoded in filename
+
+Auth Flow:
+1. User logs in with email
+2. JWT created with just sub + email
+3. /auth/me returns all user's organizations
+4. Frontend stores orgs, tracks currentOrganizationId
+5. API calls include orgId in payload
+6. Middleware checks user-org stub exists
+```
+
+**Key points:**
+- JWT is user-level, not organization-specific
+- Organization context is client-side (switchable without re-auth)
+- User-org stubs enable fast O(1) membership checks
+- Role is per-organization, stored in stub filename
+- Superadmins identified by email in SUPERADMIN_EMAILS env var
+
 ### Storage Structure (R2)
 
 ```
@@ -72,6 +104,7 @@ config/app.json           # App configuration
 public/                   # Public content
 platform/                 # Platform content
 private/orgs/{orgId}/     # Organization-specific content
+private/user-stubs/       # User-org membership stubs (for fast lookup)
 stubs/{entityId}.json     # Entity ownership lookup
 secret/ROOT.json          # Root config
 ```
@@ -90,6 +123,15 @@ secret/ROOT.json          # Root config
 - `PATCH /api/organizations/:id` - Update org
 - `PATCH /api/organizations/:id/permissions` - Update entity type permissions
 - `POST /api/organizations/:id/users/invite` - Invite user to org (superadmin)
+
+**Note (2026-01-11)**: Fixed organization listing bug and added comprehensive debugging:
+- **Bug fix**: Auth middleware now sets `userRole` to 'superadmin' for superadmin users. Previously `userRole` was undefined, causing the listing endpoint to return early with empty results.
+- **Creation**: Verifies organization file is written and readable immediately after creation, logs file paths
+- **Slug uniqueness check**: Enhanced `findOrgBySlug` with improved filtering logic (matching listing endpoint) and detailed logging
+- **Listing**: Logs prefix used, all files returned from R2, filtering logic, and final profile files
+- **Frontend**: Logs API response, organization IDs received, and detailed error messages
+- This fixes the issue where newly created organizations weren't appearing in the list
+- Also helps debug 409 Conflict errors when creating organizations (slug uniqueness checks)
 
 ### Entity Types
 - `POST /api/entity-types` - Create type (superadmin)
@@ -293,6 +335,40 @@ The project includes automated security testing with:
   - Automated penetration testing in CI/CD
 
 ### Recently Completed
+- ✅ Multi-organization user architecture (2026-01-11):
+  - **User-org stubs**: New R2 file format `[email-hash]-[user-id]-[org-id]-[role].json` for O(1) membership lookups
+  - **Minimal JWT**: JWT now contains only `sub` (userId) and `email` - no org/role info
+  - **Auth middleware**: Updated to check superadmin status from env, membership from stubs per-request
+  - **/auth/me extended**: Now returns `organizations: [{id, name, slug, role}]` array
+  - **Frontend auth store**: Added `organizations`, `currentOrganization`, `switchOrganization()`
+  - **Admin Dashboard**: Uses auth store for org data, instant client-side org switching
+  - **Organization routes**: Create/delete user-org stubs on membership changes
+  - Organization switching is now client-side (no re-authentication needed)
+  - Users can seamlessly work across multiple organizations without logging out
+- ✅ Deterministic human-readable field IDs in TypeBuilder (2026-01-11):
+  - Field IDs are now generated from the field name using snake_case (e.g., "Product Name" → "product_name")
+  - Section IDs similarly generated from section name (e.g., "Main Information" → "main_information")
+  - No more timestamp-based suffixes like `field_0_1768070647268`
+  - If a collision occurs, a numeric suffix is added (e.g., "name_2", "name_3")
+  - IDs are limited to 50 characters and only contain lowercase letters, numbers, and underscores
+  - This makes entity data more readable and easier to query
+- ✅ Polished admin EntityView redesign (2026-01-11):
+  - EntityView.tsx now displays entities as clean, published content pages
+  - Hero header with organization name as label, large title, and status indicator (colored dot)
+  - Fields are grouped by sections defined in the entity type (sorted by displayOrder)
+  - Technical fields (name, description, slug, ID, version) removed from main display
+  - Description shown as primary prose content block below header
+  - Each section rendered as a card with proper field display names
+  - Minimal admin UI: subtle Edit button, back navigation, footer with last updated date
+  - No sidebar with technical metadata - focuses entirely on content
+  - Clean, magazine-style layout suitable for public-facing content
+- ✅ Admin entity type cards and navigation (2026-01-11):
+  - Dashboard shows entity type cards with count and "Add New" button
+  - Clicking card navigates to dedicated EntityTypeView route
+  - EntityTypeView shows filtered list of entities for that type
+  - Clicking entity row navigates to read-only EntityView
+  - "Edit" button navigates to EntityEditor
+  - Organization clearly displayed in both view and edit modes
 - ✅ Organization selection and global entities (2026-01-10):
   - Users can now select which organization to create entities for when they're members of multiple orgs
   - Superadmins can create global/platform-wide entities (organizationId = null)

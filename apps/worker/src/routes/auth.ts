@@ -14,11 +14,12 @@ import type { Env, Variables } from '../types';
 import { magicLinkRequestSchema, verifyTokenSchema } from '@1cc/shared';
 import { createJWT, verifyJWT, isTokenExpiringSoon } from '../lib/jwt';
 import { readJSON, writeJSON, deleteFile, getMagicLinkPath, getOrgProfilePath, getUserMembershipPath, listFiles } from '../lib/r2';
+import { listUserOrganizations, isSuperadminEmail } from '../lib/user-stubs';
 import { createMagicLinkToken, createUserId } from '../lib/id';
 import { sendMagicLinkEmail } from '../lib/email';
 import { AppError, ValidationError } from '../middleware/error';
 import { MAGIC_LINK_EXPIRY_SECONDS, R2_PATHS } from '@1cc/shared';
-import type { MagicLinkToken, User, Organization, OrganizationMembership, AuthResponse } from '@1cc/shared';
+import type { MagicLinkToken, User, Organization, OrganizationMembership, AuthResponse, UserOrganization } from '@1cc/shared';
 
 export const authRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -160,28 +161,39 @@ authRoutes.get('/verify', async (c) => {
   // Update last login
   await updateUserLastLogin(c.env.R2_BUCKET, user);
   
-  // Generate JWT
+  // Generate JWT (minimal: userId + email only)
   const jwt = await createJWT({
     userId: user.id,
-    email: user.email,
-    role: user.role,
-    organizationId: user.organizationId
+    email: user.email
   }, c.env.JWT_SECRET);
   
-  // Get organization name if applicable
-  let organizationName: string | undefined;
-  if (user.organizationId) {
+  // Check if user is a superadmin
+  const isSuperadmin = isSuperadminEmail(user.email, c.env.SUPERADMIN_EMAILS);
+  
+  // Get user's organizations from stubs
+  const userOrgs = await listUserOrganizations(c.env.R2_BUCKET, user.email, user.id);
+  
+  // Build organizations array with details
+  const organizations: UserOrganization[] = [];
+  for (const userOrg of userOrgs) {
     const org = await readJSON<Organization>(
       c.env.R2_BUCKET,
-      getOrgProfilePath(user.organizationId)
+      getOrgProfilePath(userOrg.orgId)
     );
-    organizationName = org?.name;
+    if (org) {
+      organizations.push({
+        id: org.id,
+        name: org.name,
+        slug: org.slug,
+        role: userOrg.role
+      });
+    }
   }
   
   // Clean up used token
   await deleteFile(c.env.R2_BUCKET, getMagicLinkPath(token));
   
-  console.log('[Auth] User authenticated:', user.id, isNewUser ? '(new)' : '(existing)');
+  console.log('[Auth] User authenticated:', user.id, isNewUser ? '(new)' : '(existing)', 'orgs:', organizations.length);
   
   // Return JSON if requested (for API testing)
   if (format === 'json') {
@@ -191,9 +203,8 @@ authRoutes.get('/verify', async (c) => {
       user: {
         id: user.id,
         email: user.email,
-        role: user.role,
-        organizationId: user.organizationId,
-        organizationName
+        isSuperadmin,
+        organizations
       },
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
     };
@@ -206,13 +217,9 @@ authRoutes.get('/verify', async (c) => {
   callbackUrl.searchParams.set('token', jwt);
   callbackUrl.searchParams.set('userId', user.id);
   callbackUrl.searchParams.set('email', user.email);
-  callbackUrl.searchParams.set('role', user.role);
-  if (user.organizationId) {
-    callbackUrl.searchParams.set('orgId', user.organizationId);
-  }
-  if (organizationName) {
-    callbackUrl.searchParams.set('orgName', organizationName);
-  }
+  callbackUrl.searchParams.set('isSuperadmin', String(isSuperadmin));
+  // Pass organizations as JSON-encoded string
+  callbackUrl.searchParams.set('organizations', JSON.stringify(organizations));
   callbackUrl.searchParams.set('expiresAt', new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString());
   
   return c.redirect(callbackUrl.toString());
@@ -238,12 +245,10 @@ authRoutes.post('/refresh', async (c) => {
     throw new AppError('INVALID_TOKEN', 'Invalid or expired token', 401);
   }
   
-  // Generate new token
+  // Generate new token (minimal: userId + email only)
   const newToken = await createJWT({
     userId: payload.sub,
-    email: payload.email,
-    role: payload.role,
-    organizationId: payload.organizationId
+    email: payload.email
   }, c.env.JWT_SECRET);
   
   console.log('[Auth] Token refreshed for user:', payload.sub);
@@ -278,6 +283,9 @@ authRoutes.post('/logout', async (c) => {
 /**
  * GET /auth/me
  * Get current user info from token
+ * 
+ * Returns user info including all organizations they belong to.
+ * Organizations are looked up from user-org stubs.
  */
 authRoutes.get('/me', async (c) => {
   const authHeader = c.req.header('Authorization');
@@ -293,24 +301,38 @@ authRoutes.get('/me', async (c) => {
     throw new AppError('INVALID_TOKEN', 'Invalid or expired token', 401);
   }
   
-  // Get organization name if applicable
-  let organizationName: string | undefined;
-  if (payload.organizationId) {
+  // Check if user is a superadmin
+  const isSuperadmin = isSuperadminEmail(payload.email, c.env.SUPERADMIN_EMAILS);
+  
+  // Get user's organizations from stubs
+  const userOrgs = await listUserOrganizations(c.env.R2_BUCKET, payload.email, payload.sub);
+  
+  // Build organizations array with details
+  const organizations: UserOrganization[] = [];
+  for (const userOrg of userOrgs) {
     const org = await readJSON<Organization>(
       c.env.R2_BUCKET,
-      getOrgProfilePath(payload.organizationId)
+      getOrgProfilePath(userOrg.orgId)
     );
-    organizationName = org?.name;
+    if (org) {
+      organizations.push({
+        id: org.id,
+        name: org.name,
+        slug: org.slug,
+        role: userOrg.role
+      });
+    }
   }
+  
+  console.log('[Auth] /me returning user:', payload.sub, 'with', organizations.length, 'organizations');
   
   return c.json({
     success: true,
     data: {
       id: payload.sub,
       email: payload.email,
-      role: payload.role,
-      organizationId: payload.organizationId,
-      organizationName,
+      isSuperadmin,
+      organizations,
       tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
       tokenExpiringSoon: isTokenExpiringSoon(token)
     }
@@ -318,14 +340,6 @@ authRoutes.get('/me', async (c) => {
 });
 
 // Helper functions
-
-/**
- * Check if email is in the superadmin list (from environment variable)
- */
-function isSuperadminEmail(email: string, superadminEmails: string): boolean {
-  const emails = superadminEmails.split(',').map(e => e.trim().toLowerCase());
-  return emails.includes(email.toLowerCase());
-}
 
 /**
  * Find user by email across all organizations

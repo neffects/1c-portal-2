@@ -29,13 +29,18 @@ export interface Env {
 
 /**
  * Hono context variables (set by middleware)
+ * 
+ * Note: Role and organization are NOT in JWT anymore.
+ * They are looked up from user-org stubs per request.
  */
 export interface Variables {
-  // Set by auth middleware
+  // Set by auth middleware (from JWT)
   user?: JWTPayload;
   userId?: string;
-  userRole?: UserRole;
-  organizationId?: string | null;
+  userEmail?: string;
+  
+  // Set by auth middleware (checked against env)
+  isSuperadmin?: boolean;
   
   // Request tracking
   requestId?: string;
