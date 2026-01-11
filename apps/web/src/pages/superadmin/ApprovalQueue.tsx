@@ -17,6 +17,8 @@ export function ApprovalQueue() {
   const [organizations, setOrganizations] = useState<Map<string, OrganizationListItem>>(new Map());
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectionFeedback, setRejectionFeedback] = useState<string>('');
   
   // Redirect if not superadmin
   useEffect(() => {
@@ -70,20 +72,33 @@ export function ApprovalQueue() {
     setProcessingId(null);
   }
   
-  async function handleReject(entityId: string) {
-    const feedback = prompt('Rejection reason (optional):');
+  function handleRejectClick(entityId: string) {
+    setRejectingId(entityId);
+    setRejectionFeedback('');
+  }
+  
+  function handleRejectCancel() {
+    setRejectingId(null);
+    setRejectionFeedback('');
+  }
+  
+  async function handleRejectConfirm() {
+    if (!rejectingId) return;
     
+    const entityId = rejectingId;
     setProcessingId(entityId);
+    setRejectingId(null);
     
     const response = await api.post(`/api/entities/${entityId}/transition`, {
       action: 'reject',
-      feedback
+      feedback: rejectionFeedback || undefined
     });
     
     if (response.success) {
       setPendingEntities(pendingEntities.filter(e => e.id !== entityId));
     }
     
+    setRejectionFeedback('');
     setProcessingId(null);
   }
   
@@ -161,7 +176,7 @@ export function ApprovalQueue() {
                     ) : (
                       <>
                         <button
-                          onClick={() => handleReject(entity.id)}
+                          onClick={() => handleRejectClick(entity.id)}
                           class="btn-ghost text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
                           disabled={processingId !== null}
                         >
@@ -193,6 +208,62 @@ export function ApprovalQueue() {
           <p class="body-text">
             No pending content to review. Check back later.
           </p>
+        </div>
+      )}
+      
+      {/* Rejection Modal */}
+      {rejectingId && (
+        <div 
+          class="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in" 
+          onClick={handleRejectCancel}
+        >
+          <div 
+            class="bg-white dark:bg-surface-800 rounded-xl shadow-2xl w-full max-w-md animate-slide-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div class="p-6 border-b border-surface-200 dark:border-surface-700">
+              <h2 class="heading-3">Reject Entity</h2>
+              <p class="text-sm text-surface-500 dark:text-surface-400 mt-1">
+                Please provide an optional reason for rejection
+              </p>
+            </div>
+            
+            {/* Content */}
+            <div class="p-6">
+              <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                Rejection Reason (optional)
+              </label>
+              <textarea
+                value={rejectionFeedback}
+                onInput={(e) => setRejectionFeedback((e.target as HTMLTextAreaElement).value)}
+                placeholder="Enter reason for rejection..."
+                class="input w-full min-h-[100px] resize-y"
+                autofocus
+              />
+            </div>
+            
+            {/* Footer */}
+            <div class="p-6 border-t border-surface-200 dark:border-surface-700 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={handleRejectCancel}
+                class="btn-secondary"
+                disabled={processingId !== null}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRejectConfirm}
+                class="btn-primary bg-red-600 hover:bg-red-700"
+                disabled={processingId !== null}
+              >
+                <span class="i-lucide-x mr-2"></span>
+                Reject
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

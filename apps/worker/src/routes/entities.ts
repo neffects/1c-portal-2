@@ -477,7 +477,7 @@ entityRoutes.get('/:id',
   if (stub.organizationId === null) {
     // Global entity - use visibility-based path
     versionPath = getEntityVersionPath(latestPointer.visibility, entityId, version);
-  } else if (latestPointer.status === 'draft' || latestPointer.status === 'pending_approval') {
+  } else if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
     // Drafts and pending entities are always in the org's private space
     versionPath = getEntityVersionPath('members', entityId, version, stub.organizationId);
   } else if (latestPointer.visibility === 'members') {
@@ -739,7 +739,7 @@ entityRoutes.post('/:id/transition',
   if (stub.organizationId === null) {
     // Global entity - use visibility-based path
     storageVisibility = latestPointer.visibility;
-  } else if (latestPointer.status === 'draft' || latestPointer.status === 'pending_approval') {
+  } else if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
     // Drafts and pending entities are always in the org's private space
     storageVisibility = 'members';
   } else if (latestPointer.visibility === 'members') {
