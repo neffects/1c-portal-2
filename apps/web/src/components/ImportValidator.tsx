@@ -68,8 +68,8 @@ export function ImportValidator({
   showOnlyErrors = false 
 }: ImportValidatorProps) {
   const hasErrors = errors.length > 0;
-  const validRows = totalRows - new Set(errors.map(e => e.rowIndex)).size;
   const errorRows = new Set(errors.map(e => e.rowIndex)).size;
+  const validRows = Math.max(0, totalRows - errorRows);
   const groupedErrors = groupErrorsByRow(errors);
   
   if (isLoading) {
@@ -83,7 +83,7 @@ export function ImportValidator({
     );
   }
   
-  if (totalRows === 0) {
+  if (totalRows === 0 && !hasErrors) {
     return (
       <div class="card p-6">
         <div class="flex items-center gap-3 text-surface-500">

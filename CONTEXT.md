@@ -180,6 +180,25 @@ Slug indexes stored at `stubs/slug-index/{orgId}-{typeSlug}-{entitySlug}.json` f
 - `GET /api/super/organizations` - List all organizations (alternative endpoint)
 - `POST /api/super/entity-types` - Create entity type
 - `PATCH /api/super/platform/branding` - Update platform branding
+- `POST /api/super/entities` - Create entity (supports global entities)
+- `GET /api/super/entities` - List entities (all orgs + global)
+- `GET /api/super/entities/export` - Export entities for a type (query: typeId, status?, organizationId?)
+- `POST /api/super/entities/bulk-import` - Atomic bulk import entities with versioning support
+- `GET /api/super/entities/:id` - Get any entity by ID
+
+### Import/Export (Superadmin)
+
+The import/export functionality allows superadmins to bulk manage entities:
+
+- **Export**: `GET /api/super/entities/export?typeId=xxx`
+  - Returns entity type schema + all entities of that type
+  - Optional filters: `status`, `organizationId` (null for global entities)
+  
+- **Bulk Import**: `POST /api/super/entities/bulk-import`
+  - Atomic operation: all-or-nothing (validation errors abort entire batch)
+  - Supports versioning: empty `id` creates new, existing `id` creates new version
+  - Per-row `organizationId` and `slug` override request-level defaults
+  - Validates slug uniqueness per (entityType, org, slug) for new entities
 
 **Note (2026-01-14)**: Fixed missing `/api/organizations` endpoint:
 - **Bug fix**: Added missing mount for `organizationRoutes` in `/api` routes aggregator. The routes existed in `routes/organizations.ts` but were not mounted, causing 404 errors when the frontend called `GET /api/organizations`. The routes are now properly mounted at `/api/organizations`.

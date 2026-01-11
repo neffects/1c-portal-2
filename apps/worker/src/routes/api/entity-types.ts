@@ -12,9 +12,35 @@ import { entityTypeQueryParamsSchema } from '@1cc/shared';
 import { readJSON, listFiles, getEntityTypePath, getOrgPermissionsPath } from '../../lib/r2';
 import { R2_PATHS } from '@1cc/shared';
 import { NotFoundError } from '../../middleware/error';
-import type { EntityType, EntityTypeListItem, EntityTypePermissions } from '@1cc/shared';
+import type { EntityType, EntityTypeListItem, EntityTypePermissions, EntityStub } from '@1cc/shared';
 
 export const apiEntityTypeRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+/**
+ * Count entities for a specific entity type using stubs
+ */
+async function countEntitiesForType(bucket: R2Bucket, typeId: string): Promise<number> {
+  const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`);
+  let count = 0;
+  
+  for (const stubFile of stubFiles) {
+    if (!stubFile.endsWith('.json')) continue;
+    // Skip non-entity stubs (like slug-index subdirectory)
+    // Entity stubs are directly in stubs/ like stubs/abc1234.json
+    // Slug index files are in stubs/slug-index/...
+    const filename = stubFile.replace(`${R2_PATHS.STUBS}`, '');
+    if (filename.includes('/')) {
+      continue;
+    }
+    
+    const stub = await readJSON<EntityStub>(bucket, stubFile);
+    if (stub && stub.entityTypeId === typeId) {
+      count++;
+    }
+  }
+  
+  return count;
+}
 
 /**
  * GET /entity-types
@@ -59,8 +85,8 @@ apiEntityTypeRoutes.get('/entity-types',
       continue;
     }
     
-    // Count entities (simplified - in production would use manifest/bundle)
-    const entityCount = 0; // TODO: Get from manifest
+    // Count entities using stubs
+    const entityCount = await countEntitiesForType(c.env.R2_BUCKET, entityType.id);
     
     items.push({
       id: entityType.id,

@@ -97,7 +97,7 @@ export function EntityImportExport() {
   async function loadEntityTypeSchema(typeId: string) {
     try {
       // Use the export endpoint to get schema (it includes field definitions)
-      const response = await api.get(`/api/entities/export?typeId=${typeId}`) as {
+      const response = await api.get(`/api/super/entities/export?typeId=${typeId}`) as {
         success: boolean;
         data?: { entityType: EntityType; entities: Entity[] };
       };
@@ -117,7 +117,7 @@ export function EntityImportExport() {
     setExportStatus(null);
     
     try {
-      const response = await api.get(`/api/entities/export?typeId=${exportTypeId}`) as {
+      const response = await api.get(`/api/super/entities/export?typeId=${exportTypeId}`) as {
         success: boolean;
         data?: { entityType: EntityType; entities: Entity[]; exportedAt: string };
         error?: { code?: string; message: string };
@@ -254,7 +254,7 @@ export function EntityImportExport() {
     setImportResult(null);
     
     try {
-      const response = await api.post('/api/entities/bulk-import', {
+      const response = await api.post('/api/super/entities/bulk-import', {
         entityTypeId: importTypeId,
         organizationId: null, // Global entities for superadmin
         entities: importData

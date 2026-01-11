@@ -1356,6 +1356,175 @@ GET /api/super/entities?organizationId=null
 
 **Response:** Same format as `/api/entities` but includes entities from all organizations
 
+### Export Entities
+
+**GET** `/api/super/entities/export`
+
+Export entities of a specific entity type. Returns the entity type schema along with all matching entities, useful for backup or data migration.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Query Parameters:**
+- `typeId` (required) - Entity type ID to export
+- `status` (optional) - Filter by status: `draft`, `pending`, `published`, `archived`
+- `organizationId` (optional) - Filter by organization ID. Use `null` for global entities only
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "entityType": {
+      "id": "type123",
+      "name": "Product",
+      "pluralName": "Products",
+      "slug": "products",
+      "fields": [
+        {
+          "id": "field_name",
+          "name": "Name",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    "entities": [
+      {
+        "id": "ent456",
+        "organizationId": "org789",
+        "slug": "dog-toy",
+        "visibility": "public",
+        "data": {
+          "name": "Dog Toy",
+          "description": "A fun toy for dogs"
+        }
+      }
+    ],
+    "exportedAt": "2026-01-11T12:00:00Z",
+    "count": 42
+  }
+}
+```
+
+**Error Responses:**
+- `400` - Missing required `typeId` parameter
+- `401` - Unauthorized (missing or invalid token)
+- `403` - Forbidden (not a superadmin)
+- `404` - Entity type not found
+
+### Bulk Import Entities
+
+**POST** `/api/super/entities/bulk-import`
+
+Atomically import multiple entities. The entire operation succeeds or fails - no partial imports.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "entityTypeId": "type123",
+  "organizationId": "org789",
+  "entities": [
+    {
+      "id": "",
+      "data": {
+        "name": "New Product",
+        "description": "Product description"
+      },
+      "slug": "new-product",
+      "visibility": "public",
+      "organizationId": "org789"
+    },
+    {
+      "id": "ent456",
+      "data": {
+        "name": "Updated Product",
+        "description": "Updated description"
+      },
+      "slug": "existing-product"
+    }
+  ]
+}
+```
+
+**Request Fields:**
+- `entityTypeId` (required) - Entity type ID for all entities
+- `organizationId` (optional) - Default organization ID (can be overridden per-entity)
+- `entities` (required) - Array of entities to import:
+  - `id` (optional) - Entity ID. Empty/missing creates new entity; existing ID creates new version; non-existing valid ID creates entity with that ID
+  - `data` (required) - Entity data fields
+  - `slug` (optional) - Entity slug. Auto-generated from name if not provided. Must match `/^[a-z0-9-]+$/`
+  - `visibility` (optional) - Visibility scope: `public`, `authenticated`, `members`
+  - `organizationId` (optional) - Per-entity organization override
+
+**Versioning Behavior:**
+- **Empty `id`**: Creates a new entity with auto-generated ID
+- **Existing `id`**: Creates a new version of the existing entity (update)
+- **Non-existing valid `id`**: Creates a new entity using the provided ID
+
+**Slug Uniqueness:**
+- Slugs must be unique per `(entityTypeId, organizationId, slug)` combination
+- Only validated when creating new entities (not for version updates)
+
+**Response (Success):**
+```json
+{
+  "success": true,
+  "data": {
+    "imported": 42,
+    "created": 30,
+    "updated": 12,
+    "entities": [
+      {
+        "id": "ent789",
+        "version": 1,
+        "status": "draft",
+        "slug": "new-product"
+      }
+    ]
+  }
+}
+```
+
+**Response (Validation Errors):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Import validation failed",
+    "details": {
+      "errors": [
+        {
+          "row": 0,
+          "field": "name",
+          "message": "Name is required"
+        },
+        {
+          "row": 2,
+          "field": "slug",
+          "message": "Slug 'existing-slug' already exists for this entity type and organization"
+        }
+      ]
+    }
+  }
+}
+```
+
+**Error Responses:**
+- `400` - Validation errors (see response format above)
+- `401` - Unauthorized (missing or invalid token)
+- `403` - Forbidden (not a superadmin, or organization doesn't have permission for entity type)
+- `404` - Entity type not found
+
 ### List All Users
 
 **GET** `/api/super/users`
@@ -1665,6 +1834,11 @@ For API support or questions:
 ---
 
 ## Changelog
+
+### 2026-01-11 - Import/Export Endpoints
+
+- Added `GET /api/super/entities/export` for exporting entities by type
+- Added `POST /api/super/entities/bulk-import` for atomic bulk import with versioning support
 
 ### 2026-01-11 - Route Restructure
 
