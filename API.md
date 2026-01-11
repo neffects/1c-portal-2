@@ -19,6 +19,7 @@ The 1C Portal API is a RESTful API built on Cloudflare Workers using the Hono fr
 | `/api/user/*` | JWT required | `private/users/:userId/` | User-specific data |
 | `/api/orgs/:orgId/*` | JWT + Org membership | `private/orgs/:orgId/` | Org-scoped content |
 | `/api/super/*` | JWT + Superadmin | `private/`, `config/`, `secret/` | Platform administration |
+| `/files/*` | JWT for upload/delete, public for GET | `uploads/` | File upload and serving |
 
 ### Authentication
 
@@ -494,6 +495,178 @@ Authorization: Bearer <jwt_token>
     "page": 1,
     "pageSize": 20,
     "hasMore": true
+  }
+}
+```
+
+### Get Entity by ID
+
+**GET** `/api/entities/:id`
+
+Get an entity by ID. Returns the latest version unless a specific version is requested.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Path Parameters:**
+- `id` (required) - Entity ID
+
+**Query Parameters:**
+- `version` (optional) - Specific version number to retrieve
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "ent456",
+    "entityTypeId": "type123",
+    "organizationId": "org789",
+    "version": 1,
+    "status": "published",
+    "visibility": "authenticated",
+    "slug": "dog-toy",
+    "data": {
+      "name": "Dog Toy",
+      "description": "A fun toy for dogs"
+    },
+    "createdAt": "2026-01-10T10:00:00Z",
+    "updatedAt": "2026-01-10T10:00:00Z",
+    "createdBy": "user123",
+    "updatedBy": "user123"
+  }
+}
+```
+
+**Access Control:**
+- Superadmins can access any entity
+- Org admins can access entities from their organization
+- Draft entities are only visible to organization admins
+- Members-only entities are only visible to members of that organization
+
+**Error Responses:**
+- `401` - Unauthorized (missing or invalid token)
+- `403` - Forbidden (insufficient permissions)
+- `404` - Entity not found
+
+### Create Entity
+
+**POST** `/api/entities`
+
+Create a new entity in the user's organization (or global if superadmin).
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "entityTypeId": "type123",
+  "data": {
+    "name": "New Product",
+    "description": "Product description",
+    "slug": "new-product"
+  },
+  "visibility": "public",
+  "organizationId": null
+}
+```
+
+**Notes:**
+- `organizationId` is optional. If not provided, uses user's organization
+- Superadmins can set `organizationId: null` to create global entities
+- Regular users cannot create global entities
+
+**Response:** Same format as Get Entity by ID
+
+### Update Entity
+
+**PATCH** `/api/entities/:id`
+
+Update an entity with atomic field merge. Only draft entities can be edited.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+```
+
+**Path Parameters:**
+- `id` (required) - Entity ID
+
+**Request Body:**
+```json
+{
+  "data": {
+    "name": "Updated Product Name",
+    "description": "Updated description"
+  }
+}
+```
+
+**Response:** Updated entity object
+
+**Error Responses:**
+- `400` - Entity is not in draft status (only drafts can be edited)
+- `403` - Forbidden (not authorized to edit this entity)
+- `404` - Entity not found
+
+### Submit Entity for Approval
+
+**POST** `/api/entities/:id/transition`
+
+Transition entity status (e.g., draft → pending → published).
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+```
+
+**Path Parameters:**
+- `id` (required) - Entity ID
+
+**Request Body:**
+```json
+{
+  "action": "submitForApproval"
+}
+```
+
+**Actions:**
+- `submitForApproval` - Move from draft to pending
+- `approve` - Move from pending to published (superadmin only)
+- `reject` - Move from pending back to draft (superadmin only)
+- `archive` - Archive published entity
+- `publish` - Publish draft (superadmin only)
+
+**Response:** Updated entity object
+
+### Delete Entity
+
+**DELETE** `/api/entities/:id`
+
+Soft delete an entity (sets status to 'deleted').
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Path Parameters:**
+- `id` (required) - Entity ID
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "message": "Entity deleted"
   }
 }
 ```
@@ -1212,6 +1385,112 @@ Authorization: Bearer <jwt_token>
   }
 }
 ```
+
+---
+
+## File Routes
+
+File upload and serving routes. Upload and delete operations require authentication, while GET is public for serving files.
+
+### Upload File
+
+**POST** `/files/upload`
+
+Upload a file to R2 storage.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+Content-Type: multipart/form-data
+```
+
+**Form Data:**
+- `file` (required) - The file to upload
+- `type` (optional) - File type category: `image`, `logo`, `favicon`, or `file` (default: `file`)
+
+**File Type Categories:**
+- `image` - Stored in `uploads/images/`
+- `logo` - Stored in `uploads/logos/`
+- `favicon` - Stored in `uploads/favicons/`
+- `file` - Stored in `uploads/files/`
+
+**Limits:**
+- Maximum file size: 10MB
+- Rate limit: 10 requests per minute per user
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "url": "/files/uploads/logos/1642000000-abc123.svg",
+    "path": "uploads/logos/1642000000-abc123.svg",
+    "name": "logo.svg",
+    "size": 15234,
+    "type": "image/svg+xml"
+  }
+}
+```
+
+**Error Responses:**
+- `400` - No file provided, file too large, or invalid file type
+- `401` - Unauthorized (missing or invalid token)
+- `500` - Upload failed
+
+### Get File
+
+**GET** `/files/:path+`
+
+Get/serve a file from R2 storage. Public endpoint - no authentication required.
+
+**Path Parameters:**
+- `path` (required) - File path in R2 storage (e.g., `uploads/logos/1642000000-abc123.svg`)
+
+**Response:** File content with appropriate Content-Type header
+
+**Headers:**
+- `Content-Type` - MIME type of the file
+- `Cache-Control: public, max-age=31536000` - 1 year cache
+- `Access-Control-Allow-Origin: *` - CORS enabled
+
+**Example:**
+```
+GET /files/uploads/logos/1642000000-abc123.svg
+```
+
+**Error Responses:**
+- `404` - File not found
+- `500` - Failed to retrieve file
+
+### Delete File
+
+**DELETE** `/files/:path+`
+
+Delete a file from R2 storage. Requires authentication. Users can only delete files they uploaded, unless they are superadmin.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Path Parameters:**
+- `path` (required) - File path in R2 storage (e.g., `uploads/logos/1642000000-abc123.svg`)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "path": "uploads/logos/1642000000-abc123.svg"
+  }
+}
+```
+
+**Error Responses:**
+- `401` - Unauthorized (missing or invalid token)
+- `403` - Not authorized to delete this file (not the uploader and not superadmin)
+- `404` - File not found
+- `500` - Failed to delete file
 
 ---
 

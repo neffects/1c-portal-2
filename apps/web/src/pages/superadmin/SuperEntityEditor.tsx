@@ -265,25 +265,35 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
   
   async function loadEntity(entityId: string) {
     setLoading(true);
+    console.log('[SuperEntityEditor] Loading entity:', entityId);
     
-    const response = await api.get<Entity>(`/api/entities/${entityId}`);
-    
-    if (response.success && response.data) {
-      const loadedEntity = response.data;
-      setEntity(loadedEntity);
-      setFormData(loadedEntity.data);
-      setHasBeenSaved(true);
+    try {
+      const response = await api.get<Entity>(`/api/entities/${entityId}`);
       
-      if (loadedEntity.organizationId) {
-        loadOrganizationName(loadedEntity.organizationId);
+      if (response.success && response.data) {
+        const loadedEntity = response.data;
+        setEntity(loadedEntity);
+        setFormData(loadedEntity.data);
+        setHasBeenSaved(true);
+        
+        if (loadedEntity.organizationId) {
+          loadOrganizationName(loadedEntity.organizationId);
+        } else {
+          setEntityOrgName(null);
+        }
+        console.log('[SuperEntityEditor] Entity loaded successfully:', entityId);
       } else {
-        setEntityOrgName(null);
+        console.error('[SuperEntityEditor] Failed to load entity:', response);
+        setSaveError(response.error?.message || 'Failed to load entity');
+        route('/super/entities');
       }
-    } else {
+    } catch (err) {
+      console.error('[SuperEntityEditor] Error loading entity:', err);
+      setSaveError(err instanceof Error ? err.message : 'Failed to load entity');
       route('/super/entities');
+    } finally {
+      setLoading(false);
     }
-    
-    setLoading(false);
   }
   
   async function loadOrganizationName(orgId: string) {

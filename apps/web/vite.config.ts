@@ -43,6 +43,11 @@ export default defineConfig({
       '/files': {
         target: 'http://localhost:8787',
         changeOrigin: true
+      },
+      // Proxy public API routes (branding, etc.)
+      '/public': {
+        target: 'http://localhost:8787',
+        changeOrigin: true
       }
     }
   },
