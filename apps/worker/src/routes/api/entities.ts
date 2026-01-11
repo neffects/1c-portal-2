@@ -175,3 +175,81 @@ apiEntityRoutes.get('/entities',
     }
   });
 });
+
+/**
+ * GET /entities/:id
+ * Get a global/platform entity by ID
+ * 
+ * This endpoint handles global entities (organizationId: null) stored in platform/ or public/ paths.
+ * For org-scoped entities, use /api/orgs/:orgId/entities/:id instead.
+ */
+apiEntityRoutes.get('/entities/:id', async (c) => {
+  const entityId = c.req.param('id');
+  const userRole = c.get('userRole');
+  
+  console.log('[API] GET /entities/:id -', entityId, 'userRole:', userRole);
+  
+  // Get entity stub to determine organization
+  const stubPath = getEntityStubPath(entityId);
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
+  
+  if (!stub) {
+    console.log('[API] Entity stub not found:', entityId);
+    return c.json({
+      success: false,
+      error: { code: 'NOT_FOUND', message: 'Entity not found' }
+    }, 404);
+  }
+  
+  // This endpoint is for global entities only
+  // Org-scoped entities should use /api/orgs/:orgId/entities/:id
+  if (stub.organizationId !== null) {
+    console.log('[API] Entity is org-scoped, use /api/orgs/:orgId/entities/:id instead');
+    return c.json({
+      success: false,
+      error: { code: 'NOT_FOUND', message: 'Entity not found. Use /api/orgs/:orgId/entities/:id for organization entities.' }
+    }, 404);
+  }
+  
+  // Global entity - try authenticated (platform/) path first, then public/
+  let entity: Entity | null = null;
+  
+  for (const visibility of ['authenticated', 'public'] as const) {
+    const latestPath = getEntityLatestPath(visibility, entityId, undefined);
+    const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    
+    if (latestPointer) {
+      const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
+      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      
+      if (entity) {
+        console.log('[API] Entity found in', visibility, 'path');
+        break;
+      }
+    }
+  }
+  
+  if (!entity) {
+    console.log('[API] Entity data not found:', entityId);
+    return c.json({
+      success: false,
+      error: { code: 'NOT_FOUND', message: 'Entity not found' }
+    }, 404);
+  }
+  
+  // Non-superadmins can only view published entities
+  if (userRole !== 'superadmin' && entity.status !== 'published') {
+    console.log('[API] Entity not published, access denied for non-superadmin');
+    return c.json({
+      success: false,
+      error: { code: 'NOT_FOUND', message: 'Entity not found' }
+    }, 404);
+  }
+  
+  console.log('[API] Returning global entity:', entityId, 'status:', entity.status);
+  
+  return c.json({
+    success: true,
+    data: entity
+  });
+});

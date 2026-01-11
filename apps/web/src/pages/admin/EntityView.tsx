@@ -13,6 +13,7 @@ import { api } from '../../lib/api';
 import type { Entity, EntityType, FieldDefinition, FieldSection } from '@1cc/shared';
 
 interface EntityViewProps {
+  orgSlug?: string;
   id?: string;
 }
 
@@ -117,13 +118,40 @@ function FieldValue({ value, fieldType }: { value: unknown; fieldType?: string }
   return <span class="text-surface-900 dark:text-surface-100">{String(value)}</span>;
 }
 
-export function EntityView({ id }: EntityViewProps) {
-  const { isAuthenticated, isOrgAdmin, loading: authLoading } = useAuth();
+export function EntityView({ orgSlug, id }: EntityViewProps) {
+  const { isAuthenticated, isOrgAdmin, loading: authLoading, currentOrganization, organizations, session, refreshToken } = useAuth();
+  
+  // State for tracking org refresh - prevents infinite loop
+  const [orgRefreshAttempted, setOrgRefreshAttempted] = useState(false);
+  const [resolvedOrgId, setResolvedOrgId] = useState<string | null>(null);
+  
+  // Helper to get organization ID (resolve slug to ID if needed)
+  const getOrgId = (): string | null => {
+    // If orgSlug is provided, find organization by slug
+    if (orgSlug) {
+      const org = organizations.value.find(o => o.slug === orgSlug || o.id === orgSlug);
+      if (org) {
+        console.log('[EntityView] Found org by slug:', orgSlug, '->', org.id, org);
+        return org.id;
+      }
+      console.warn('[EntityView] Organization not found by slug:', orgSlug, 'available orgs:', organizations.value.map(o => ({ id: o.id, slug: o.slug })));
+      return null;
+    }
+    // Otherwise use current organization ID
+    const orgId = currentOrganization.value?.id || null;
+    if (orgId) {
+      console.log('[EntityView] Using current organization ID:', orgId);
+    }
+    return orgId;
+  };
   
   const [entity, setEntity] = useState<Entity | null>(null);
   const [entityType, setEntityType] = useState<EntityType | null>(null);
   const [entityOrgName, setEntityOrgName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  
+  // Compute effective org ID for links - use resolvedOrgId, orgSlug, or current org
+  const effectiveOrgId = resolvedOrgId || orgSlug || currentOrganization.value?.id || '';
   
   // Redirect if not admin
   useEffect(() => {
@@ -133,28 +161,229 @@ export function EntityView({ id }: EntityViewProps) {
     }
   }, [authLoading.value, isAuthenticated.value, isOrgAdmin.value]);
   
-  // Load entity and entity type
-  useEffect(() => {
-    if (isOrgAdmin.value && id) {
-      loadEntity();
+  // Load entity directly with a known org ID (used after org refresh)
+  async function loadEntityDirectly(orgId: string) {
+    if (!id) return;
+    
+    console.log('[EntityView] loadEntityDirectly called with orgId:', orgId);
+    setLoading(true);
+    setResolvedOrgId(orgId);
+    
+    try {
+      // First try organization-scoped route: /api/orgs/:orgId/entities/:id
+      let response = await api.get(`/api/orgs/${orgId}/entities/${id}`) as {
+        success: boolean;
+        data?: Entity;
+        error?: { code: string };
+      };
+      
+      // If org-scoped fails with 404, try the generic entities endpoint (for global/platform entities)
+      if (!response.success && response.error?.code === 'NOT_FOUND') {
+        console.log('[EntityView] Entity not found in org directly, trying generic endpoint...');
+        response = await api.get(`/api/entities/${id}`) as {
+          success: boolean;
+          data?: Entity;
+          error?: { code: string };
+        };
+      }
+      
+      if (response.success && response.data) {
+        const loadedEntity = response.data;
+        setEntity(loadedEntity);
+        console.log('[EntityView] Entity loaded directly:', loadedEntity.id, 'organizationId:', loadedEntity.organizationId);
+        
+        // Load entity type
+        const typeResponse = await api.get(`/api/entity-types/${loadedEntity.entityTypeId}`) as {
+          success: boolean;
+          data?: EntityType;
+        };
+        
+        if (typeResponse.success && typeResponse.data) {
+          setEntityType(typeResponse.data);
+        }
+        
+        // Load organization name if entity has an organization
+        if (loadedEntity.organizationId) {
+          loadOrganizationName(loadedEntity.organizationId);
+        } else {
+          setEntityOrgName(null);
+        }
+      } else {
+        console.error('[EntityView] Failed to load entity directly:', response);
+        route('/admin');
+      }
+    } catch (err) {
+      console.error('[EntityView] Error loading entity directly:', err);
+      route('/admin');
+    } finally {
+      setLoading(false);
     }
-  }, [isOrgAdmin.value, id]);
+  }
+  
+  // Load entity and entity type - wait for auth and organizations to be loaded
+  useEffect(() => {
+    const sessionOrgs = session.value?.user?.organizations || [];
+    console.log('[EntityView] useEffect triggered', {
+      authLoading: authLoading.value,
+      isOrgAdmin: isOrgAdmin.value,
+      id,
+      orgSlug,
+      organizationsCount: organizations.value.length,
+      sessionOrgsCount: sessionOrgs.length,
+      orgRefreshAttempted,
+      resolvedOrgId
+    });
+    
+    // Wait for auth to finish loading
+    if (authLoading.value) {
+      console.log('[EntityView] Auth still loading, waiting...');
+      return;
+    }
+    
+    if (!isOrgAdmin.value || !id) {
+      console.log('[EntityView] Not ready:', { isOrgAdmin: isOrgAdmin.value, id });
+      return;
+    }
+    
+    // If we already have a resolved org ID, use it
+    if (resolvedOrgId) {
+      console.log('[EntityView] Using already resolved org ID:', resolvedOrgId);
+      loadEntity();
+      return;
+    }
+    
+    // Try to get org ID - check both organizations.value and session directly
+    let orgId = getOrgId();
+    
+    // If not found in organizations.value, try session directly
+    if (orgSlug && !orgId && sessionOrgs.length > 0) {
+      const org = sessionOrgs.find(o => o.slug === orgSlug || o.id === orgSlug);
+      if (org) {
+        console.log('[EntityView] Found org in session:', orgSlug, '->', org.id);
+        orgId = org.id;
+        setResolvedOrgId(org.id);
+      }
+    }
+    
+    if (orgSlug && !orgId) {
+      // Only attempt refresh once to prevent infinite loop
+      if (orgRefreshAttempted) {
+        console.error('[EntityView] Organization refresh already attempted, giving up', { orgSlug });
+        setLoading(false);
+        return;
+      }
+      
+      if (organizations.value.length === 0 && sessionOrgs.length === 0) {
+        console.log('[EntityView] Organizations not loaded, fetching user info to refresh session...');
+        setOrgRefreshAttempted(true); // Mark that we've attempted refresh
+        
+        // Fetch user info and update session - this will trigger organizations to update
+        api.get('/api/user/me').then(async (userResponse: any) => {
+          if (userResponse.success && userResponse.data?.organizations) {
+            console.log('[EntityView] Fetched organizations:', userResponse.data.organizations.length, userResponse.data.organizations);
+            // Update session directly - this will trigger the organizations computed to update
+            const currentSession = session.value;
+            if (currentSession) {
+              // Update the session signal directly - this will trigger organizations computed to update
+              session.value = {
+                ...currentSession,
+                user: {
+                  ...currentSession.user,
+                  organizations: userResponse.data.organizations,
+                  isSuperadmin: userResponse.data.isSuperadmin
+                }
+              };
+              // Also update localStorage
+              localStorage.setItem('session', JSON.stringify(session.value));
+              
+              // Find the org and load entity directly with the org ID
+              const org = userResponse.data.organizations.find((o: any) => o.slug === orgSlug || o.id === orgSlug);
+              if (org) {
+                console.log('[EntityView] Found org after refresh:', orgSlug, '->', org.id);
+                // Load entity directly with the org ID we just fetched
+                loadEntityDirectly(org.id);
+              } else {
+                console.error('[EntityView] Organization not found in fetched list', {
+                  orgSlug,
+                  fetchedOrgs: userResponse.data.organizations.map((o: any) => ({ id: o.id, slug: o.slug }))
+                });
+                setLoading(false);
+              }
+            }
+          } else {
+            console.error('[EntityView] Failed to fetch user info:', userResponse);
+            setLoading(false);
+          }
+        }).catch((err: any) => {
+          console.error('[EntityView] Error fetching user info:', err);
+          setLoading(false);
+        });
+        return;
+      } else {
+        // Organizations are loaded but slug not found - this is an error
+        console.error('[EntityView] Organization slug not found', {
+          orgSlug,
+          availableOrgs: organizations.value.map(o => ({ id: o.id, slug: o.slug, name: o.name })),
+          sessionOrgs: sessionOrgs.map(o => ({ id: o.id, slug: o.slug, name: o.name }))
+        });
+        // Don't return - let it try to load anyway, API will return proper error
+      }
+    }
+    
+    // If we found an orgId, save it
+    if (orgId && !resolvedOrgId) {
+      setResolvedOrgId(orgId);
+    }
+    
+    // All conditions met, load the entity
+    console.log('[EntityView] All conditions met, loading entity...', { orgId });
+    loadEntity();
+  }, [authLoading.value, isOrgAdmin.value, id, orgSlug, organizations.value.length, orgRefreshAttempted, resolvedOrgId]);
   
   async function loadEntity() {
     if (!id) return;
     
     setLoading(true);
-    console.log('[EntityView] Loading entity:', id);
+    
+    // Get organization ID - use resolved ID first, then try to resolve from slug
+    let orgId = resolvedOrgId || getOrgId();
+    
+    if (!orgId) {
+      console.error('[EntityView] No organization ID available', { orgSlug, resolvedOrgId, currentOrganization: currentOrganization.value, organizations: organizations.value });
+      setLoading(false);
+      route('/admin');
+      return;
+    }
+    
+    // Save resolved org ID for future use
+    if (!resolvedOrgId && orgId) {
+      setResolvedOrgId(orgId);
+    }
+    
+    console.log('[EntityView] Loading entity:', id, 'for org:', orgId);
     
     try {
-      const response = await api.get(`/api/entities/${id}`) as {
+      // First try organization-scoped route: /api/orgs/:orgId/entities/:id
+      let response = await api.get(`/api/orgs/${orgId}/entities/${id}`) as {
         success: boolean;
         data?: Entity;
+        error?: { code: string };
       };
+      
+      // If org-scoped fails with 404, try the generic entities endpoint (for global/platform entities)
+      if (!response.success && response.error?.code === 'NOT_FOUND') {
+        console.log('[EntityView] Entity not found in org, trying generic endpoint...');
+        response = await api.get(`/api/entities/${id}`) as {
+          success: boolean;
+          data?: Entity;
+          error?: { code: string };
+        };
+      }
       
       if (response.success && response.data) {
         const loadedEntity = response.data;
         setEntity(loadedEntity);
+        console.log('[EntityView] Entity loaded:', loadedEntity.id, 'organizationId:', loadedEntity.organizationId);
         
         // Load entity type
         const typeResponse = await api.get(`/api/entity-types/${loadedEntity.entityTypeId}`) as {
@@ -297,7 +526,7 @@ export function EntityView({ id }: EntityViewProps) {
         {/* Top Navigation */}
         <div class="flex items-center justify-between mb-8">
           <a 
-            href={`/admin/entity-types/${entityType.id}`}
+            href={`/admin/${effectiveOrgId}/entity-types/${entityType.id}`}
             class="inline-flex items-center gap-2 text-surface-500 hover:text-surface-700 dark:hover:text-surface-300 transition-colors"
           >
             <span class="i-lucide-arrow-left"></span>
@@ -305,7 +534,7 @@ export function EntityView({ id }: EntityViewProps) {
           </a>
           
           <a 
-            href={`/admin/entities/${id}/edit`}
+            href={`/admin/${effectiveOrgId}/entities/${id}/edit`}
             class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 bg-primary-50 hover:bg-primary-100 dark:bg-primary-900/30 dark:hover:bg-primary-900/50 rounded-lg transition-colors"
           >
             <span class="i-lucide-edit text-base"></span>

@@ -409,6 +409,46 @@ Authorization: Bearer <jwt_token>
 
 **Response:** Same format as public bundle
 
+### Get Global Entity
+
+**GET** `/api/entities/:id`
+
+Get a global/platform entity by ID. This endpoint is for entities with `organizationId: null` (global entities stored in `platform/` or `public/` paths).
+
+**Note:** For organization-scoped entities, use `/api/orgs/:orgId/entities/:id` instead.
+
+**Path Parameters:**
+- `id` (required) - Entity ID
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "ent456",
+    "entityTypeId": "type123",
+    "organizationId": null,
+    "version": 1,
+    "status": "published",
+    "visibility": "authenticated",
+    "slug": "global-announcement",
+    "data": {
+      "name": "Global Announcement",
+      "description": "Platform-wide announcement"
+    },
+    "createdAt": "2026-01-10T10:00:00Z",
+    "updatedAt": "2026-01-10T10:00:00Z",
+    "createdBy": "user123",
+    "updatedBy": "user123"
+  }
+}
+```
+
 ### List Entities
 
 **GET** `/api/entities`

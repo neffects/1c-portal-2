@@ -84,12 +84,12 @@ export function App() {
             
             {/* Admin routes */}
             <Route path="/admin" component={AdminDashboard} />
-            <Route path="/admin/entities" component={EntitiesList} />
-            <Route path="/admin/entity-types/:typeId" component={EntityTypeView} />
-            <Route path="/admin/entities/new/:typeId" component={EntityEditor} />
-            <Route path="/admin/entities/new" component={EntityEditor} />
-            <Route path="/admin/entities/:id/edit" component={EntityEditor} />
-            <Route path="/admin/entities/:id" component={EntityView} />
+            <Route path="/admin/:orgSlug/entities" component={EntitiesList} />
+            <Route path="/admin/:orgSlug/entity-types/:typeId" component={EntityTypeView} />
+            <Route path="/admin/:orgSlug/entities/new/:typeId" component={EntityEditor} />
+            <Route path="/admin/:orgSlug/entities/new" component={EntityEditor} />
+            <Route path="/admin/:orgSlug/entities/:id/edit" component={EntityEditor} />
+            <Route path="/admin/:orgSlug/entities/:id" component={EntityView} />
             <Route path="/admin/users" component={UserManagement} />
             
             {/* Superadmin routes */}

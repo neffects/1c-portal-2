@@ -266,6 +266,13 @@ export function AdminDashboard() {
     (organizationId.value ? adminOrganizations.find(o => o.id === organizationId.value) : null) ||
     (adminOrganizations.length > 0 ? adminOrganizations[0] : null);
   
+  // Helper function to get org identifier (slug or ID fallback)
+  const getOrgIdentifier = (org: typeof currentOrg): string | null => {
+    if (!org) return null;
+    // Prefer slug, fallback to ID if slug is missing
+    return org.slug || org.id || null;
+  };
+  
   if (authLoading.value) {
     return (
       <div class="min-h-[60vh] flex items-center justify-center">
@@ -431,7 +438,12 @@ export function AdminDashboard() {
                   key={type.id}
                   class="card-hover p-6 flex items-center gap-4 relative group cursor-pointer"
                   onClick={() => {
-                    route(`/admin/entity-types/${type.id}`);
+                    const orgId = getOrgIdentifier(currentOrg);
+                    if (orgId) {
+                      route(`/admin/${orgId}/entity-types/${type.id}`);
+                    } else {
+                      console.error('[AdminDashboard] No organization identifier available', { currentOrg });
+                    }
                   }}
                 >
                   <div class="w-12 h-12 rounded-xl bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center">
@@ -444,7 +456,12 @@ export function AdminDashboard() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      route(`/admin/entities/new/${type.id}`);
+                      const orgId = getOrgIdentifier(currentOrg);
+                      if (orgId) {
+                        route(`/admin/${orgId}/entities/new/${type.id}`);
+                      } else {
+                        console.error('[AdminDashboard] No organization identifier available', { currentOrg });
+                      }
                     }}
                     class="btn-primary flex items-center gap-2 flex-shrink-0"
                     title={`Add new ${type.name}`}
@@ -504,7 +521,7 @@ export function AdminDashboard() {
                     </td>
                     <td class="px-4 py-3 text-right">
                       <a 
-                        href={`/admin/entities/${entity.id}/edit`}
+                        href={`/admin/${getOrgIdentifier(currentOrg) || ''}/entities/${entity.id}/edit`}
                         class="text-primary-600 hover:text-primary-700 text-sm font-medium"
                       >
                         Edit

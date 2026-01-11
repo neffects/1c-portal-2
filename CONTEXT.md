@@ -535,6 +535,27 @@ The project includes automated security testing with:
     - GET /api/platform/branding uses optionalAuth middleware (works with or without token)
     - Global auth middleware now skips /api/platform routes
     - This allows branding to load on public pages before user authentication
+  - Fixed EntityView infinite loop bug (2026-01-11):
+    - EntityView was in an infinite loop when organizations weren't immediately loaded
+    - Root cause: `session.value` was in useEffect dependency array, and the effect updated session
+    - Added `orgRefreshAttempted` flag to prevent repeated organization refresh attempts
+    - Added `resolvedOrgId` state to cache the resolved organization ID
+    - Added `loadEntityDirectly()` function that was previously undefined
+    - Added `effectiveOrgId` computed value that was previously undefined (used in navigation links)
+    - Changed dependency array to use `organizations.value.length` instead of full object
+    - Now fetches organizations only once, then loads entity directly with resolved org ID
+  - Fixed superadmin organization access bug (2026-01-11):
+    - `/api/user/me`, `/auth/me`, and `/auth/verify` were returning 0 organizations for superadmins
+    - Root cause: Organizations were only returned from user-org stubs, but superadmins don't have stubs
+    - Fixed by checking `isSuperadmin` flag and listing ALL active organizations for superadmins
+    - Superadmins now get `org_admin` role for all organizations in the system
+    - Regular users still use user-org stubs for their organization list
+  - Added `GET /api/entities/:id` endpoint for global/platform entities (2026-01-11):
+    - New endpoint for entities with `organizationId: null` (global entities)
+    - Checks both 'authenticated' (platform/) and 'public' paths
+    - Returns 404 for org-scoped entities (should use `/api/orgs/:orgId/entities/:id`)
+    - EntityView falls back to this endpoint when org-scoped fails with 404
+    - Consistent with API route structure: `/api/*` = authenticated platform content
 
 ## Notes
 

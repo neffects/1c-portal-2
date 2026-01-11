@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../../types';
-import { createEntityRequestSchema, updateEntityRequestSchema, entityQueryParamsSchema } from '@1cc/shared';
+import { createEntityRequestSchema, updateEntityRequestSchema, entityQueryParamsSchema, entityVersionQuerySchema } from '@1cc/shared';
 import { readJSON, writeJSON, listFiles, getEntityVersionPath, getEntityLatestPath, getEntityStubPath, getEntityTypePath, getOrgPermissionsPath } from '../../lib/r2';
 import { upsertSlugIndex, deleteSlugIndex } from '../../lib/slug-index';
 import { R2_PATHS } from '@1cc/shared';
@@ -16,7 +16,7 @@ import { createEntityId, createSlug } from '../../lib/id';
 import { requireAbility } from '../../middleware/casl';
 import { NotFoundError, ForbiddenError, ValidationError } from '../../middleware/error';
 import { validateEntityData, validateEntityFields } from '../../lib/entity-validation';
-import type { Entity, EntityStub, EntityType, EntityTypePermissions, VisibilityScope } from '@1cc/shared';
+import type { Entity, EntityStub, EntityLatestPointer, EntityType, EntityTypePermissions, VisibilityScope } from '@1cc/shared';
 
 export const orgEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -130,5 +130,50 @@ orgEntityRoutes.get('/entities',
   return c.json({
     success: true,
     data: { items: [], total: 0, page: query.page, pageSize: query.pageSize, hasMore: false }
+  });
+});
+
+/**
+ * GET /entities/:id
+ * Get entity by ID within organization
+ */
+orgEntityRoutes.get('/entities/:id',
+  zValidator('query', entityVersionQuerySchema),
+  async (c) => {
+  const orgId = c.req.param('orgId')!;
+  const entityId = c.req.param('id');
+  const versionQuery = c.req.valid('query');
+  
+  console.log('[OrgEntities] Getting entity:', entityId, 'for org:', orgId);
+  
+  // Get entity stub
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId));
+  
+  if (!stub || stub.organizationId !== orgId) {
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  // Get latest pointer
+  const latestPath = getEntityLatestPath('members', entityId, orgId);
+  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  
+  if (!latestPointer) {
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  // Determine version to fetch
+  const version = versionQuery.version || latestPointer.version;
+  
+  // Get entity version
+  const entityPath = getEntityVersionPath('members', entityId, version, orgId);
+  const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
+  
+  if (!entity) {
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  return c.json({
+    success: true,
+    data: entity
   });
 });

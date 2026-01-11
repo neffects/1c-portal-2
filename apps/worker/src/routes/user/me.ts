@@ -2,14 +2,18 @@
  * User Me Routes
  * 
  * GET /api/user/me - Get current user info from token
+ * 
+ * For superadmins, returns ALL organizations in the system (with org_admin role).
+ * For regular users, returns only organizations they belong to (from user-org stubs).
  */
 
 import { Hono } from 'hono';
 import type { Env, Variables } from '../../types';
-import { readJSON, getOrgProfilePath } from '../../lib/r2';
+import { readJSON, getOrgProfilePath, listFiles } from '../../lib/r2';
 import { verifyJWT, isTokenExpiringSoon } from '../../lib/jwt';
 import { listUserOrganizations, isSuperadminEmail } from '../../lib/user-stubs';
 import { AppError } from '../../middleware/error';
+import { R2_PATHS } from '@1cc/shared';
 import type { Organization, UserOrganization } from '@1cc/shared';
 
 export const userMeRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -19,7 +23,8 @@ export const userMeRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
  * Get current user info from token
  * 
  * Returns user info including all organizations they belong to.
- * Organizations are looked up from user-org stubs.
+ * - Superadmins: Get all active organizations in the system (treated as org_admin for each)
+ * - Regular users: Get organizations from user-org stubs
  */
 userMeRoutes.get('/me', async (c) => {
   const authHeader = c.req.header('Authorization');
@@ -38,27 +43,51 @@ userMeRoutes.get('/me', async (c) => {
   // Check if user is a superadmin
   const isSuperadmin = isSuperadminEmail(payload.email, c.env.SUPERADMIN_EMAILS);
   
-  // Get user's organizations from stubs
-  const userOrgs = await listUserOrganizations(c.env.R2_BUCKET, payload.email, payload.sub);
-  
-  // Build organizations array with details
+  // Build organizations array
   const organizations: UserOrganization[] = [];
-  for (const userOrg of userOrgs) {
-    const org = await readJSON<Organization>(
-      c.env.R2_BUCKET,
-      getOrgProfilePath(userOrg.orgId)
-    );
-    if (org) {
-      organizations.push({
-        id: org.id,
-        name: org.name,
-        slug: org.slug,
-        role: userOrg.role
-      });
+  
+  if (isSuperadmin) {
+    // Superadmins get access to ALL organizations
+    console.log('[User] /me - Superadmin user, listing all organizations');
+    const prefix = `${R2_PATHS.PRIVATE}orgs/`;
+    const orgFiles = await listFiles(c.env.R2_BUCKET, prefix);
+    
+    // Filter for profile.json files only
+    const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
+    console.log('[User] /me - Found', profileFiles.length, 'organization profiles');
+    
+    for (const profilePath of profileFiles) {
+      const org = await readJSON<Organization>(c.env.R2_BUCKET, profilePath);
+      if (org && org.isActive) {
+        organizations.push({
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          role: 'org_admin' // Superadmins have full admin access to all orgs
+        });
+      }
+    }
+  } else {
+    // Regular users: get organizations from user-org stubs
+    const userOrgs = await listUserOrganizations(c.env.R2_BUCKET, payload.email, payload.sub);
+    
+    for (const userOrg of userOrgs) {
+      const org = await readJSON<Organization>(
+        c.env.R2_BUCKET,
+        getOrgProfilePath(userOrg.orgId)
+      );
+      if (org) {
+        organizations.push({
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          role: userOrg.role
+        });
+      }
     }
   }
   
-  console.log('[User] /me returning user:', payload.sub, 'with', organizations.length, 'organizations');
+  console.log('[User] /me returning user:', payload.sub, 'isSuperadmin:', isSuperadmin, 'with', organizations.length, 'organizations');
   
   return c.json({
     success: true,

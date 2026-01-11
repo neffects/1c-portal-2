@@ -10,8 +10,21 @@ import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
 import type { EntityListItem, EntityTypeListItem } from '@1cc/shared';
 
-export function EntitiesList() {
-  const { isAuthenticated, isOrgAdmin, loading: authLoading } = useAuth();
+interface EntitiesListProps {
+  orgSlug?: string;
+}
+
+export function EntitiesList({ orgSlug }: EntitiesListProps) {
+  const { isAuthenticated, isOrgAdmin, loading: authLoading, currentOrganization } = useAuth();
+  
+  // Helper to get org identifier (slug or ID fallback)
+  const getOrgIdentifier = (): string => {
+    if (orgSlug) return orgSlug;
+    const org = currentOrganization.value;
+    return org?.slug || org?.id || '';
+  };
+  
+  const effectiveOrgId = getOrgIdentifier();
   
   const [entities, setEntities] = useState<EntityListItem[]>([]);
   const [entityTypes, setEntityTypes] = useState<EntityTypeListItem[]>([]);
@@ -298,7 +311,12 @@ export function EntitiesList() {
                       key={entity.id} 
                       class="hover:bg-surface-50 dark:hover:bg-surface-800/50 cursor-pointer"
                       onClick={() => {
-                        route(`/admin/entities/${entity.id}`);
+                        const orgId = getOrgIdentifier();
+                        if (orgId) {
+                          route(`/admin/${orgId}/entities/${entity.id}`);
+                        } else {
+                          console.error('[EntitiesList] No organization identifier available');
+                        }
                       }}
                     >
                       <td class="px-4 py-3">
@@ -317,7 +335,7 @@ export function EntitiesList() {
                       </td>
                       <td class="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                         <a 
-                          href={`/admin/entities/${entity.id}/edit`}
+                          href={`/admin/${effectiveOrgId}/entities/${entity.id}/edit`}
                           class="text-primary-600 hover:text-primary-700 text-sm font-medium"
                         >
                           Edit

@@ -14,11 +14,22 @@ import { slugify } from '../../lib/utils';
 import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, OrganizationListItem } from '@1cc/shared';
 
 interface EntityEditorProps {
+  orgSlug?: string;
   id?: string;
   typeId?: string;
 }
 
-export function EntityEditor({ id, typeId: typeIdProp }: EntityEditorProps) {
+export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorProps) {
+  const { currentOrganization } = useAuth();
+  
+  // Helper to get org identifier (slug or ID fallback)
+  const getOrgIdentifier = (): string => {
+    if (orgSlug) return orgSlug;
+    const org = currentOrganization.value;
+    return org?.slug || org?.id || '';
+  };
+  
+  const effectiveOrgId = getOrgIdentifier();
   // Read typeId from URL query string if not provided as prop (for /admin/entities/new?type=xxx pattern)
   const urlParams = new URLSearchParams(window.location.search);
   const typeIdFromQuery = urlParams.get('type');
@@ -470,7 +481,7 @@ export function EntityEditor({ id, typeId: typeIdProp }: EntityEditorProps) {
         setHasBeenSaved(true);
         
         if (isNew) {
-          route(`/admin/entities/${response.data.id}/edit`);
+          route(`/admin/${effectiveOrgId}/entities/${response.data.id}/edit`);
         } else {
           setEntity(response.data);
         }

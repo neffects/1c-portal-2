@@ -12,11 +12,21 @@ import { api } from '../../lib/api';
 import type { EntityListItem, EntityTypeListItem, EntityType } from '@1cc/shared';
 
 interface EntityTypeViewProps {
+  orgSlug?: string;
   typeId?: string;
 }
 
-export function EntityTypeView({ typeId }: EntityTypeViewProps) {
-  const { isAuthenticated, isOrgAdmin, loading: authLoading } = useAuth();
+export function EntityTypeView({ orgSlug, typeId }: EntityTypeViewProps) {
+  const { isAuthenticated, isOrgAdmin, loading: authLoading, currentOrganization } = useAuth();
+  
+  // Helper to get org identifier (slug or ID fallback)
+  const getOrgIdentifier = (): string => {
+    if (orgSlug) return orgSlug;
+    const org = currentOrganization.value;
+    return org?.slug || org?.id || '';
+  };
+  
+  const effectiveOrgId = getOrgIdentifier();
   
   const [entityType, setEntityType] = useState<EntityType | null>(null);
   const [entities, setEntities] = useState<EntityListItem[]>([]);
@@ -154,7 +164,7 @@ export function EntityTypeView({ typeId }: EntityTypeViewProps) {
             <span class="i-lucide-arrow-left"></span>
             Back to Dashboard
           </a>
-          <a href={`/admin/entities/new/${typeId}`} class="btn-primary">
+          <a href={`/admin/${effectiveOrgId}/entities/new/${typeId}`} class="btn-primary">
             <span class="i-lucide-plus"></span>
             New {entityType.name}
           </a>
@@ -232,7 +242,12 @@ export function EntityTypeView({ typeId }: EntityTypeViewProps) {
                     key={entity.id} 
                     class="hover:bg-surface-50 dark:hover:bg-surface-800/50 cursor-pointer"
                     onClick={() => {
-                      route(`/admin/entities/${entity.id}`);
+                      const orgId = getOrgIdentifier();
+                      if (orgId) {
+                        route(`/admin/${orgId}/entities/${entity.id}`);
+                      } else {
+                        console.error('[EntityTypeView] No organization identifier available');
+                      }
                     }}
                   >
                     <td class="px-4 py-3">
@@ -248,7 +263,7 @@ export function EntityTypeView({ typeId }: EntityTypeViewProps) {
                     </td>
                     <td class="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                       <a 
-                        href={`/admin/entities/${entity.id}/edit`}
+                        href={`/admin/${effectiveOrgId}/entities/${entity.id}/edit`}
                         class="text-primary-600 hover:text-primary-700 text-sm font-medium"
                       >
                         Edit
@@ -289,7 +304,7 @@ export function EntityTypeView({ typeId }: EntityTypeViewProps) {
         <div class="card p-8 text-center">
           <span class="i-lucide-inbox text-3xl text-surface-400 mb-3 block"></span>
           <p class="body-text mb-4">No {entityType.pluralName.toLowerCase()} found.</p>
-          <a href={`/admin/entities/new/${typeId}`} class="btn-primary">
+          <a href={`/admin/${effectiveOrgId}/entities/new/${typeId}`} class="btn-primary">
             Create Your First {entityType.name}
           </a>
         </div>
