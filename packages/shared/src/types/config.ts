@@ -59,6 +59,8 @@ export interface BrandingConfig {
   primaryColor?: string;
   /** Accent color */
   accentColor?: string;
+  /** Privacy policy URL */
+  privacyPolicyUrl?: string;
 }
 
 /**

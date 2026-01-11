@@ -23,6 +23,7 @@ import { entityRoutes } from './routes/entities';
 import { userRoutes } from './routes/users';
 import { manifestRoutes } from './routes/manifests';
 import fileRoutes from './routes/files';
+import { platformRoutes } from './routes/platform';
 
 // Import middleware
 import { authMiddleware } from './middleware/auth';
@@ -77,6 +78,10 @@ app.route('/manifests', manifestRoutes);
 
 // Protected routes (auth required)
 app.use('/api/*', authMiddleware);
+
+// Platform routes - GET /branding is public (no auth middleware on route)
+app.route('/api/platform', platformRoutes);
+
 app.route('/api/organizations', organizationRoutes);
 app.route('/api/entity-types', entityTypeRoutes);
 app.route('/api/entities', entityRoutes);

@@ -6,6 +6,7 @@
 
 import { Router, Route } from 'preact-router';
 import { useEffect } from 'preact/hooks';
+import { loadBranding } from './stores/branding';
 
 // Layout
 import { Layout } from './components/Layout';
@@ -31,6 +32,7 @@ import { TypeBuilder } from './pages/superadmin/TypeBuilder';
 import { OrgManager } from './pages/superadmin/OrgManager';
 import { OrgWizard } from './pages/superadmin/OrgWizard';
 import { ApprovalQueue } from './pages/superadmin/ApprovalQueue';
+import { Branding } from './pages/superadmin/Branding';
 
 // Auth and state
 import { AuthProvider } from './stores/auth';
@@ -50,6 +52,11 @@ export function App() {
     }
     
     console.log('[App] Theme initialized:', savedTheme || (prefersDark ? 'dark' : 'light'));
+  }, []);
+  
+  // Load branding configuration
+  useEffect(() => {
+    loadBranding();
   }, []);
   
   return (
@@ -81,6 +88,7 @@ export function App() {
             <Route path="/super/orgs" component={OrgManager} />
             <Route path="/super/orgs/new" component={OrgWizard} />
             <Route path="/super/approvals" component={ApprovalQueue} />
+            <Route path="/super/branding" component={Branding} />
             
             {/* 404 fallback */}
             <Route default component={NotFoundPage} />

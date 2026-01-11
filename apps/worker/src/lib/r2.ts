@@ -289,6 +289,13 @@ export function getRootConfigPath(): string {
 }
 
 /**
+ * Get path for platform config
+ */
+export function getPlatformConfigPath(): string {
+  return `${R2_PATHS.PRIVATE}platform/app.json`;
+}
+
+/**
  * Get path for magic link token
  */
 export function getMagicLinkPath(token: string): string {

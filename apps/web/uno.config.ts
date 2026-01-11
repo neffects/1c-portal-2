@@ -20,33 +20,33 @@ export default defineConfig({
   // Custom theme extending defaults
   theme: {
     colors: {
-      // Primary brand colors - Deep teal/cyan
+      // Primary brand colors - Deep teal/cyan (using CSS variables with fallbacks)
       primary: {
-        50: '#ecfeff',
-        100: '#cffafe',
-        200: '#a5f3fc',
-        300: '#67e8f9',
-        400: '#22d3ee',
-        500: '#06b6d4',
-        600: '#0891b2',
-        700: '#0e7490',
-        800: '#155e75',
-        900: '#164e63',
-        950: '#083344'
+        50: 'var(--color-primary-50, #ecfeff)',
+        100: 'var(--color-primary-100, #cffafe)',
+        200: 'var(--color-primary-200, #a5f3fc)',
+        300: 'var(--color-primary-300, #67e8f9)',
+        400: 'var(--color-primary-400, #22d3ee)',
+        500: 'var(--color-primary-500, #06b6d4)',
+        600: 'var(--color-primary-600, #0891b2)',
+        700: 'var(--color-primary-700, #0e7490)',
+        800: 'var(--color-primary-800, #155e75)',
+        900: 'var(--color-primary-900, #164e63)',
+        950: 'var(--color-primary-950, #083344)'
       },
-      // Accent colors - Warm amber
+      // Accent colors - Warm amber (using CSS variables with fallbacks)
       accent: {
-        50: '#fffbeb',
-        100: '#fef3c7',
-        200: '#fde68a',
-        300: '#fcd34d',
-        400: '#fbbf24',
-        500: '#f59e0b',
-        600: '#d97706',
-        700: '#b45309',
-        800: '#92400e',
-        900: '#78350f',
-        950: '#451a03'
+        50: 'var(--color-accent-50, #fffbeb)',
+        100: 'var(--color-accent-100, #fef3c7)',
+        200: 'var(--color-accent-200, #fde68a)',
+        300: 'var(--color-accent-300, #fcd34d)',
+        400: 'var(--color-accent-400, #fbbf24)',
+        500: 'var(--color-accent-500, #f59e0b)',
+        600: 'var(--color-accent-600, #d97706)',
+        700: 'var(--color-accent-700, #b45309)',
+        800: 'var(--color-accent-800, #92400e)',
+        900: 'var(--color-accent-900, #78350f)',
+        950: 'var(--color-accent-950, #451a03)'
       },
       // Neutral grays - Slate
       surface: {
