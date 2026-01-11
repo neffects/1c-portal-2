@@ -74,7 +74,7 @@ export function SuperadminDashboard() {
       </div>
       
       {/* Quick links */}
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-12">
         <a href="/super/types" class="card-hover p-6">
           <div class="w-12 h-12 rounded-xl bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center mb-4">
             <span class="i-lucide-boxes text-2xl text-primary-600 dark:text-primary-400"></span>
@@ -105,6 +105,14 @@ export function SuperadminDashboard() {
           </div>
           <h3 class="font-semibold text-surface-900 dark:text-surface-100 mb-1">Branding</h3>
           <p class="text-sm text-surface-500">Configure platform branding</p>
+        </a>
+        
+        <a href="/super/import-export" class="card-hover p-6">
+          <div class="w-12 h-12 rounded-xl bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center mb-4">
+            <span class="i-lucide-arrow-left-right text-2xl text-teal-600 dark:text-teal-400"></span>
+          </div>
+          <h3 class="font-semibold text-surface-900 dark:text-surface-100 mb-1">Import / Export</h3>
+          <p class="text-sm text-surface-500">Bulk data operations</p>
         </a>
       </div>
       
@@ -160,6 +168,10 @@ export function SuperadminDashboard() {
             <a href="/super/approvals" class="flex items-center gap-3 p-3 rounded-lg hover:bg-surface-50 dark:hover:bg-surface-800 transition-colors">
               <span class="i-lucide-clipboard-check text-xl text-primary-500"></span>
               <span class="text-surface-900 dark:text-surface-100">Review Approvals</span>
+            </a>
+            <a href="/super/import-export" class="flex items-center gap-3 p-3 rounded-lg hover:bg-surface-50 dark:hover:bg-surface-800 transition-colors">
+              <span class="i-lucide-upload text-xl text-primary-500"></span>
+              <span class="text-surface-900 dark:text-surface-100">Import / Export Data</span>
             </a>
           </div>
         </div>

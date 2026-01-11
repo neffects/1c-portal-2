@@ -51,41 +51,63 @@ function getHeaders(): HeadersInit {
  * Make a GET request
  */
 async function get<T>(path: string): Promise<ApiResponse<T>> {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:45',message:'api.get called',data:{path},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
-  // #endregion
   console.log('[API] GET', path);
   
   try {
     const headers = getHeaders();
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:51',message:'headers before fetch',data:{hasAuthHeader:!!headers['Authorization'],authHeaderValue:headers['Authorization']?.substring(0,20)+'...'},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     
     const response = await fetch(`${API_BASE}${path}`, {
       method: 'GET',
       headers
     });
     
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'apps/web/src/lib/api.ts:56',message:'fetch response received',data:{status:response.status,statusText:response.statusText,path},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
+    // Read response as text first (can only read body once)
+    const text = await response.text();
     
-    const data = await response.json();
+    // Try to parse as JSON
+    let data: ApiResponse<T>;
+    try {
+      // Handle empty response
+      if (!text || text.trim() === '') {
+        console.error('[API] GET empty response:', path);
+        return {
+          success: false,
+          error: {
+            code: 'PARSE_ERROR',
+            message: 'Server returned empty response'
+          }
+        };
+      }
+      
+      data = JSON.parse(text);
+    } catch (parseError) {
+      // If response is not JSON, return error with status
+      console.error('[API] GET JSON parse error:', path, parseError);
+      console.error('[API] GET response text (first 500 chars):', text.substring(0, 500));
+      console.error('[API] GET response headers:', Object.fromEntries(response.headers.entries()));
+      console.error('[API] GET response content-type:', response.headers.get('content-type'));
+      return {
+        success: false,
+        error: {
+          code: 'PARSE_ERROR',
+          message: `Server returned non-JSON response (${response.status} ${response.statusText}). Check console for details.`
+        }
+      };
+    }
     
     if (!response.ok) {
-      console.error('[API] GET error:', path, data);
+      console.error('[API] GET error:', path, response.status, data);
     }
     
     return data;
   } catch (error) {
     console.error('[API] GET fetch error:', path, error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return {
       success: false,
       error: {
         code: 'NETWORK_ERROR',
-        message: 'Network request failed'
+        message: `Network request failed: ${errorMessage}`
       }
     };
   }
@@ -104,20 +126,38 @@ async function post<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
       body: body ? JSON.stringify(body) : undefined
     });
     
-    const data = await response.json();
+    // Read response as text first (can only read body once)
+    const text = await response.text();
+    
+    // Try to parse as JSON
+    let data: ApiResponse<T>;
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      console.error('[API] POST JSON parse error:', path, parseError);
+      console.error('[API] POST response text:', text.substring(0, 200));
+      return {
+        success: false,
+        error: {
+          code: 'PARSE_ERROR',
+          message: `Server returned non-JSON response (${response.status} ${response.statusText})`
+        }
+      };
+    }
     
     if (!response.ok) {
-      console.error('[API] POST error:', path, data);
+      console.error('[API] POST error:', path, response.status, data);
     }
     
     return data;
   } catch (error) {
     console.error('[API] POST fetch error:', path, error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return {
       success: false,
       error: {
         code: 'NETWORK_ERROR',
-        message: 'Network request failed'
+        message: `Network request failed: ${errorMessage}`
       }
     };
   }
@@ -136,20 +176,38 @@ async function patch<T>(path: string, body: unknown): Promise<ApiResponse<T>> {
       body: JSON.stringify(body)
     });
     
-    const data = await response.json();
+    // Read response as text first (can only read body once)
+    const text = await response.text();
+    
+    // Try to parse as JSON
+    let data: ApiResponse<T>;
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      console.error('[API] PATCH JSON parse error:', path, parseError);
+      console.error('[API] PATCH response text:', text.substring(0, 200));
+      return {
+        success: false,
+        error: {
+          code: 'PARSE_ERROR',
+          message: `Server returned non-JSON response (${response.status} ${response.statusText})`
+        }
+      };
+    }
     
     if (!response.ok) {
-      console.error('[API] PATCH error:', path, data);
+      console.error('[API] PATCH error:', path, response.status, data);
     }
     
     return data;
   } catch (error) {
     console.error('[API] PATCH fetch error:', path, error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return {
       success: false,
       error: {
         code: 'NETWORK_ERROR',
-        message: 'Network request failed'
+        message: `Network request failed: ${errorMessage}`
       }
     };
   }
@@ -167,20 +225,38 @@ async function del<T>(path: string): Promise<ApiResponse<T>> {
       headers: getHeaders()
     });
     
-    const data = await response.json();
+    // Read response as text first (can only read body once)
+    const text = await response.text();
+    
+    // Try to parse as JSON
+    let data: ApiResponse<T>;
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      console.error('[API] DELETE JSON parse error:', path, parseError);
+      console.error('[API] DELETE response text:', text.substring(0, 200));
+      return {
+        success: false,
+        error: {
+          code: 'PARSE_ERROR',
+          message: `Server returned non-JSON response (${response.status} ${response.statusText})`
+        }
+      };
+    }
     
     if (!response.ok) {
-      console.error('[API] DELETE error:', path, data);
+      console.error('[API] DELETE error:', path, response.status, data);
     }
     
     return data;
   } catch (error) {
     console.error('[API] DELETE fetch error:', path, error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return {
       success: false,
       error: {
         code: 'NETWORK_ERROR',
-        message: 'Network request failed'
+        message: `Network request failed: ${errorMessage}`
       }
     };
   }
