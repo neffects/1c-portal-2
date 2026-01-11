@@ -95,8 +95,56 @@ export const entityVersionQuerySchema = z.object({
   version: z.coerce.number().int().positive().optional()
 });
 
+/**
+ * Export query parameters schema
+ */
+export const exportQuerySchema = z.object({
+  typeId: entityIdSchema,
+  status: entityStatusSchema.optional(),
+  organizationId: entityIdSchema.nullable().optional()
+});
+
+/**
+ * Single entity for bulk import
+ * Supports per-row id, organizationId, and slug
+ * - id: optional - if provided, updates existing entity or creates with that ID
+ * - If id is empty/missing, a new entity is created with a generated ID
+ */
+export const bulkImportEntitySchema = z.object({
+  id: entityIdSchema.optional(), // Entity ID for update or create with specific ID
+  data: z.record(z.unknown()),
+  visibility: visibilityScopeSchema.optional(),
+  slug: z.string()
+    .max(100, 'Slug must not exceed 100 characters')
+    .regex(/^[a-z0-9-]+$/, 'Slug can only contain lowercase letters, numbers, and hyphens')
+    .optional(),
+  organizationId: entityIdSchema.nullable().optional() // Per-row org (overrides request-level)
+});
+
+/**
+ * Bulk import request schema
+ */
+export const bulkImportRequestSchema = z.object({
+  entityTypeId: entityIdSchema,
+  organizationId: entityIdSchema.nullable().optional(), // Target org (null for global)
+  entities: z.array(bulkImportEntitySchema).min(1).max(1000)
+});
+
+/**
+ * Bulk import error schema (for validation errors)
+ */
+export const bulkImportErrorSchema = z.object({
+  rowIndex: z.number(), // 0-based index in entities array
+  field: z.string().optional(), // Field that caused error (if applicable)
+  message: z.string()
+});
+
 // Type exports
 export type CreateEntityInput = z.infer<typeof createEntityRequestSchema>;
 export type UpdateEntityInput = z.infer<typeof updateEntityRequestSchema>;
 export type EntityTransitionInput = z.infer<typeof entityTransitionRequestSchema>;
 export type EntityQueryParams = z.infer<typeof entityQueryParamsSchema>;
+export type ExportQueryParams = z.infer<typeof exportQuerySchema>;
+export type BulkImportEntity = z.infer<typeof bulkImportEntitySchema>;
+export type BulkImportRequest = z.infer<typeof bulkImportRequestSchema>;
+export type BulkImportError = z.infer<typeof bulkImportErrorSchema>;

@@ -622,4 +622,203 @@ describe('Entity Routes', () => {
       expect(body.data.entity.approvalFeedback).toBe('Please add more details');
     });
   });
+  
+  describe('GET /export', () => {
+    it('should export entities for a type (superadmin)', async () => {
+      const app = createTestApp({ userRole: 'superadmin' });
+      
+      // Mock entity type, stubs, and entities
+      mockR2.get.mockImplementation((key: string) => {
+        if (key.includes('entity-types/')) {
+          return Promise.resolve({ json: () => Promise.resolve(mockEntityType) });
+        }
+        if (key.includes('stubs/ent_123')) {
+          return Promise.resolve({ json: () => Promise.resolve(mockEntityStub) });
+        }
+        if (key.includes('latest.json')) {
+          return Promise.resolve({ json: () => Promise.resolve(mockLatestPointer) });
+        }
+        if (key.includes('/v1.json')) {
+          return Promise.resolve({ json: () => Promise.resolve(mockEntity) });
+        }
+        return Promise.resolve(null);
+      });
+      
+      mockR2.list.mockResolvedValue({
+        objects: [{ key: 'stubs/ent_123.json' }],
+        truncated: false
+      });
+      
+      const response = await app.request('/entities/export?typeId=type123', {
+        method: 'GET'
+      }, mockEnv);
+      
+      expect(response.status).toBe(200);
+      
+      const body = await response.json();
+      expect(body.success).toBe(true);
+      expect(body.data.entityType).toBeDefined();
+      expect(body.data.entityType.fields).toBeDefined();
+      expect(body.data.entities).toBeInstanceOf(Array);
+      expect(body.data.exportedAt).toBeDefined();
+    });
+    
+    it('should reject non-superadmin access', async () => {
+      const app = createTestApp({ userRole: 'org_admin' });
+      
+      const response = await app.request('/entities/export?typeId=type123', {
+        method: 'GET'
+      }, mockEnv);
+      
+      expect(response.status).toBe(403);
+    });
+    
+    it('should return 404 for non-existent entity type', async () => {
+      const app = createTestApp({ userRole: 'superadmin' });
+      
+      mockR2.get.mockResolvedValue(null);
+      
+      const response = await app.request('/entities/export?typeId=invalid', {
+        method: 'GET'
+      }, mockEnv);
+      
+      expect(response.status).toBe(404);
+    });
+  });
+  
+  describe('POST /bulk-import', () => {
+    it('should create all entities when all valid (superadmin)', async () => {
+      const app = createTestApp({ userRole: 'superadmin' });
+      
+      mockR2.get.mockImplementation((key: string) => {
+        if (key.includes('entity-types/')) {
+          return Promise.resolve({ json: () => Promise.resolve(mockEntityType) });
+        }
+        return Promise.resolve(null);
+      });
+      mockR2.put.mockResolvedValue(undefined);
+      
+      const response = await app.request('/entities/bulk-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entityTypeId: 'type123',
+          organizationId: null,
+          entities: [
+            { data: { name: 'Entity 1', description: 'Desc 1' } },
+            { data: { name: 'Entity 2', description: 'Desc 2' } }
+          ]
+        })
+      }, mockEnv);
+      
+      expect(response.status).toBe(201);
+      
+      const body = await response.json();
+      expect(body.success).toBe(true);
+      expect(body.data.count).toBe(2);
+      expect(body.data.created).toHaveLength(2);
+    });
+    
+    it('should return ALL errors when any invalid (atomic)', async () => {
+      const app = createTestApp({ userRole: 'superadmin' });
+      
+      mockR2.get.mockImplementation((key: string) => {
+        if (key.includes('entity-types/')) {
+          return Promise.resolve({ json: () => Promise.resolve(mockEntityType) });
+        }
+        return Promise.resolve(null);
+      });
+      
+      const response = await app.request('/entities/bulk-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entityTypeId: 'type123',
+          organizationId: null,
+          entities: [
+            { data: { name: 'Valid Entity' } },
+            { data: { description: 'Missing name' } }, // name is required
+            { data: { description: 'Also missing name' } } // name is required
+          ]
+        })
+      }, mockEnv);
+      
+      expect(response.status).toBe(400);
+      
+      const body = await response.json();
+      expect(body.success).toBe(false);
+      expect(body.errors).toBeInstanceOf(Array);
+      expect(body.errors.length).toBe(2); // Two entities have errors
+      // Verify error structure
+      expect(body.errors[0]).toHaveProperty('rowIndex');
+      expect(body.errors[0]).toHaveProperty('message');
+    });
+    
+    it('should create ZERO entities when any row fails (atomic)', async () => {
+      const app = createTestApp({ userRole: 'superadmin' });
+      
+      mockR2.get.mockImplementation((key: string) => {
+        if (key.includes('entity-types/')) {
+          return Promise.resolve({ json: () => Promise.resolve(mockEntityType) });
+        }
+        return Promise.resolve(null);
+      });
+      mockR2.put.mockResolvedValue(undefined);
+      
+      const response = await app.request('/entities/bulk-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entityTypeId: 'type123',
+          organizationId: null,
+          entities: [
+            { data: { name: 'Valid Entity 1' } },
+            { data: { name: 'Valid Entity 2' } },
+            { data: { description: 'Invalid - missing name' } } // Will fail
+          ]
+        })
+      }, mockEnv);
+      
+      expect(response.status).toBe(400);
+      
+      // Verify no entities were written
+      // put should not have been called for entity creation
+      const entityPutCalls = mockR2.put.mock.calls.filter((call: [string]) => 
+        call[0].includes('/entities/')
+      );
+      expect(entityPutCalls.length).toBe(0);
+    });
+    
+    it('should reject non-superadmin access', async () => {
+      const app = createTestApp({ userRole: 'org_admin' });
+      
+      const response = await app.request('/entities/bulk-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entityTypeId: 'type123',
+          entities: [{ data: { name: 'Test' } }]
+        })
+      }, mockEnv);
+      
+      expect(response.status).toBe(403);
+    });
+    
+    it('should return 404 for non-existent entity type', async () => {
+      const app = createTestApp({ userRole: 'superadmin' });
+      
+      mockR2.get.mockResolvedValue(null);
+      
+      const response = await app.request('/entities/bulk-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entityTypeId: 'invalid',
+          entities: [{ data: { name: 'Test' } }]
+        })
+      }, mockEnv);
+      
+      expect(response.status).toBe(404);
+    });
+  });
 });

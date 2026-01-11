@@ -36,6 +36,7 @@ import { OrgManager } from './pages/superadmin/OrgManager';
 import { OrgWizard } from './pages/superadmin/OrgWizard';
 import { ApprovalQueue } from './pages/superadmin/ApprovalQueue';
 import { Branding } from './pages/superadmin/Branding';
+import { EntityImportExport } from './pages/superadmin/EntityImportExport';
 
 // Auth and state
 import { AuthProvider } from './stores/auth';
@@ -95,6 +96,7 @@ export function App() {
             <Route path="/super/orgs/new" component={OrgWizard} />
             <Route path="/super/approvals" component={ApprovalQueue} />
             <Route path="/super/branding" component={Branding} />
+            <Route path="/super/import-export" component={EntityImportExport} />
             
             {/* 404 fallback */}
             <Route default component={NotFoundPage} />

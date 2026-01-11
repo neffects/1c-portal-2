@@ -4,6 +4,8 @@
  * Handles entity CRUD operations with versioning:
  * - POST / - Create entity
  * - GET / - List entities (with filters)
+ * - GET /export - Export entities for a type (superadmin)
+ * - POST /bulk-import - Bulk import entities (superadmin, atomic)
  * - GET /:id - Get entity (latest or specific version)
  * - PATCH /:id - Update entity (atomic field merge)
  * - POST /:id/transition - Status transitions
@@ -18,8 +20,11 @@ import {
   updateEntityRequestSchema,
   entityTransitionRequestSchema,
   entityQueryParamsSchema,
-  entityVersionQuerySchema
+  entityVersionQuerySchema,
+  exportQuerySchema,
+  bulkImportRequestSchema
 } from '@1cc/shared';
+import type { BulkImportError } from '@1cc/shared';
 import { 
   readJSON, writeJSON, deleteFile, fileExists, listFiles,
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath,
@@ -408,6 +413,523 @@ entityRoutes.get('/search', async (c) => {
       offset
     }
   });
+});
+
+/**
+ * GET /export
+ * Export entities for a type (superadmin only)
+ * Returns entities with the entity type schema for CSV template generation
+ */
+entityRoutes.get('/export',
+  requireSuperadmin(),
+  zValidator('query', exportQuerySchema),
+  async (c) => {
+  console.log('[Entities] Export handler called');
+  console.log('[Entities] Request path:', c.req.path);
+  console.log('[Entities] Request query:', c.req.query());
+  
+  const query = c.req.valid('query');
+  console.log('[Entities] Validated query:', query);
+  console.log('[Entities] Exporting entities for type:', query.typeId);
+  
+  // Get entity type definition
+  const entityType = await readJSON<EntityType>(
+    c.env.R2_BUCKET,
+    getEntityTypePath(query.typeId)
+  );
+  
+  if (!entityType || !entityType.isActive) {
+    throw new NotFoundError('Entity Type', query.typeId);
+  }
+  
+  // Collect all entities for this type
+  const entities: Entity[] = [];
+  
+  // Get all entity stubs to find entities
+  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
+  
+  for (const stubFile of stubFiles) {
+    if (!stubFile.endsWith('.json')) continue;
+    
+    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile);
+    if (!stub || stub.entityTypeId !== query.typeId) continue;
+    
+    // Filter by organization if specified
+    if (query.organizationId !== undefined) {
+      if (query.organizationId === null && stub.organizationId !== null) continue;
+      if (query.organizationId !== null && stub.organizationId !== query.organizationId) continue;
+    }
+    
+    // Get latest pointer
+    let latestPointer: EntityLatestPointer | null = null;
+    
+    if (stub.organizationId === null) {
+      // Global entity - try public and authenticated paths
+      for (const visibility of ['public', 'authenticated'] as const) {
+        const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
+        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+        if (latestPointer) break;
+      }
+    } else {
+      // Org entity - use members path
+      const latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    }
+    
+    if (!latestPointer) continue;
+    
+    // Filter by status if specified
+    if (query.status && latestPointer.status !== query.status) continue;
+    
+    // Get full entity
+    const storageVisibility: VisibilityScope = stub.organizationId === null 
+      ? latestPointer.visibility 
+      : 'members';
+    const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
+    const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
+    
+    if (entity) {
+      entities.push(entity);
+    }
+  }
+  
+  // Sort by createdAt
+  entities.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  
+  console.log('[Entities] Exporting', entities.length, 'entities for type:', query.typeId);
+  
+  const responseData = {
+    success: true,
+    data: {
+      entityType: {
+        id: entityType.id,
+        name: entityType.name,
+        pluralName: entityType.pluralName,
+        slug: entityType.slug,
+        fields: entityType.fields,
+        sections: entityType.sections
+      },
+      entities,
+      exportedAt: new Date().toISOString()
+    }
+  };
+  
+  // Log response size for debugging
+  try {
+    const responseString = JSON.stringify(responseData);
+    console.log('[Entities] Export response size:', responseString.length, 'bytes');
+    if (responseString.length > 1000000) {
+      console.warn('[Entities] Large export response:', responseString.length, 'bytes');
+    }
+  } catch (serializeError) {
+    console.error('[Entities] Failed to serialize export response:', serializeError);
+    throw new Error('Failed to serialize export data');
+  }
+  
+  console.log('[Entities] Returning export response');
+  
+  // Ensure we're returning a proper response
+  try {
+    const response = c.json(responseData);
+    console.log('[Entities] Response created successfully');
+    return response;
+  } catch (responseError) {
+    console.error('[Entities] Error creating response:', responseError);
+    // Fallback: return plain JSON without pretty formatting
+    return new Response(JSON.stringify(responseData), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+});
+
+/**
+ * POST /bulk-import
+ * Bulk import entities (superadmin only)
+ * Atomic operation: validates ALL entities first, only creates if ALL pass
+ * Supports per-row organizationId and slug
+ */
+entityRoutes.post('/bulk-import',
+  requireSuperadmin(),
+  zValidator('json', bulkImportRequestSchema),
+  async (c) => {
+  console.log('[Entities] Bulk importing entities');
+  
+  const { entityTypeId, organizationId: defaultOrgId, entities: importEntities } = c.req.valid('json');
+  const userId = c.get('userId')!;
+  
+  // Get entity type definition
+  const entityType = await readJSON<EntityType>(
+    c.env.R2_BUCKET,
+    getEntityTypePath(entityTypeId)
+  );
+  
+  if (!entityType || !entityType.isActive) {
+    throw new NotFoundError('Entity Type', entityTypeId);
+  }
+  
+  // Collect unique organization IDs from all entities for permission validation
+  const uniqueOrgIds = new Set<string>();
+  for (const entity of importEntities) {
+    // Per-row organizationId takes precedence over default
+    const orgId = entity.organizationId !== undefined ? entity.organizationId : defaultOrgId;
+    if (orgId !== null && orgId !== undefined) {
+      uniqueOrgIds.add(orgId);
+    }
+  }
+  
+  // Check organization permissions for all unique orgs
+  for (const orgId of uniqueOrgIds) {
+    const permissions = await readJSON<EntityTypePermissions>(
+      c.env.R2_BUCKET,
+      getOrgPermissionsPath(orgId)
+    );
+    
+    if (!permissions?.creatable.includes(entityTypeId)) {
+      throw new ForbiddenError(`Organization ${orgId} cannot create entities of this type`);
+    }
+  }
+  
+  // Phase 1: Validate ALL entities and check which are creates vs updates
+  const validationErrors: BulkImportError[] = [];
+  
+  // Categorize entities: create new, update existing, or create with specific ID
+  type ValidatedEntity = {
+    rowIndex: number;
+    data: Record<string, unknown>;
+    visibility: VisibilityScope;
+    slug: string;
+    organizationId: string | null;
+    mode: 'create' | 'update' | 'create-with-id';
+    entityId?: string; // For update or create-with-id
+    existingEntity?: Entity; // For updates
+    existingVersion?: number; // For updates
+  };
+  
+  const validatedEntities: ValidatedEntity[] = [];
+  
+  // Collect existing slugs for uniqueness validation (only for new entities)
+  // We'll validate within batch and against existing entities
+  const existingSlugs = new Map<string, string>(); // key: "orgId|slug", value: entityId that owns it
+  const batchNewSlugs = new Map<string, number>(); // key: "orgId|slug", value: row index
+  
+  // First pass: Load existing slugs for this entity type
+  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
+  for (const stubFile of stubFiles) {
+    if (!stubFile.endsWith('.json')) continue;
+    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile);
+    if (!stub || stub.entityTypeId !== entityTypeId) continue;
+    
+    // Get entity to read its slug
+    let latestPointer: EntityLatestPointer | null = null;
+    if (stub.organizationId === null) {
+      for (const visibility of ['public', 'authenticated'] as const) {
+        const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
+        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+        if (latestPointer) break;
+      }
+    } else {
+      const latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    }
+    
+    if (latestPointer) {
+      const storageVisibility: VisibilityScope = stub.organizationId === null 
+        ? latestPointer.visibility 
+        : 'members';
+      const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
+      const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
+      if (entity) {
+        const slugKey = `${stub.organizationId || 'global'}|${entity.slug}`;
+        existingSlugs.set(slugKey, entity.id);
+      }
+    }
+  }
+  
+  for (let i = 0; i < importEntities.length; i++) {
+    const importEntity = importEntities[i];
+    
+    // Determine organization for this entity (per-row takes precedence)
+    const entityOrgId = importEntity.organizationId !== undefined 
+      ? importEntity.organizationId 
+      : (defaultOrgId ?? null);
+    
+    // Check if entity ID is provided
+    const providedId = importEntity.id;
+    let mode: 'create' | 'update' | 'create-with-id' = 'create';
+    let existingEntity: Entity | undefined;
+    let existingVersion: number | undefined;
+    
+    if (providedId) {
+      // Check if entity exists
+      const existingStub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(providedId));
+      
+      if (existingStub) {
+        // Entity exists - this is an update
+        mode = 'update';
+        
+        // Verify entity type matches
+        if (existingStub.entityTypeId !== entityTypeId) {
+          validationErrors.push({
+            rowIndex: i,
+            field: 'id',
+            message: `Entity ${providedId} belongs to a different entity type`
+          });
+          continue;
+        }
+        
+        // Get current entity for update
+        let latestPointer: EntityLatestPointer | null = null;
+        if (existingStub.organizationId === null) {
+          for (const visibility of ['public', 'authenticated'] as const) {
+            const latestPath = getEntityLatestPath(visibility, providedId, undefined);
+            latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+            if (latestPointer) break;
+          }
+        } else {
+          const latestPath = getEntityLatestPath('members', providedId, existingStub.organizationId);
+          latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+        }
+        
+        if (!latestPointer) {
+          validationErrors.push({
+            rowIndex: i,
+            field: 'id',
+            message: `Entity ${providedId} not found (corrupted state)`
+          });
+          continue;
+        }
+        
+        existingVersion = latestPointer.version;
+        
+        // Get current entity data
+        const storageVisibility: VisibilityScope = existingStub.organizationId === null 
+          ? latestPointer.visibility 
+          : 'members';
+        const entityPath = getEntityVersionPath(storageVisibility, providedId, latestPointer.version, existingStub.organizationId || undefined);
+        existingEntity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath) || undefined;
+        
+        if (!existingEntity) {
+          validationErrors.push({
+            rowIndex: i,
+            field: 'id',
+            message: `Entity ${providedId} version ${latestPointer.version} not found`
+          });
+          continue;
+        }
+      } else {
+        // Entity doesn't exist - create with this specific ID
+        mode = 'create-with-id';
+      }
+    }
+    
+    try {
+      // Validate each field individually
+      const validatedData = validateEntityFields(importEntity.data, entityType);
+      
+      // Final validation to ensure required fields are present
+      validateEntityData(validatedData, entityType);
+      
+      // Determine visibility
+      let finalVisibility: VisibilityScope = importEntity.visibility || entityType.defaultVisibility;
+      // Global entities cannot have 'members' visibility
+      if (entityOrgId === null && finalVisibility === 'members') {
+        finalVisibility = 'authenticated';
+      }
+      
+      // Handle slug: use provided slug, or from data, or auto-generate from name
+      const entityName = (validatedData.name as string) || `Entity ${i + 1}`;
+      let slug: string;
+      
+      if (importEntity.slug) {
+        // Slug provided at entity level (already validated by Zod schema)
+        slug = importEntity.slug;
+      } else if (validatedData.slug && typeof validatedData.slug === 'string') {
+        // Slug in data field
+        slug = validatedData.slug;
+        delete validatedData.slug;
+      } else if (mode === 'update' && existingEntity) {
+        // For updates without slug, keep existing slug
+        slug = existingEntity.slug;
+      } else {
+        // Auto-generate from name
+        slug = createSlug(entityName);
+      }
+      
+      // Validate slug uniqueness for new entities (create or create-with-id)
+      if (mode !== 'update') {
+        const slugKey = `${entityOrgId || 'global'}|${slug}`;
+        
+        // Check against existing slugs in database
+        const existingOwner = existingSlugs.get(slugKey);
+        if (existingOwner && existingOwner !== providedId) {
+          validationErrors.push({
+            rowIndex: i,
+            field: 'slug',
+            message: `Slug '${slug}' already exists for this entity type and organization`
+          });
+          continue;
+        }
+        
+        // Check against other new entities in this batch
+        const batchDuplicate = batchNewSlugs.get(slugKey);
+        if (batchDuplicate !== undefined) {
+          validationErrors.push({
+            rowIndex: i,
+            field: 'slug',
+            message: `Duplicate slug '${slug}' - already used in row ${batchDuplicate + 1} of this import`
+          });
+          continue;
+        }
+        
+        // Track this slug for batch duplicate detection
+        batchNewSlugs.set(slugKey, i);
+      }
+      
+      validatedEntities.push({
+        rowIndex: i,
+        data: validatedData,
+        visibility: finalVisibility,
+        slug,
+        organizationId: entityOrgId,
+        mode,
+        entityId: providedId,
+        existingEntity,
+        existingVersion
+      });
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        // Extract field-specific errors if available
+        const details = error.details as { fields?: string[] } | undefined;
+        if (details?.fields && Array.isArray(details.fields)) {
+          for (const fieldError of details.fields) {
+            validationErrors.push({
+              rowIndex: i,
+              message: fieldError
+            });
+          }
+        } else {
+          validationErrors.push({
+            rowIndex: i,
+            message: error.message
+          });
+        }
+      } else {
+        validationErrors.push({
+          rowIndex: i,
+          message: error instanceof Error ? error.message : 'Unknown validation error'
+        });
+      }
+    }
+  }
+  
+  // If any validation errors, return them all (atomic - no entities created/updated)
+  if (validationErrors.length > 0) {
+    console.log('[Entities] Bulk import validation failed:', validationErrors.length, 'errors');
+    return c.json({
+      success: false,
+      errors: validationErrors
+    }, 400);
+  }
+  
+  // Phase 2: Create/Update all entities (all validation passed)
+  const createdIds: string[] = [];
+  const updatedIds: string[] = [];
+  const now = new Date().toISOString();
+  
+  for (const validated of validatedEntities) {
+    if (validated.mode === 'update' && validated.existingEntity && validated.existingVersion !== undefined) {
+      // Update existing entity - create new version
+      const newVersion = validated.existingVersion + 1;
+      
+      const updatedEntity: Entity = {
+        ...validated.existingEntity,
+        version: newVersion,
+        visibility: validated.visibility,
+        slug: validated.slug,
+        data: validated.data,
+        updatedAt: now,
+        updatedBy: userId
+      };
+      
+      // Write new version
+      const storageVisibility: VisibilityScope = validated.organizationId === null ? validated.visibility : 'members';
+      const versionPath = getEntityVersionPath(storageVisibility, validated.entityId!, newVersion, validated.organizationId || undefined);
+      await writeJSON(c.env.R2_BUCKET, versionPath, updatedEntity);
+      
+      // Update latest pointer
+      const latestPointer: EntityLatestPointer = {
+        version: newVersion,
+        status: validated.existingEntity.status, // Keep existing status
+        visibility: validated.visibility,
+        updatedAt: now
+      };
+      
+      const latestPath = getEntityLatestPath(storageVisibility, validated.entityId!, validated.organizationId || undefined);
+      await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
+      
+      updatedIds.push(validated.entityId!);
+    } else {
+      // Create new entity (with generated ID or specific ID)
+      const entityId = validated.entityId || createEntityId();
+      
+      const entity: Entity = {
+        id: entityId,
+        entityTypeId,
+        organizationId: validated.organizationId,
+        version: 1,
+        status: 'draft',
+        visibility: validated.visibility,
+        slug: validated.slug,
+        data: validated.data,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: userId,
+        updatedBy: userId
+      };
+      
+      // Write entity stub
+      const stub: EntityStub = {
+        entityId,
+        organizationId: validated.organizationId,
+        entityTypeId,
+        createdAt: now
+      };
+      
+      await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub);
+      
+      // Write entity version
+      const storageVisibility: VisibilityScope = validated.organizationId === null ? validated.visibility : 'members';
+      const versionPath = getEntityVersionPath(storageVisibility, entityId, 1, validated.organizationId || undefined);
+      await writeJSON(c.env.R2_BUCKET, versionPath, entity);
+      
+      // Write latest pointer
+      const latestPointer: EntityLatestPointer = {
+        version: 1,
+        status: 'draft',
+        visibility: validated.visibility,
+        updatedAt: now
+      };
+      
+      const latestPath = getEntityLatestPath(storageVisibility, entityId, validated.organizationId || undefined);
+      await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
+      
+      createdIds.push(entityId);
+    }
+  }
+  
+  console.log('[Entities] Bulk import complete - created:', createdIds.length, 'updated:', updatedIds.length);
+  
+  return c.json({
+    success: true,
+    data: {
+      created: createdIds,
+      updated: updatedIds,
+      count: createdIds.length + updatedIds.length
+    }
+  }, 201);
 });
 
 /**
