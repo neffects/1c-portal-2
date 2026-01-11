@@ -15,6 +15,7 @@ import { DateField } from './DateField';
 import { SelectField } from './SelectField';
 import { MultiSelectField } from './MultiSelectField';
 import { LinkField } from './LinkField';
+import { WebLinkField } from './WebLinkField';
 import { ImageField } from './ImageField';
 import { LogoField } from './LogoField';
 import { FileField } from './FileField';
@@ -42,17 +43,34 @@ const FIELD_COMPONENTS: Record<FieldType, React.ComponentType<FieldRendererProps
   select: SelectField,
   multiselect: MultiSelectField,
   link: LinkField,
+  weblink: WebLinkField,
   image: ImageField,
   logo: LogoField,
   file: FileField,
   country: CountryField
 };
 
+/**
+ * Get the component for a field type
+ */
+function getFieldComponent(fieldType: string): React.ComponentType<FieldRendererProps> | null {
+  // Use explicit type guard to ensure proper lookup
+  if (fieldType in FIELD_COMPONENTS) {
+    return FIELD_COMPONENTS[fieldType as FieldType];
+  }
+  return null;
+}
+
 export function FieldRenderer({ field, value, onChange, error, disabled, readOnly }: FieldRendererProps) {
-  const Component = FIELD_COMPONENTS[field.type];
+  // Get component for field type
+  const Component = getFieldComponent(field.type);
   
   if (!Component) {
-    console.warn(`[FieldRenderer] Unknown field type: ${field.type}`);
+    console.warn(`[FieldRenderer] Unknown field type: ${field.type}`, {
+      fieldType: field.type,
+      availableTypes: Object.keys(FIELD_COMPONENTS),
+      field
+    });
     return (
       <div class="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-amber-700 dark:text-amber-400 text-sm">
         Unknown field type: {field.type}

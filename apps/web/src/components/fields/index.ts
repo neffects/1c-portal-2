@@ -13,6 +13,7 @@ export { DateField } from './DateField';
 export { SelectField } from './SelectField';
 export { MultiSelectField } from './MultiSelectField';
 export { LinkField } from './LinkField';
+export { WebLinkField } from './WebLinkField';
 export { ImageField } from './ImageField';
 export { LogoField } from './LogoField';
 export { FileField } from './FileField';
