@@ -145,6 +145,58 @@ export function validateFieldValue(field: FieldDefinition, value: unknown): void
       }
       break;
       
+    case 'weblink':
+      // WebLink can be null, an object with url (and optional alias), or a string (legacy format)
+      if (value === null) {
+        // Null is allowed (empty link)
+        break;
+      }
+      if (typeof value === 'string') {
+        // Legacy format: just a URL string - validate it's a valid URL
+        try {
+          const url = new URL(value);
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+            throw new ValidationError(`Field '${field.name}' must be a valid HTTP or HTTPS URL`);
+          }
+          if (constraints.requireHttps && url.protocol !== 'https:') {
+            throw new ValidationError(`Field '${field.name}' must be a valid HTTPS URL`);
+          }
+        } catch (error) {
+          if (error instanceof ValidationError) {
+            throw error;
+          }
+          throw new ValidationError(`Field '${field.name}' must be a valid URL`);
+        }
+      } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        // Modern format: object with url and optional alias
+        const linkObj = value as Record<string, unknown>;
+        if (!linkObj.url || typeof linkObj.url !== 'string') {
+          throw new ValidationError(`Field '${field.name}' must have a 'url' property (string)`);
+        }
+        // Validate URL
+        try {
+          const url = new URL(linkObj.url);
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+            throw new ValidationError(`Field '${field.name}' URL must be HTTP or HTTPS`);
+          }
+          if (constraints.requireHttps && url.protocol !== 'https:') {
+            throw new ValidationError(`Field '${field.name}' URL must be HTTPS`);
+          }
+        } catch (error) {
+          if (error instanceof ValidationError) {
+            throw error;
+          }
+          throw new ValidationError(`Field '${field.name}' must have a valid URL`);
+        }
+        // Validate alias if present
+        if (linkObj.alias !== undefined && typeof linkObj.alias !== 'string') {
+          throw new ValidationError(`Field '${field.name}' alias must be a string if provided`);
+        }
+      } else {
+        throw new ValidationError(`Field '${field.name}' must be null, a string URL, or an object with url property`);
+      }
+      break;
+      
     case 'country':
       // Country can be string (country code) or object with country data
       if (typeof value !== 'string' && typeof value !== 'object') {
