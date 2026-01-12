@@ -395,6 +395,9 @@ The project includes automated security testing with:
 - 🔲 TanStack DB integration for true offline
 - 🔲 Alert notification system (email digests)
 - 🔲 Performance optimization
+- 🔲 Relation field display options (menu/list/card) for linked entities (2026-01-12)
+  - See `PLAN-relation-field-display-options.md`
+  <!-- Plan-only note added by agent; no implementation shipped yet. -->
 
 ### Recently Completed (CI/CD & Testing)
 - ✅ Multi-environment configuration (2026-01-10):
