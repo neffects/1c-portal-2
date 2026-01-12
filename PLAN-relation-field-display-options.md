@@ -211,6 +211,83 @@ Hydration algorithm:
 
 This is the foundation needed for relation displays to work consistently, because LinkField/search and rendering will query TanStack DB instead of hitting `/api/entities/search`.
 
+### 1.2) Critical-path route payloads (home + deeplinks) vs background bundles
+
+To meet the UX requirement (“fast first paint” on **home** and **deeplinks**) while still moving toward full offline hydration, split loading into:
+
+- **Critical path**: fetch *just enough* to render the current route.
+- **Background**: hydrate broader bundles/manifests into TanStack DB for navigation, search, and relation displays.
+
+#### Critical path inputs
+
+1) **App config** (always fetched first)
+
+- Used for: feature flags (offline mode), branding, sync intervals, and deciding which hydration scopes are applicable.
+- Server storage already exists by type (`config/app.json` and `private/platform/app.json`), but the web app currently only fetches branding via `/public/branding`.
+- Plan expectation: the client can fetch a single “startup config” payload early. (Implementation can be either:
+  - a dedicated endpoint returning `AppConfig` (recommended), or
+  - composing existing endpoints (`/public/branding` + a config endpoint) into one client call.)
+
+2) **Route payload file** (route-specific JSON)
+
+For each user-facing route we should have a **single JSON payload** containing:
+
+- the primary entity/entities needed for the page
+- *supporting data* needed to render without waiting for background bundles
+
+This can be thought of as a “route file” (as you described). It is separate from manifests/bundles and can be cached aggressively.
+
+#### Proposed route payload shapes
+
+Keep these payloads small and explicitly shaped for routes:
+
+- **Home route payload**:
+  - branding + minimal nav model (org landing targets, top entity types)
+  - optional “featured” entities (already in `BundleEntity` shape)
+
+- **Public deeplink payload** (`/:orgSlug/:typeSlug/:entitySlug`):
+  - `organization` (id, name, slug)
+  - `entityType` (id, slug, name) and optionally **entity type definition** if needed for rendering
+  - `entity` (full entity or `BundleEntity`-like shape)
+  - `supportingEntities` (optional): minimal entities needed to render relation labels immediately (e.g. brand logo/name for a linked brand)
+
+- **Authenticated deeplink payload** (same idea, but visibility-aware):
+  - The payload resolver chooses source scope:
+    - public (if entity is public)
+    - platform/authenticated (if entity is authenticated-global)
+    - org/members (if entity is org-scoped and user is a member)
+  - Includes the same `supportingEntities` concept.
+
+Supporting entities should be sufficient to render relation displays on that page **before** full bundle hydration completes.
+
+#### Load sequences by client type (as requested)
+
+- **Public user → Home**
+  - critical path:
+    - fetch app config
+    - fetch home route payload
+  - background:
+    - hydrate public manifest + public bundles into TanStack DB
+
+- **Public user → Deeplink**
+  - critical path:
+    - fetch app config
+    - fetch deeplink route payload (entity + supportingEntities)
+  - background:
+    - hydrate public manifest + public bundles
+
+- **Authenticated user → Deeplink**
+  - critical path:
+    - fetch app config
+    - fetch deeplink route payload (visibility-aware; entity + supportingEntities)
+  - background:
+    - hydrate public manifest + bundles
+    - hydrate platform/authenticated manifest + bundles (**authenticated global objects**)
+    - hydrate org/members manifest + bundles (**if** user is a member of the active org)
+    - hydrate org “supporting files” as needed (org profile/permissions) to drive UI choices and offline navigation
+
+Note: this background sequence aligns with the earlier scope model (`public`, `platform`, `org:${orgId}`), but adds an explicit “route payload first” requirement.
+
 Proposed DB model (exact API depends on how TanStack DB is integrated in this repo):
 
 - **Collection**: `entitiesByType[typeId]`

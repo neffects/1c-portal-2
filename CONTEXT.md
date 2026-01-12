@@ -399,6 +399,7 @@ The project includes automated security testing with:
   - See `PLAN-relation-field-display-options.md`
   - Frontend-only rendering using local bundle data (TanStack DB), with only schema params added to entity/field definitions
   - Hydration plan: use separate manifest scopes (public/platform/org) to background-load bundles into TanStack DB (includes authenticated-global objects via platform scope)
+  - Route loading plan: fetch app config + route payload first (home/deeplink), then hydrate bundles in background
   <!-- Plan-only note added by agent; no implementation shipped yet. -->
 
 ### Recently Completed (CI/CD & Testing)
