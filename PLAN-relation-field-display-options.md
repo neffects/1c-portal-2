@@ -164,6 +164,8 @@ For client hydration, treat these as **separate manifests**, because they corres
 For an authenticated client (org member/admin):
 
 - **Always** hydrate all **public bundles** for all public entity types (from the public manifest).
+- **Also** hydrate all **authenticated/platform bundles** for authenticated-global entity types (from the platform manifest).
+  - These are “global objects” that require auth (visibility scope `authenticated`).
 - **Also** hydrate all **org bundles** for the user’s selected/active organization (from the org manifest).
 
 For a public (unauthenticated) client:
@@ -202,7 +204,7 @@ Hydration algorithm:
 
 1. Determine enabled scopes:
    - unauth → `['public']`
-   - auth (non-super) → `['public', `org:${currentOrgId}`]`
+   - auth (non-super) → `['public', 'platform', `org:${currentOrgId}`]`
    - superadmin → `['public', 'platform']` plus optional `org:${currentOrgId}`
 2. Fetch each scope’s manifest (in background).
 3. For each manifest entity type, ensure the matching bundle exists locally at the required version; if not, fetch bundle and upsert entities into TanStack DB collection(s).
