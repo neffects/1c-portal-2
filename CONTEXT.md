@@ -397,6 +397,7 @@ The project includes automated security testing with:
 - 🔲 Performance optimization
 - 🔲 Relation field display options (menu/list/card) for linked entities (2026-01-12)
   - See `PLAN-relation-field-display-options.md`
+  - Frontend-only rendering using local bundle data (TanStack DB), with only schema params added to entity/field definitions
   <!-- Plan-only note added by agent; no implementation shipped yet. -->
 
 ### Recently Completed (CI/CD & Testing)

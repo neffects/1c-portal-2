@@ -23,14 +23,16 @@ Examples:
 ## Current state (what exists today)
 
 - “Relation field” is modeled as **`FieldDefinition.type === 'link'`** with a target type in constraints (`constraints.linkEntityTypeId` in the TypeBuilder).
-- Entity list items already return a small display subset (`EntityListItem.data.name` plus `description` in the worker route).
-- The LinkField UI expects a lightweight linked-entity payload, but backend/UI types are not fully aligned (needs attention during implementation).
+- Bundles are already fetched client-side and cached, and there is already a local “get entity by ID from bundles” helper (see `apps/web/src/stores/sync.tsx`).
+- **Constraint for this plan**: all “relation display” logic should happen in the **frontend**, using **local TanStack DB** hydrated from the relevant entity type bundle as the source of related-entity data.
 
 ## Goals / non-goals
 
 - **Goal**: Add a single, consistent “entity reference display” model that works across UI contexts.
 - **Goal**: Defaults live on the **related entity type**; per-field override lives on the **link field definition**.
 - **Goal**: Backwards compatible: if configs are missing, we fall back to existing behavior (name-only).
+- **Goal**: No worker/API changes beyond the **additional parameters** on entity type + field definitions (stored/returned as part of entity type definitions/manifests).
+- **Non-goal**: Add/modify backend endpoints for reference rendering or searching. Link menus/lists should be powered by **local bundle data in TanStack DB**.
 - **Non-goal**: Build a full templating language or arbitrary JSX; keep it simple and predictable.
 
 ---
@@ -128,88 +130,70 @@ Back-compat: all new fields **optional** so existing stored definitions validate
 
 ---
 
-## API / backend plan (worker)
-
-### Key decision: where to compute the display?
-
-Compute on the **backend** so the UI doesn’t need to:
-
-- load related type definitions to interpret field types/options
-- understand how to map field values into badges/images/etc.
-
-### New lightweight “entity reference” response shape
-
-Introduce a shared type in `packages/shared/src/types/entity.ts` (or a new file) used by both search and “load linked entity”:
-
-```ts
-export interface EntityReferenceDisplay {
-  /** Always safe fallback */
-  primaryText: string;
-  secondaryText?: string;
-  media?: { kind: 'image' | 'emoji'; value: string };
-  badges?: Array<{ text: string; color?: string }>;
-}
-
-export interface EntityReference {
-  id: string;
-  entityTypeId: string;
-  slug: string;
-  organizationId: string | null;
-  display: EntityReferenceDisplay;
-}
-```
-
-### Endpoints to support (or adjust)
-
-- **`GET /api/entities/search`**: return `EntityReference[]` (not empty list). Must support `typeId` filter used by LinkField.
-- **`GET /api/entities/:id`** (or add a dedicated endpoint like `GET /api/entities/:id/reference`): return `EntityReference` for LinkField’s “load selection by id”.
-
-### Display resolution algorithm (backend)
-
-Add a worker helper (e.g. `apps/worker/src/lib/entity-reference-display.ts`):
-
-1. Determine the **related entity type** (load `definition.json` for `entity.entityTypeId`)
-2. Pick template based on context:
-   - Start with `entityType.referenceDisplayConfig?.[context]`
-   - If caller is a link field with override, merge/override:
-     - `field.constraints.linkDisplayOverride?.[context]` wins
-3. If no template found, default:
-   - `primary = { fieldId: 'name', displayAs: 'text' }`
-4. For each template part, resolve value:
-   - `value = entity.data[fieldId]`
-   - if `path` present and `value` is object, traverse
-5. Coerce output:
-   - `displayAs: image` => URL string (or ignore if invalid)
-   - `displayAs: emoji` => short string
-   - `displayAs: badge` => string + optional color (for select options, color can be read from field definition constraints)
-6. Always produce at least `primaryText` (fallback to `Entity ${id}`).
-
-### Performance considerations
-
-- Cache entity type definitions in-memory per request (simple Map) since a single search may resolve many references of the same type.
-- Keep the reference response payload small (no full entity data).
-
----
-
 ## Frontend plan (web)
 
-### 1) Shared rendering component
+### 1) Data source: TanStack DB hydrated from bundles
 
-Create a small component (e.g. `apps/web/src/components/EntityReferenceLabel.tsx`) that renders `EntityReferenceDisplay` consistently:
+The LinkField (and any other “related entity” menus/lists/cards) should pull related-entity data from **local TanStack DB** that is hydrated from the relevant **entity type bundle**.
+
+Proposed DB model (exact API depends on how TanStack DB is integrated in this repo):
+
+- **Collection**: `entitiesByType[typeId]`
+- **Record shape**: `BundleEntity` (or a normalized version with at least `id`, `slug`, `data`, `status`, `updatedAt`)
+- **Queries**:
+  - `getById(entityId)` for the selected value
+  - `searchByType(typeId, query)` for dropdown search
+
+Notes:
+
+- This is intentionally frontend-only and avoids reliance on `/api/entities/search` (which is currently stubbed).
+- “Appropriate bundle” depends on the UI context:
+  - browse/public pages → public bundle
+  - admin editor → org/members bundle
+  - superadmin editor → platform/authenticated or org bundle (depending on entity scope)
+
+### 2) Frontend-only “reference display builder”
+
+Implement a pure helper (e.g. `apps/web/src/lib/entity-reference-display.ts`) that builds a UI-friendly display object from:
+
+- the related entity’s **data** (from TanStack DB)
+- the related entity type’s **field definitions** (so we can do smarter things like select-option colors)
+- the context (`menu` | `list` | `card`)
+- an optional per-field override (from `constraints.linkDisplayOverride`)
+
+Suggested output:
+
+- `media?: { kind: 'image' | 'emoji'; value: string }`
+- `primaryText: string`
+- `secondaryText?: string`
+- `badges?: Array<{ text: string; color?: string }>`
+
+Resolution rules:
+
+1. Pick template: type default → apply override → fallback to `{ primary: { fieldId: 'name' } }`
+2. Resolve part values from `entity.data[fieldId]` with optional dotted `path` traversal
+3. Coerce by `displayAs` (`image`/`emoji`/`badge`/`text`/`auto`)
+4. Guarantee `primaryText` (fallback `Entity {id}`)
+
+### 3) Shared rendering component
+
+Create a small component (e.g. `apps/web/src/components/EntityReferenceLabel.tsx`) that renders the built display object consistently:
 
 - Media: image circle or emoji
 - Primary: bold text
 - Secondary: muted text
 - Badges: small pill(s)
 
-### 2) Update LinkField to use `EntityReference`
+### 4) Update LinkField to use TanStack DB (no API search)
 
 Update `LinkField` so:
 
-- search results are `EntityReference[]` and it uses `display` to render rows
-- selected entity loads via the “reference” endpoint and renders the same `display`
+- It does **not** call `/api/entities/search` nor `/api/entities/:id` for lookup.
+- It uses `constraints.linkEntityTypeId` to scope to the correct local entity-type collection.
+- It searches locally (name-first; optionally secondary fields depending on the template).
+- It renders each option via `EntityReferenceLabel`.
 
-### 3) TypeBuilder UX for defaults (per entity type)
+### 5) TypeBuilder UX for defaults (per entity type)
 
 Add a new card/section in `TypeBuilder`:
 
@@ -222,12 +206,17 @@ Add a new card/section in `TypeBuilder`:
   - optional `displayAs` per selection (auto/text/badge/image/emoji)
   - optional `path` input shown only for object-valued fields (advanced)
 
-### 4) FieldEditor override UX (for link fields only)
+### 6) FieldEditor override UX (for link fields only)
 
 In FieldEditorModal when `field.type === 'link'`:
 
 - Add a toggle: “Override linked entity display”
 - If enabled: same UI as above, stored in `constraints.linkDisplayOverride`
+
+<!--
+NOTE: The “TypeBuilder UX” and “FieldEditor override UX” sections were moved earlier in this doc
+as steps 5 and 6 under “Frontend plan (web)”, since this plan is frontend-only.
+-->
 
 ---
 
@@ -254,24 +243,20 @@ In FieldEditorModal when `field.type === 'link'`:
   - bad `path` patterns
   - missing `primary`
 
-### Worker tests (`apps/worker`)
-
-- Search returns references with display applied
-- Field override beats type default
-- Missing fields fall back gracefully
-
 ### Web tests (`apps/web`)
 
-- LinkField renders media + primary + badges correctly given `EntityReferenceDisplay`
+- The display builder returns expected media/primary/badges for representative entities
+- LinkField renders media + primary + badges correctly for built display objects
+- Override beats type defaults
 
 ---
 
 ## Implementation order (recommended)
 
 1. **Shared types + schemas**: add `referenceDisplayConfig` + `linkDisplayOverride`
-2. **Worker**: implement `EntityReference` response + display builder + update search + add reference endpoint
-3. **Web**: create `EntityReferenceLabel` and update LinkField to use it
+2. **Web**: implement frontend display builder + `EntityReferenceLabel`
+3. **Web**: update LinkField to search/resolve via TanStack DB hydrated from bundles
 4. **Web**: TypeBuilder “Reference Display” editor UI (defaults)
 5. **Web**: Link field override UI in FieldEditorModal
-6. **Tests** across shared + worker + web
+6. **Tests** across shared + web
 
