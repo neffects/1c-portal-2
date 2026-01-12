@@ -136,6 +136,79 @@ Back-compat: all new fields **optional** so existing stored definitions validate
 
 The LinkField (and any other “related entity” menus/lists/cards) should pull related-entity data from **local TanStack DB** that is hydrated from the relevant **entity type bundle**.
 
+### 1.1) Manifest-driven background hydration (“app.json” as client hydration state)
+
+To make “relation display” work reliably offline and without ad-hoc API lookups, we need a deterministic way for the client to know **which bundles should be present locally**.
+
+This plan treats **“app.json” as a client-side hydration state document** (stored in TanStack DB and/or localStorage), derived from server manifests:
+
+- **Purpose**: record which manifest(s) are active for the current session and which bundle versions are expected/loaded.
+- **Not a new server API**: we can use the already-existing manifest endpoints to discover bundles; the “app.json” naming here is about the client’s persisted state.
+
+#### Manifests we should treat as distinct inputs
+
+The worker already exposes separate manifests by audience/scope:
+
+- **Public**: `GET /manifests/public`
+- **Authenticated (platform)**: `GET /manifests/platform` (returns authenticated manifest when logged in, otherwise public)
+- **Organization (members/admin)**: `GET /manifests/org/:orgId`
+
+For client hydration, treat these as **separate manifests**, because they correspond to different bundle namespaces:
+
+- public bundles → `/manifests/bundles/public/:typeId`
+- authenticated bundles → `/manifests/bundles/platform/:typeId`
+- org bundles → `/manifests/bundles/org/:orgId/:typeId`
+
+#### Bundle sets to load (per your requirement)
+
+For an authenticated client (org member/admin):
+
+- **Always** hydrate all **public bundles** for all public entity types (from the public manifest).
+- **Also** hydrate all **org bundles** for the user’s selected/active organization (from the org manifest).
+
+For a public (unauthenticated) client:
+
+- Hydrate **public manifest + all public bundles**.
+
+For a superadmin client:
+
+- Hydrate **public bundles** (same as everyone).
+- Hydrate **authenticated/platform bundles** (platform manifest + platform bundles).
+- Additionally, when acting “within” an organization (e.g. editing org-scoped entities), hydrate the **org bundles for the currently selected org**.
+  - Keep this “selected org” explicit (already part of auth store behavior).
+
+#### Proposed client hydration state shape (stored locally)
+
+In TanStack DB (or localStorage initially), store a single record like:
+
+```ts
+type HydrationScopeKey =
+  | 'public'
+  | 'platform'
+  | `org:${string}`; // orgId
+
+interface ClientHydrationState {
+  updatedAt: string;
+  /** Which scopes are enabled for this session */
+  enabledScopes: HydrationScopeKey[];
+  /** Last fetched manifest versions by scope */
+  manifestVersionByScope: Record<HydrationScopeKey, number | undefined>;
+  /** Expected bundle versions by scope+typeId */
+  bundleVersionByScopeAndType: Record<string, number | undefined>; // `${scope}|${typeId}`
+}
+```
+
+Hydration algorithm:
+
+1. Determine enabled scopes:
+   - unauth → `['public']`
+   - auth (non-super) → `['public', `org:${currentOrgId}`]`
+   - superadmin → `['public', 'platform']` plus optional `org:${currentOrgId}`
+2. Fetch each scope’s manifest (in background).
+3. For each manifest entity type, ensure the matching bundle exists locally at the required version; if not, fetch bundle and upsert entities into TanStack DB collection(s).
+
+This is the foundation needed for relation displays to work consistently, because LinkField/search and rendering will query TanStack DB instead of hitting `/api/entities/search`.
+
 Proposed DB model (exact API depends on how TanStack DB is integrated in this repo):
 
 - **Collection**: `entitiesByType[typeId]`
@@ -254,9 +327,10 @@ as steps 5 and 6 under “Frontend plan (web)”, since this plan is frontend-on
 ## Implementation order (recommended)
 
 1. **Shared types + schemas**: add `referenceDisplayConfig` + `linkDisplayOverride`
-2. **Web**: implement frontend display builder + `EntityReferenceLabel`
-3. **Web**: update LinkField to search/resolve via TanStack DB hydrated from bundles
-4. **Web**: TypeBuilder “Reference Display” editor UI (defaults)
-5. **Web**: Link field override UI in FieldEditorModal
-6. **Tests** across shared + web
+2. **Web**: implement manifest-driven TanStack DB hydration (“app.json” client hydration state + background bundle loading)
+3. **Web**: implement frontend display builder + `EntityReferenceLabel`
+4. **Web**: update LinkField to search/resolve via TanStack DB hydrated from bundles
+5. **Web**: TypeBuilder “Reference Display” editor UI (defaults)
+6. **Web**: Link field override UI in FieldEditorModal
+7. **Tests** across shared + web
 

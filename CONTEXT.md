@@ -398,6 +398,7 @@ The project includes automated security testing with:
 - 🔲 Relation field display options (menu/list/card) for linked entities (2026-01-12)
   - See `PLAN-relation-field-display-options.md`
   - Frontend-only rendering using local bundle data (TanStack DB), with only schema params added to entity/field definitions
+  - Hydration plan: use separate manifest scopes (public/platform/org) to background-load bundles into TanStack DB
   <!-- Plan-only note added by agent; no implementation shipped yet. -->
 
 ### Recently Completed (CI/CD & Testing)
