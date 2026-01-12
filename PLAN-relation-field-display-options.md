@@ -222,11 +222,16 @@ To meet the UX requirement (“fast first paint” on **home** and **deeplinks**
 
 1) **App config** (always fetched first)
 
-- Used for: feature flags (offline mode), branding, sync intervals, and deciding which hydration scopes are applicable.
+- **Purpose (per requirement)**: provide **branding and core bootstrap info** needed to start the app and begin hydration, including **entity type names/identifiers** so bundles can be fetched.
+- Concretely, the startup config payload should include:
+  - branding (siteName, logos, theme)
+  - sync defaults (poll intervals, stale times)
+  - a **minimal entity type index** sufficient to kick off bundle fetches:
+    - at least `{ id, slug, name, pluralName }` per type (public scope)
+    - optionally, per-scope lists (public vs platform) if we want to avoid fetching multiple manifests up-front
+- The app config is **not** the source of truth for bundle versions; manifests remain the authoritative versioning/delta mechanism.
 - Server storage already exists by type (`config/app.json` and `private/platform/app.json`), but the web app currently only fetches branding via `/public/branding`.
-- Plan expectation: the client can fetch a single “startup config” payload early. (Implementation can be either:
-  - a dedicated endpoint returning `AppConfig` (recommended), or
-  - composing existing endpoints (`/public/branding` + a config endpoint) into one client call.)
+- Plan expectation: the client can fetch a single “startup config” payload early (either a single endpoint or composed from existing endpoints).
 
 2) **Route payload file** (route-specific JSON)
 
