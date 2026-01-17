@@ -35,6 +35,7 @@ import type {
  * Caches in memory for performance (config rarely changes)
  * 
  * Ensures 'public' membership key is always present in the config.
+ * Auto-creates default config if missing (for fresh deployments).
  */
 let cachedConfig: AppConfig | null = null;
 
@@ -44,9 +45,15 @@ export async function loadAppConfig(bucket: R2Bucket): Promise<AppConfig> {
     return ensurePublicKeyPresent(cachedConfig);
   }
   
-  const config = await readJSON<AppConfig>(bucket, getAppConfigPath());
+  let config = await readJSON<AppConfig>(bucket, getAppConfigPath());
+  
   if (!config) {
-    throw new Error('App config not found');
+    // Auto-initialize default config if missing
+    console.warn('[Config] App config not found in R2, auto-creating default config');
+    console.warn('[Config] This is expected on first run but should not happen in production');
+    config = createDefaultAppConfig();
+    await writeJSON(bucket, getAppConfigPath(), config);
+    console.log('[Config] Default app config created at:', getAppConfigPath());
   }
   
   // Ensure public key is always present
@@ -54,6 +61,77 @@ export async function loadAppConfig(bucket: R2Bucket): Promise<AppConfig> {
   
   cachedConfig = configWithPublic;
   return configWithPublic;
+}
+
+/**
+ * Create default app config for auto-initialization
+ * Matches the structure in apps/worker/src/config/app.json
+ */
+function createDefaultAppConfig(): AppConfig {
+  return {
+    version: '1.0.0',
+    environment: 'development',
+    apiBaseUrl: 'http://localhost:8787',
+    r2PublicUrl: 'http://localhost:8787/assets',
+    features: {
+      alerts: true,
+      offlineMode: true,
+      realtime: false,
+      darkMode: true
+    },
+    branding: {
+      rootOrgId: 'root001',
+      siteName: '1C Portal',
+      defaultTheme: 'light',
+      logoUrl: '/logo.svg'
+    },
+    sync: {
+      bundleRefreshInterval: 300000,
+      staleTime: 60000,
+      gcTime: 86400000
+    },
+    auth: {
+      magicLinkExpiry: 600,
+      sessionDuration: 604800
+    },
+    membershipKeys: {
+      keys: [
+        {
+          id: 'public',
+          name: 'Public',
+          description: 'Accessible to everyone without authentication',
+          requiresAuth: false,
+          order: 0
+        },
+        {
+          id: 'platform',
+          name: 'Platform',
+          description: 'All authenticated platform users',
+          requiresAuth: true,
+          order: 1
+        },
+        {
+          id: 'member',
+          name: 'Member',
+          description: 'Full member organization users',
+          requiresAuth: true,
+          order: 2
+        }
+      ],
+      organizationTiers: [
+        {
+          id: 'platform',
+          name: 'Platform Tier',
+          grantedKeys: ['public', 'platform']
+        },
+        {
+          id: 'full_member',
+          name: 'Full Member',
+          grantedKeys: ['public', 'platform', 'member']
+        }
+      ]
+    }
+  };
 }
 
 /**
