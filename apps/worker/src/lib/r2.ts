@@ -271,6 +271,14 @@ export function getOrgAdminBundlePath(orgId: string, typeId: string): string {
 }
 
 /**
+ * Get path for global admin bundle (draft + deleted entities)
+ * Path: bundles/{keyId}/admin/{typeId}.json
+ */
+export function getGlobalAdminBundlePath(keyId: MembershipKeyId, typeId: string): string {
+  return `bundles/${keyId}/admin/${typeId}.json`;
+}
+
+/**
  * Get path for app config
  */
 export function getAppConfigPath(): string {

@@ -30,7 +30,7 @@ import {
   readJSON, writeJSON, listFiles, deleteFile,
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath, 
   getEntityTypePath, getOrgPermissionsPath, getBundlePath,
-  getOrgMemberBundlePath, getOrgAdminBundlePath
+  getOrgMemberBundlePath, getOrgAdminBundlePath, getGlobalAdminBundlePath
 } from '../../lib/r2';
 import { regenerateEntityBundles, loadAppConfig } from '../../lib/bundle-invalidation';
 import { upsertSlugIndex, deleteSlugIndex } from '../../lib/slug-index';
@@ -1350,6 +1350,40 @@ superEntityRoutes.get('/entities',
   if (platformBundle) {
     console.log('[SuperEntities] Loaded platform bundle with', platformBundle.entities.length, 'entities');
     for (const entity of platformBundle.entities) {
+      if (!seenEntityIds.has(entity.id)) {
+        seenEntityIds.add(entity.id);
+        const listItem = bundleEntityToListItem(entity, null);
+        listItem.visibility = 'authenticated';
+        items.push(listItem);
+      }
+    }
+  }
+  
+  // Load global admin bundles (draft + deleted entities) for public and platform
+  // Admin bundles include all draft/deleted entities regardless of visibility
+  console.log('[SuperEntities] Loading global admin bundles for type:', query.typeId);
+  
+  const publicAdminBundlePath = getGlobalAdminBundlePath('public', query.typeId);
+  const publicAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicAdminBundlePath);
+  if (publicAdminBundle) {
+    console.log('[SuperEntities] Loaded public admin bundle with', publicAdminBundle.entities.length, 'entities');
+    for (const entity of publicAdminBundle.entities) {
+      if (!seenEntityIds.has(entity.id)) {
+        seenEntityIds.add(entity.id);
+        const listItem = bundleEntityToListItem(entity, null);
+        // Global entities in admin bundles could be from public or platform paths
+        // Default to 'authenticated' for draft/deleted (they're not truly public until published)
+        listItem.visibility = 'authenticated';
+        items.push(listItem);
+      }
+    }
+  }
+  
+  const platformAdminBundlePath = getGlobalAdminBundlePath('platform', query.typeId);
+  const platformAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformAdminBundlePath);
+  if (platformAdminBundle) {
+    console.log('[SuperEntities] Loaded platform admin bundle with', platformAdminBundle.entities.length, 'entities');
+    for (const entity of platformAdminBundle.entities) {
       if (!seenEntityIds.has(entity.id)) {
         seenEntityIds.add(entity.id);
         const listItem = bundleEntityToListItem(entity, null);

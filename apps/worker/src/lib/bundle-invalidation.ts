@@ -20,7 +20,7 @@ import { R2_PATHS } from '@1cc/shared';
 import { 
   readJSON, writeJSON, listFiles,
   getBundlePath, getManifestPath, getEntityTypePath, getOrgPermissionsPath,
-  getOrgMemberBundlePath, getOrgAdminBundlePath,
+  getOrgMemberBundlePath, getOrgAdminBundlePath, getGlobalAdminBundlePath,
   getOrgMemberManifestPath, getOrgAdminManifestPath,
   getAppConfigPath
 } from './r2';
@@ -407,6 +407,11 @@ export async function regenerateEntityBundles(
         
         console.log('[BundleInvalidation] Regenerating global bundle for key:', keyId);
         await regenerateGlobalBundle(bucket, keyId, entityTypeId, entityType, config);
+        
+        // Also regenerate admin bundle (draft + deleted entities)
+        // Admin bundles include all draft/deleted entities regardless of visibility
+        console.log('[BundleInvalidation] Regenerating global admin bundle for key:', keyId);
+        await regenerateGlobalAdminBundle(bucket, keyId, entityTypeId, entityType);
       }
     }
 
@@ -530,6 +535,116 @@ async function collectEntitiesFromPrefix(
       updatedAt: projectedEntity.updatedAt
     });
   }
+}
+
+/**
+ * Regenerate a global admin bundle for a specific membership key (draft + deleted entities)
+ * Admin bundles include ALL draft/deleted entities, not filtered by membership key visibility
+ */
+async function regenerateGlobalAdminBundle(
+  bucket: R2Bucket,
+  keyId: MembershipKeyId,
+  typeId: string,
+  entityType: EntityType
+): Promise<EntityBundle> {
+  console.log('[BundleInvalidation] Generating global admin bundle:', keyId, typeId);
+  
+  // Collect draft and deleted entities from global storage (public/ and platform/)
+  // Admin bundles include ALL draft/deleted entities regardless of visibility
+  const adminEntities: BundleEntity[] = [];
+  
+  // Check public entities
+  const publicPrefix = `${R2_PATHS.PUBLIC}entities/`;
+  const publicFiles = await listFiles(bucket, publicPrefix);
+  const publicLatestFiles = publicFiles.filter(f => f.endsWith('/latest.json'));
+  
+  for (const latestFile of publicLatestFiles) {
+    const entityIdMatch = latestFile.match(/entities\/([^\/]+)\/latest\.json/);
+    if (!entityIdMatch) continue;
+    
+    const entityId = entityIdMatch[1];
+    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile);
+    if (!latestPointer) continue;
+    
+    // Admin bundles only include draft and deleted entities
+    if (latestPointer.status !== 'draft' && latestPointer.status !== 'deleted') continue;
+    
+    // Read entity version
+    const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
+    const entity = await readJSON<Entity>(bucket, versionPath);
+    
+    if (!entity || entity.entityTypeId !== typeId) continue;
+    
+    // Create bundle entity - NOTE: Do NOT include entityTypeId
+    // Admin bundles include all fields (no field projection)
+    const bundleEntity: BundleEntity = {
+      id: entity.id,
+      status: entity.status,
+      name: entity.name || `Entity ${entity.id}`,
+      slug: entity.slug || '',
+      data: entity.data, // Dynamic fields only (does NOT include entityTypeId)
+      updatedAt: entity.updatedAt
+    };
+    
+    adminEntities.push(bundleEntity);
+  }
+  
+  // Check platform entities
+  const platformPrefix = `${R2_PATHS.PLATFORM}entities/`;
+  const platformFiles = await listFiles(bucket, platformPrefix);
+  const platformLatestFiles = platformFiles.filter(f => f.endsWith('/latest.json'));
+  
+  for (const latestFile of platformLatestFiles) {
+    const entityIdMatch = latestFile.match(/entities\/([^\/]+)\/latest\.json/);
+    if (!entityIdMatch) continue;
+    
+    const entityId = entityIdMatch[1];
+    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile);
+    if (!latestPointer) continue;
+    
+    // Admin bundles only include draft and deleted entities
+    if (latestPointer.status !== 'draft' && latestPointer.status !== 'deleted') continue;
+    
+    // Read entity version
+    const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
+    const entity = await readJSON<Entity>(bucket, versionPath);
+    
+    if (!entity || entity.entityTypeId !== typeId) continue;
+    
+    // Skip if already added from public prefix (avoid duplicates)
+    if (adminEntities.some(e => e.id === entity.id)) continue;
+    
+    // Create bundle entity - NOTE: Do NOT include entityTypeId
+    // Admin bundles include all fields (no field projection)
+    const bundleEntity: BundleEntity = {
+      id: entity.id,
+      status: entity.status,
+      name: entity.name || `Entity ${entity.id}`,
+      slug: entity.slug || '',
+      data: entity.data, // Dynamic fields only (does NOT include entityTypeId)
+      updatedAt: entity.updatedAt
+    };
+    
+    adminEntities.push(bundleEntity);
+  }
+  
+  // Create bundle - NOTE: Use typeId (NOT entityTypeId) to identify the entity type
+  const bundle: EntityBundle = {
+    typeId, // Bundle-level type identifier (NOT entityTypeId)
+    typeName: entityType.pluralName,
+    generatedAt: new Date().toISOString(),
+    version: Date.now(),
+    entityCount: adminEntities.length,
+    entities: adminEntities
+  };
+  
+  // Save bundle
+  const bundlePath = getGlobalAdminBundlePath(keyId, typeId);
+  await writeJSON(bucket, bundlePath, bundle);
+  
+  console.log('[BundleInvalidation] Generated global admin bundle with', adminEntities.length, 'entities at:', bundlePath);
+  
+  return bundle;
 }
 
 /**
