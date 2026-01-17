@@ -38,7 +38,9 @@ import { OrgManager } from './pages/superadmin/OrgManager';
 import { OrgWizard } from './pages/superadmin/OrgWizard';
 import { ApprovalQueue } from './pages/superadmin/ApprovalQueue';
 import { Branding } from './pages/superadmin/Branding';
+import { MembershipKeys } from './pages/superadmin/MembershipKeys';
 import { EntityImportExport } from './pages/superadmin/EntityImportExport';
+import { BundleManagement } from './pages/superadmin/BundleManagement';
 import { SuperEntitiesList } from './pages/superadmin/SuperEntitiesList';
 import { SuperEntityTypeView } from './pages/superadmin/SuperEntityTypeView';
 import { SuperEntityView } from './pages/superadmin/SuperEntityView';
@@ -82,6 +84,10 @@ export function App() {
             {/* Authenticated routes */}
             <Route path="/alerts" component={AlertsPage} />
             
+            {/* Browse routes - for browsing entities by type */}
+            <Route path="/browse/:typeSlug/:entitySlug" component={EntityDetailPage} />
+            <Route path="/browse/:typeSlug" component={BrowsePage} />
+            
             {/* Admin routes */}
             <Route path="/admin" component={AdminDashboard} />
             <Route path="/admin/:orgSlug/entities" component={EntitiesList} />
@@ -101,7 +107,9 @@ export function App() {
             <Route path="/super/orgs/new" component={OrgWizard} />
             <Route path="/super/approvals" component={ApprovalQueue} />
             <Route path="/super/branding" component={Branding} />
+            <Route path="/super/membership-keys" component={MembershipKeys} />
             <Route path="/super/import-export" component={EntityImportExport} />
+            <Route path="/super/bundles" component={BundleManagement} />
             <Route path="/super/entities" component={SuperEntitiesList} />
             <Route path="/super/entity-types/:typeId" component={SuperEntityTypeView} />
             <Route path="/super/entities/new" component={SuperEntityEditor} />

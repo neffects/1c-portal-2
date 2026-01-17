@@ -48,9 +48,12 @@ export interface ManifestEntityType {
  * - public/bundles/{typeId}.json
  * - platform/bundles/{typeId}.json
  * - private/orgs/{orgId}/bundles/{typeId}.json
+ * 
+ * NOTE: Bundles use `typeId` (NOT `entityTypeId`) to identify the entity type.
+ * This is intentional - bundles are scoped by type, so the type ID is stored at the bundle level.
  */
 export interface EntityBundle {
-  /** Entity type ID */
+  /** Entity type ID (NOT entityTypeId - this is the bundle-level type identifier) */
   typeId: string;
   /** Entity type name */
   typeName: string;
@@ -66,17 +69,22 @@ export interface EntityBundle {
 
 /**
  * Entity entry in a bundle (compact format)
+ * Note: Only entities have versions - bundles don't track entity versions
+ * 
+ * IMPORTANT: BundleEntity does NOT include entityTypeId.
+ * The entity type is identified by the parent EntityBundle.typeId field.
+ * This keeps bundle entities compact and avoids redundancy.
  */
 export interface BundleEntity {
   /** Entity ID */
   id: string;
-  /** Entity version */
-  version: number;
   /** Current status */
   status: EntityStatus;
+  /** Entity name (common property, top-level) */
+  name: string;
   /** URL slug */
   slug: string;
-  /** Entity data fields */
+  /** Entity dynamic data fields (does NOT include name, slug, or entityTypeId) */
   data: Record<string, unknown>;
   /** When last updated (ISO 8601) */
   updatedAt: string;

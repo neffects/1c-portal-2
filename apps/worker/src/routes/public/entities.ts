@@ -6,9 +6,10 @@
 
 import { Hono } from 'hono';
 import type { Env, Variables } from '../../types';
-import { readJSON, getEntityLatestPath, getEntityVersionPath, getEntityStubPath } from '../../lib/r2';
+import { readJSON, getEntityLatestPath, getEntityVersionPath, getEntityStubPath, getEntityTypePath } from '../../lib/r2';
 import { NotFoundError } from '../../middleware/error';
-import type { Entity, EntityStub, EntityLatestPointer, VisibilityScope } from '@1cc/shared';
+import { projectFieldsForKey, loadAppConfig } from '../../lib/bundle-invalidation';
+import type { Entity, EntityStub, EntityLatestPointer, VisibilityScope, EntityType } from '@1cc/shared';
 
 export const publicEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -54,8 +55,17 @@ publicEntityRoutes.get('/entities/:id', async (c) => {
     throw new NotFoundError('Entity', entityId);
   }
   
+  // Project fields for 'public' membership key
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entity.entityTypeId));
+  if (!entityType) {
+    throw new NotFoundError('Entity Type', entity.entityTypeId);
+  }
+  
+  const config = await loadAppConfig(c.env.R2_BUCKET);
+  const projectedEntity = projectFieldsForKey(entity, entityType, 'public', config);
+  
   return c.json({
     success: true,
-    data: entity
+    data: projectedEntity
   });
 });

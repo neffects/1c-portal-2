@@ -127,16 +127,26 @@ export function isValidEntityId(id: string): boolean {
 
 /**
  * Generate template row for CSV export
+ * 
+ * Name and Slug are always system fields (entity.name, entity.slug).
+ * Entity types may have Name/Slug fields with auto-generated IDs - these are skipped.
  */
 export function generateTemplateRow(entityType: EntityType): Record<string, string> {
   const template: Record<string, string> = {
     id: '[7-char alphanumeric or empty for new]',
     organizationId: '[7-char org ID or empty for global]',
+    name: '[entity name - required]',
     slug: '[lowercase-with-hyphens or auto-generated]',
     visibility: '[public|authenticated|members]'
   };
   
+  // Add dynamic fields from entity type (excluding Name and Slug - they're system fields)
   for (const field of entityType.fields) {
+    // Skip Name and Slug fields - they're always system fields regardless of their ID
+    if (field.id === 'name' || field.id === 'slug' || field.name === 'Name' || field.name === 'Slug') {
+      continue;
+    }
+    
     template[field.id] = getFieldTemplateHint(field);
   }
   
@@ -174,22 +184,43 @@ function escapeCSVValue(value: unknown): string {
 
 /**
  * Generate CSV string from entities
+ * 
+ * Expects entities to have name and slug stored at the top level (not in data).
+ * Entity types should use standard field IDs 'name' and 'slug' for Name/Slug fields.
  */
 export function generateCSV(entities: Entity[], entityType: EntityType): string {
   const lines: string[] = [];
   
+  // Find any fields that are actually Name or Slug fields (by name, regardless of ID)
+  // These may have auto-generated IDs like 'field_0_...' but should be treated as system fields
+  const nameFieldId = entityType.fields.find(f => f.name === 'Name')?.id;
+  const slugFieldId = entityType.fields.find(f => f.name === 'Slug')?.id;
+  
+  // Debug: log field mapping
+  console.log('[CSV Export] Entity type fields:', entityType.fields.map(f => ({ id: f.id, name: f.name })));
+  console.log('[CSV Export] Name field ID:', nameFieldId, 'Slug field ID:', slugFieldId);
+  
   // Create header row with friendly names
   // Format: "Field Name|field_id" to preserve mapping for parsing
-  // System fields: Id, Organization, Slug, Visibility (read from entity top-level, not data)
-  const headerRow: string[] = ['Id|id', 'Organization|organizationId', 'Slug|slug', 'Visibility|visibility'];
+  // System fields: Id, Organization, Name, Slug, Visibility (read from entity top-level, not data)
+  const headerRow: string[] = ['Id|id', 'Organization|organizationId', 'Name|name', 'Slug|slug', 'Visibility|visibility'];
   const fieldMapping: Array<{ name: string; id: string; isSystemField: boolean }> = [
     { name: 'Id', id: 'id', isSystemField: true },
     { name: 'Organization', id: 'organizationId', isSystemField: true },
+    { name: 'Name', id: 'name', isSystemField: true },
     { name: 'Slug', id: 'slug', isSystemField: true },
     { name: 'Visibility', id: 'visibility', isSystemField: true }
   ];
   
+  // Add dynamic fields from entity type (excluding Name and Slug - they're system fields)
   for (const field of entityType.fields) {
+    // Skip Name and Slug fields - they're always system fields regardless of their ID
+    // Check both field.id and field.name to handle legacy entity types with auto-generated IDs
+    if (field.id === 'name' || field.id === 'slug' || field.name === 'Name' || field.name === 'Slug') {
+      console.log('[CSV Export] Skipping system field:', field.name, field.id);
+      continue;
+    }
+    
     headerRow.push(`${field.name}|${field.id}`);
     fieldMapping.push({ name: field.name, id: field.id, isSystemField: false });
   }
@@ -205,7 +236,13 @@ export function generateCSV(entities: Entity[], entityType: EntityType): string 
   lines.push(templateValues.join(','));
   
   // Row 3+: Entity data
+  console.log('[CSV Export] Generating CSV for', entities.length, 'entities');
+  if (entities.length === 0) {
+    console.warn('[CSV Export] WARNING: No entities provided to export');
+  }
+  
   for (const entity of entities) {
+    console.log('[CSV Export] Processing entity:', entity.id, entity.name);
     const rowValues = fieldMapping.map(f => {
       if (f.isSystemField) {
         // System fields: read from entity top-level
@@ -215,20 +252,31 @@ export function generateCSV(entities: Entity[], entityType: EntityType): string 
         if (f.id === 'organizationId') {
           return escapeCSVValue(entity.organizationId || '');
         }
+        if (f.id === 'name') {
+          // Name: prefer entity.name, fall back to entity.data[nameFieldId] for legacy entities
+          const name = entity.name || (nameFieldId ? entity.data?.[nameFieldId] as string : '');
+          return escapeCSVValue(name || '');
+        }
         if (f.id === 'slug') {
-          return escapeCSVValue(entity.slug);
+          // Slug: prefer entity.slug, fall back to entity.data[slugFieldId] for legacy entities
+          const slug = entity.slug || (slugFieldId ? entity.data?.[slugFieldId] as string : '');
+          return escapeCSVValue(slug || '');
         }
         if (f.id === 'visibility') {
           return escapeCSVValue(entity.visibility);
         }
       }
-      // Data fields: read from entity.data
-      return escapeCSVValue(entity.data[f.id]);
+      // Data fields: read from entity.data (safely handle undefined data)
+      return escapeCSVValue(entity.data?.[f.id]);
     });
     lines.push(rowValues.join(','));
   }
   
-  return lines.join('\n');
+  console.log('[CSV Export] Generated CSV with', lines.length, 'total lines (2 header rows +', entities.length, 'data rows)');
+  
+  const csvContent = lines.join('\n');
+  console.log('[CSV Export] Final CSV length:', csvContent.length, 'characters');
+  return csvContent;
 }
 
 /**
@@ -351,11 +399,8 @@ export function parseCSV(text: string, skipTemplateRow = true): CSVParseResult {
         const fieldId = headerToFieldId.get(rawHeader) || rawHeader.toLowerCase();
         const value = values[j] !== undefined ? values[j] : '';
         
-        // Skip empty values
-        if (value === '') {
-          continue;
-        }
-        
+        // Always include the value, even if empty (important for required fields like name/slug)
+        // This allows us to detect empty values vs missing columns
         row[fieldId] = value;
       }
       
@@ -386,8 +431,8 @@ export function parseCSV(text: string, skipTemplateRow = true): CSVParseResult {
 export function convertToImportData(
   data: Record<string, unknown>[],
   entityType: EntityType
-): { entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; organizationId?: string | null; id?: string }>; errors: ImportError[] } {
-  const entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; organizationId?: string | null; id?: string }> = [];
+): { entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; name?: string; organizationId?: string | null; id?: string }>; errors: ImportError[] } {
+  const entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; name?: string; organizationId?: string | null; id?: string }> = [];
   const errors: ImportError[] = [];
   
   for (let i = 0; i < data.length; i++) {
@@ -395,6 +440,7 @@ export function convertToImportData(
     const entityData: Record<string, unknown> = {};
     let visibility: string | undefined;
     let slug: string | undefined;
+    let name: string | undefined;
     let organizationId: string | null | undefined;
     let id: string | undefined;
     
@@ -415,9 +461,9 @@ export function convertToImportData(
     }
     // Note: Empty ID means create new entity (ID will be generated)
     
-    // Extract organizationId if present
-    if (row.organizationid !== undefined || row.organizationId !== undefined) {
-      const orgValue = (row.organizationid || row.organizationId) as string;
+    // Extract organizationId if present (header is 'Organization|organizationId')
+    const orgValue = row['organizationId'] as string | undefined;
+    if (orgValue !== undefined) {
       if (orgValue === '' || orgValue === null) {
         // Empty or null means global entity
         organizationId = null;
@@ -450,11 +496,33 @@ export function convertToImportData(
       }
     }
     
+    // Extract name if present (common property, will be moved to top-level by backend)
+    // Name is REQUIRED - validate it exists and is not empty
+    const nameValue = row.name !== undefined && row.name !== null ? String(row.name).trim() : '';
+    
+    if (!nameValue || nameValue === '') {
+      // Name is missing or empty - this is an error (but continue to collect other errors)
+      errors.push({
+        rowIndex: i,
+        csvRow: i + 3,
+        field: 'name',
+        message: 'Name is required and cannot be empty',
+        source: 'validation'
+      });
+      // Don't set name - will skip adding to entities at the end
+    } else {
+      name = nameValue;
+      // Include in entityData so backend can extract it
+      entityData.name = name;
+    }
+    
     // Extract or generate slug
     if (row.slug && typeof row.slug === 'string' && row.slug.trim() !== '') {
       const slugValue = row.slug.trim();
       if (isValidSlug(slugValue)) {
         slug = slugValue;
+        // Also include in entityData so backend can extract it
+        entityData.slug = slug;
       } else {
         errors.push({
           rowIndex: i,
@@ -468,8 +536,14 @@ export function convertToImportData(
     // Note: If slug is not provided, it will be auto-generated from name on the server
     // We check if name is available and pre-generate it for client-side preview
     
-    // Process each field
+    // Process each field (skip name and slug as they're common properties already handled)
     for (const field of entityType.fields) {
+      // Skip Name and Slug fields - they're always system fields regardless of their ID
+      // Entity types may have Name/Slug with auto-generated IDs like 'field_0_...'
+      if (field.id === 'name' || field.id === 'slug' || field.name === 'Name' || field.name === 'Slug') {
+        continue;
+      }
+      
       const rawValue = row[field.id];
       
       // Skip undefined values (will use defaults or be caught by required check)
@@ -501,11 +575,25 @@ export function convertToImportData(
     }
     
     // Auto-generate slug from name if not provided
-    if (!slug && entityData.name && typeof entityData.name === 'string') {
-      slug = generateSlug(entityData.name);
+    if (!slug && name) {
+      slug = generateSlug(name);
+      entityData.slug = slug;
     }
     
-    entities.push({ data: entityData, visibility, slug, organizationId, id });
+    // Only add entity if name is valid (required field)
+    // This ensures we collect all validation errors before skipping
+    if (!name || name.trim() === '') {
+      // Name validation error already logged above, skip this entity
+      continue;
+    }
+    
+    // Ensure name and slug are in entityData for backend extraction
+    entityData.name = name;
+    if (slug) {
+      entityData.slug = slug;
+    }
+    
+    entities.push({ data: entityData, visibility, slug, name, organizationId, id });
   }
   
   return { entities, errors };
@@ -661,8 +749,13 @@ export function validateImportData(
   for (let i = 0; i < entities.length; i++) {
     const entity = entities[i];
     
-    // Check required fields
+    // Check required fields (skip Name/Slug - they're handled as system fields)
     for (const field of entityType.fields) {
+      // Skip Name and Slug fields - they're system fields validated separately
+      if (field.id === 'name' || field.id === 'slug' || field.name === 'Name' || field.name === 'Slug') {
+        continue;
+      }
+      
       if (field.required) {
         const value = entity.data[field.id];
         if (value === undefined || value === null || value === '') {
@@ -677,8 +770,13 @@ export function validateImportData(
       }
     }
     
-    // Validate field constraints
+    // Validate field constraints (skip Name/Slug)
     for (const field of entityType.fields) {
+      // Skip Name and Slug fields - they're system fields
+      if (field.id === 'name' || field.id === 'slug' || field.name === 'Name' || field.name === 'Slug') {
+        continue;
+      }
+      
       const value = entity.data[field.id];
       if (value === undefined || value === null) continue;
       
@@ -791,6 +889,7 @@ export function downloadJSON(entities: Entity[], entityType: EntityType, filenam
     entities: entities.map(e => ({
       id: e.id,
       organizationId: e.organizationId,
+      name: e.name,
       slug: e.slug,
       visibility: e.visibility,
       data: e.data

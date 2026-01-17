@@ -122,13 +122,14 @@ export function AlertsPage() {
               {flags.map(flag => {
                 const entity = getEntity(flag.entityId);
                 const entityType = getEntityType(flag.entityTypeId);
-                const name = entity?.data?.name as string || `Entity ${flag.entityId}`;
+                // Entity name is a top-level property, not inside data
+                const name = entity?.name || `Entity ${flag.entityId}`;
                 
                 return (
                   <div key={flag.entityId} class="card p-4 flex items-center justify-between">
                     <div>
                       <a 
-                        href={entity && entityType ? `/browse/${entityType.slug}/${entity.slug}` : '#'}
+                        href={entity && entityType ? `/browse/${entityType.slug}/${entity.slug || ''}` : '#'}
                         class="font-medium text-surface-900 dark:text-surface-100 hover:text-primary-600 dark:hover:text-primary-400"
                       >
                         {name}

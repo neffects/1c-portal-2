@@ -137,8 +137,8 @@ export function EntityViewCore({ basePath, entity, entityType, orgName }: Entity
   const descriptionField = findFieldByNameOrId(['description', 'desc']);
   const slugField = findFieldByNameOrId(['slug', 'url-slug']);
   
-  // Get values using the actual field IDs
-  const name = nameField ? (entity.data[nameField.id] as string) || 'Untitled' : 'Untitled';
+  // Name is stored at top-level (common property)
+  const name = entity.name || 'Untitled';
   const description = descriptionField ? (entity.data[descriptionField.id] as string) || '' : '';
   
   const statusDisplay = getStatusDisplay(entity.status);

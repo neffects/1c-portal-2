@@ -13,6 +13,7 @@ import { readJSON, getEntityLatestPath, getEntityVersionPath, getEntityTypePath,
 import { readSlugIndex } from '../../lib/slug-index';
 import { findOrgBySlug } from '../../lib/organizations';
 import { NotFoundError } from '../../middleware/error';
+import { projectFieldsForKey, loadAppConfig } from '../../lib/bundle-invalidation';
 import type { Entity, EntityType, VisibilityScope, EntityLatestPointer } from '@1cc/shared';
 
 export const deepLinkRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -115,9 +116,13 @@ deepLinkRoutes.get('/:orgSlug/:typeSlug/:entitySlug', async (c) => {
     }, 404);
   }
   
+  // Project fields for 'public' membership key
+  const config = await loadAppConfig(c.env.R2_BUCKET);
+  const projectedEntity = projectFieldsForKey(entity, entityType, 'public', config);
+  
   return c.json({
     success: true,
-    data: entity
+    data: projectedEntity
   });
 });
 
@@ -164,7 +169,7 @@ deepLinkRoutes.get('/:orgSlug/:typeSlug', async (c) => {
     }, 404);
   }
   
-  // Get public bundle for this type (contains all public entities)
+  // Get public bundle for this type (contains all public entities with field projection)
   const bundlePath = getBundlePath('public', entityType.id);
   const bundle = await readJSON<{ entities: Array<{ id: string; slug: string; data: Record<string, unknown> }> }>(c.env.R2_BUCKET, bundlePath);
   

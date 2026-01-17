@@ -12,7 +12,7 @@ import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
 import { OrgWizard } from './OrgWizard';
-import type { OrganizationListItem, Organization, OrganizationMembership } from '@1cc/shared';
+import type { OrganizationListItem, Organization, OrganizationMembership, MembershipKeyDefinition } from '@1cc/shared';
 
 // Tab type for edit modal
 type EditTab = 'settings' | 'members';
@@ -49,6 +49,11 @@ export function OrgManager() {
   const [editDomainWhitelist, setEditDomainWhitelist] = useState<string[]>([]);
   const [editAllowSelfSignup, setEditAllowSelfSignup] = useState(false);
   const [editNewDomain, setEditNewDomain] = useState('');
+  const [editMembershipKey, setEditMembershipKey] = useState<string>('');
+  
+  // Membership keys state
+  const [membershipKeys, setMembershipKeys] = useState<MembershipKeyDefinition[]>([]);
+  const [loadingMembershipKeys, setLoadingMembershipKeys] = useState(false);
   
   // Member management state
   const [members, setMembers] = useState<OrganizationMembership[]>([]);
@@ -130,12 +135,16 @@ export function OrgManager() {
         setEditDomainWhitelist(org.settings?.domainWhitelist || []);
         setEditAllowSelfSignup(org.settings?.allowSelfSignup || false);
         setEditNewDomain('');
+        setEditMembershipKey(org.membershipKey || 'public');
         
         // Also load members for this org
         loadOrgMembers(orgId);
         
         // Load system users for email autocomplete
         loadAllSystemUsers();
+        
+        // Load membership keys
+        loadMembershipKeys();
         
         console.log('[OrgManager] Organization loaded for editing:', org.name);
       } else {
@@ -402,6 +411,31 @@ export function OrgManager() {
   }
   
   /**
+   * Load membership keys configuration
+   */
+  async function loadMembershipKeys() {
+    setLoadingMembershipKeys(true);
+    try {
+      const response = await api.get('/api/super/config/membership-keys') as {
+        success: boolean;
+        data?: { keys: MembershipKeyDefinition[] };
+        error?: { message: string };
+      };
+      
+      if (response.success && response.data) {
+        setMembershipKeys(response.data.keys);
+        console.log('[OrgManager] Loaded', response.data.keys.length, 'membership keys');
+      } else {
+        console.error('[OrgManager] Failed to load membership keys:', response.error);
+      }
+    } catch (err) {
+      console.error('[OrgManager] Error loading membership keys:', err);
+    } finally {
+      setLoadingMembershipKeys(false);
+    }
+  }
+  
+  /**
    * Save organization edits
    */
   async function saveOrgEdit() {
@@ -415,6 +449,7 @@ export function OrgManager() {
       const response = await api.patch(`/api/organizations/${editingOrg.id}`, {
         name: editName,
         slug: editSlug,
+        membershipKey: editMembershipKey || 'public',
         profile: {
           description: editDescription || undefined
         },
@@ -484,6 +519,7 @@ export function OrgManager() {
             <thead class="bg-surface-50 dark:bg-surface-800">
               <tr>
                 <th class="text-left px-4 py-3 text-sm font-medium text-surface-500">Organization</th>
+                <th class="text-left px-4 py-3 text-sm font-medium text-surface-500">Membership Key</th>
                 <th class="text-left px-4 py-3 text-sm font-medium text-surface-500">Members</th>
                 <th class="text-left px-4 py-3 text-sm font-medium text-surface-500">Entities</th>
                 <th class="text-left px-4 py-3 text-sm font-medium text-surface-500">Created</th>
@@ -499,6 +535,11 @@ export function OrgManager() {
                       <p class="font-medium text-surface-900 dark:text-surface-100">{org.name}</p>
                       <p class="text-sm text-surface-500">/{org.slug}</p>
                     </div>
+                  </td>
+                  <td class="px-4 py-3">
+                    <code class="text-sm bg-surface-100 dark:bg-surface-700 px-2 py-1 rounded font-mono">
+                      {org.membershipKey || 'public'}
+                    </code>
                   </td>
                   <td class="px-4 py-3 text-surface-600 dark:text-surface-400">
                     {org.memberCount}
@@ -694,6 +735,35 @@ export function OrgManager() {
                           placeholder="Brief description of this organization..."
                           disabled={editSaving}
                         />
+                      </div>
+                      
+                      {/* Membership Key */}
+                      <div>
+                        <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1">
+                          Membership Key <span class="text-red-500">*</span>
+                        </label>
+                        {loadingMembershipKeys ? (
+                          <div class="flex items-center gap-2 py-2">
+                            <span class="i-lucide-loader-2 animate-spin text-primary-500"></span>
+                            <span class="text-sm text-surface-500">Loading membership keys...</span>
+                          </div>
+                        ) : (
+                          <select
+                            value={editMembershipKey || 'public'}
+                            onChange={(e) => setEditMembershipKey((e.target as HTMLSelectElement).value)}
+                            class="input w-full"
+                            disabled={editSaving}
+                          >
+                            {membershipKeys.map(key => (
+                              <option key={key.id} value={key.id}>
+                                {key.name} {key.requiresAuth && '(Requires Auth)'}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <p class="text-xs text-surface-500 mt-1">
+                          Determines which membership keys are granted to users in this organization. Higher order keys grant access to more content.
+                        </p>
                       </div>
                       
                       {/* Domain Whitelist */}

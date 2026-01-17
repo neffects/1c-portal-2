@@ -59,11 +59,39 @@ Draft → Pending → Published → Archived
        Draft (rejected)
 ```
 
-### Visibility Scopes
+**Status Transitions:**
+- `submitForApproval`: draft → pending
+- `approve`: pending → published
+- `reject`: pending → draft
+- `archive`: published → archived
+- `restore`: archived/deleted → draft
+- `delete`: draft → deleted (soft delete - entity data preserved)
+- `superDelete`: Any status → permanently removed (superadmin only - hard delete)
 
-- **Public**: Accessible to everyone, SEO indexable
-- **Authenticated**: All logged-in users on the platform
-- **Members**: Organization members only
+**Note**: `superDelete` is a superadmin-only action that permanently removes all entity data from R2 storage. It can be called from any status and cannot be undone.
+
+### Membership Keys (Access Control)
+
+The system uses **config-driven membership keys** defined in `app.json` to control content visibility:
+
+- **Membership Keys**: Defined in `app.json` under `membershipKeys.keys`
+  - Each key has: `id`, `name`, `description`, `requiresAuth`, `order`
+  - Default keys: `public`, `platform`, `member`
+  - **The `public` key is always present by default** - it cannot be deleted and will be automatically added if missing from config
+  
+- **Organization Tiers**: Defined in `app.json` under `membershipKeys.organizationTiers`
+  - Each tier grants specific membership keys to users
+  - `platform` tier: grants `public` + `platform` keys
+  - `full_member` tier: grants `public` + `platform` + `member` keys
+
+- **Entity Type Visibility**: Each entity type has `visibleTo` array (membership key IDs)
+  - Controls which keys can see entities of this type
+  - Field-level visibility: `fieldVisibility` overrides per field
+
+- **Bundle Structure**: Bundles are generated per membership key
+  - Global: `bundles/{keyId}/{typeId}.json` (published, field-projected)
+  - Org member: `bundles/org/{orgId}/member/{typeId}.json` (published, all fields)
+  - Org admin: `bundles/org/{orgId}/admin/{typeId}.json` (draft+deleted, all fields)
 
 ### Multi-Organization Authentication Architecture
 
@@ -100,13 +128,28 @@ Auth Flow:
 ### Storage Structure (R2)
 
 ```
-config/app.json           # App configuration
-public/                   # Public content
-platform/                 # Platform content
+config/app.json           # App configuration (includes membershipKeys config)
+public/                   # Public content (entities with public visibility)
+platform/                 # Platform content (entities with authenticated visibility)
 private/orgs/{orgId}/     # Organization-specific content
 private/user-stubs/       # User-org membership stubs (for fast lookup)
 stubs/{entityId}.json     # Entity ownership lookup
 secret/ROOT.json          # Root config
+
+bundles/
+├── {keyId}/{typeId}.json          # Global bundles per membership key (published, field-projected)
+│   ├── public/{typeId}.json       # Public bundle
+│   ├── platform/{typeId}.json     # Platform bundle
+│   └── member/{typeId}.json       # Member bundle
+└── org/{orgId}/
+    ├── member/{typeId}.json       # Org published entities (all fields)
+    └── admin/{typeId}.json        # Org draft+deleted entities (all fields)
+
+manifests/
+├── {keyId}/site.json              # Global manifests per membership key
+└── org/{orgId}/
+    ├── member/site.json           # Org member manifest
+    └── admin/site.json            # Org admin manifest
 ```
 
 ## API Endpoints
@@ -144,9 +187,10 @@ Slug indexes stored at `stubs/slug-index/{orgId}-{typeSlug}-{entitySlug}.json` f
 - `GET /:orgSlug/:typeSlug/:entitySlug` - Deep link to entity
 
 ### Authenticated Routes
-- `GET /api/manifests/site` - Get platform manifest
-- `GET /api/bundles/:typeId` - Get platform entity bundle
+- `GET /api/manifests/site` - Get manifest for user's highest membership key
+- `GET /api/bundles/:typeId` - Get bundle for user's highest membership key (field-projected)
 - `GET /api/entities` - List entities (platform content)
+- `GET /api/entities/:id` - Get entity by ID (field-projected based on user's keys)
 - `GET /api/entity-types` - List entity types
 
 ### User Routes
@@ -171,20 +215,32 @@ Slug indexes stored at `stubs/slug-index/{orgId}-{typeSlug}-{entitySlug}.json` f
 ### Organization-Scoped Routes
 - `POST /api/orgs/:orgId/entities` - Create entity in org
 - `GET /api/orgs/:orgId/entities` - List entities in org
+- `GET /api/orgs/:orgId/entities/:id` - Get entity by ID in org (all fields for org's own content)
 - `GET /api/orgs/:orgId/users` - List users in org
-- `GET /api/orgs/:orgId/manifests/site` - Get org manifest
-- `GET /api/orgs/:orgId/bundles/:typeId` - Get org bundle
+- `GET /api/orgs/:orgId/manifests/site` - Get org manifest (member or admin based on role)
+- `GET /api/orgs/:orgId/bundles/:typeId` - Get org bundle (member or admin based on role)
+
+### Entity Type Routes
+- `GET /api/entity-types` - List entity types (authenticated users)
+- `GET /api/entity-types/:id` - Get entity type definition (authenticated users)
+- `PATCH /api/entity-types/:id` - Update entity type (superadmin only)
+- `POST /api/entity-types` - Create entity type (superadmin only)
+- `DELETE /api/entity-types/:id` - Archive entity type (superadmin only, soft delete)
+- `DELETE /api/entity-types/:id/hard` - Permanently delete entity type (superadmin only, hard delete)
 
 ### Superadmin Routes
 - `POST /api/super/organizations` - Create organization (alternative endpoint)
 - `GET /api/super/organizations` - List all organizations (alternative endpoint)
-- `POST /api/super/entity-types` - Create entity type
+- `POST /api/super/entity-types` - Create entity type (alternative endpoint)
 - `PATCH /api/super/platform/branding` - Update platform branding
 - `POST /api/super/entities` - Create entity (supports global entities)
 - `GET /api/super/entities` - List entities (all orgs + global)
 - `GET /api/super/entities/export` - Export entities for a type (query: typeId, status?, organizationId?)
 - `POST /api/super/entities/bulk-import` - Atomic bulk import entities with versioning support
-- `GET /api/super/entities/:id` - Get any entity by ID
+- `GET /api/super/entities/:id` - Get any entity by ID (global or org-scoped)
+- `PATCH /api/super/entities/:id` - Update any entity by ID (global or org-scoped, draft status only)
+- `POST /api/super/entities/:id/transition` - Status transition for any entity (delete, archive, approve, superDelete, etc.)
+- `GET /api/super/bundles` - List all bundles with metadata (size, generation time, version)
 
 ### Import/Export (Superadmin)
 
@@ -199,6 +255,14 @@ The import/export functionality allows superadmins to bulk manage entities:
   - Supports versioning: empty `id` creates new, existing `id` creates new version
   - Per-row `organizationId` and `slug` override request-level defaults
   - Validates slug uniqueness per (entityType, org, slug) for new entities
+
+- **Import Preview** (2026-01-15):
+  - After file upload and validation, shows a preview table of entities to be imported
+  - Displays: row number (CSV row), name, slug, and up to 5 additional fields from the entity type
+  - Highlights rows with validation errors in red
+  - Shows status badge (Ready/Error) for each entity
+  - Helps users verify data before importing
+  - Location: `apps/web/src/pages/superadmin/EntityImportExport.tsx`
 
 **Note (2026-01-14)**: Fixed missing `/api/organizations` endpoint:
 - **Bug fix**: Added missing mount for `organizationRoutes` in `/api` routes aggregator. The routes existed in `routes/organizations.ts` but were not mounted, causing 404 errors when the frontend called `GET /api/organizations`. The routes are now properly mounted at `/api/organizations`.
@@ -219,11 +283,28 @@ The import/export functionality allows superadmins to bulk manage entities:
 - `PATCH /api/entity-types/:id` - Update type
 
 ### Entities
-- `POST /api/entities` - Create entity
-- `GET /api/entities` - List entities
-- `GET /api/entities/:id` - Get entity
+- `GET /api/entities` - List entities (authenticated platform content)
+- `GET /api/entities/:id` - Get entity (with access control)
 - `PATCH /api/entities/:id` - Update entity (atomic merge)
 - `POST /api/entities/:id/transition` - Status transition
+
+**Note**: For creating entities:
+- Org admins: Use `POST /api/orgs/:orgId/entities`
+- Superadmins: Use `POST /api/super/entities` (supports global entities with `organizationId: null`)
+
+**Entity Request Structure** (Updated 2026-01-15):
+- `name` and `slug` are **top-level required fields** in create/update requests
+- `data` contains **only dynamic fields** defined by the entity type
+- Example create request:
+  ```json
+  {
+    "entityTypeId": "abc123",
+    "name": "My Entity",
+    "slug": "my-entity",
+    "data": { "description": "...", "customField": "..." }
+  }
+  ```
+- Entity storage: `entity.name` and `entity.slug` are stored at top-level, `entity.data` contains dynamic fields only
 
 ### Users
 - `POST /api/users/invite` - Invite user
@@ -436,6 +517,23 @@ The project includes automated security testing with:
   - If a collision occurs, a numeric suffix is added (e.g., "name_2", "name_3")
   - IDs are limited to 50 characters and only contain lowercase letters, numbers, and underscores
   - This makes entity data more readable and easier to query
+- ✅ Manual Field ID editing in TypeBuilder (2026-01-15):
+  - Field ID input added to FieldEditorModal - auto-populates from field name (e.g., "Product Description" → "product_description")
+  - Users can manually edit the field ID for new fields if they want a different ID
+  - Field ID is a required field with red asterisk indicator
+  - Real-time uniqueness validation - shows error message if ID already exists in the entity type
+  - Save button disabled until field ID is valid (non-empty and unique)
+  - Field ID shown in the fields list for each field (displayed as monospace code badge)
+  - Existing fields have their IDs locked to prevent data corruption
+  - Built-in fields (name, slug) also have locked IDs
+- ✅ Built-in field protection in TypeBuilder (2026-01-15):
+  - Built-in fields (name, slug) cannot be edited - all inputs are disabled in the field editor modal
+  - Edit button is disabled for built-in fields with tooltip "Built-in fields cannot be edited"
+  - Built-in fields can still be reordered within their section (reorder buttons enabled)
+  - Built-in fields are visually distinguished with primary color styling and "Built-in" badge
+  - Save button is disabled when editing built-in fields to prevent accidental changes
+  - Built-in fields cannot be removed (delete button hidden)
+  - Field editor modal prevents saving changes to built-in fields even if somehow triggered
 - ✅ Polished admin EntityView redesign (2026-01-11):
   - EntityView.tsx now displays entities as clean, published content pages
   - Hero header with organization name as label, large title, and status indicator (colored dot)
@@ -529,14 +627,13 @@ The project includes automated security testing with:
     - Previously relied on sync store manifest which only includes types with published entities
     - Superadmins now see accurate count of all defined entity types regardless of entity count
   - Fixed approval queue to show entity names and organization names (NEF-6):
-    - Approval queue now displays `entity.data.name` instead of entity IDs
+    - Approval queue now displays `entity.name` (top-level property)
     - Fetches and displays organization names alongside entity information
     - Backend API includes `organizationId` in `EntityListItem` response
       - Standardized entity name field convention across the system:
-      - All entity types now use `data.name` consistently (not `entity_name`, `title`, etc.)
+      - All entities have `name` and `slug` as top-level properties (not in `data`)
       - TypeBuilder creates fields with standard IDs: `name` and `slug`
-      - EntityEditor strictly checks `fieldId === 'name'` for auto-slug generation
-      - Enforces convention: all entities must have `data.name` field
+      - EntityEditor handles both standard and auto-generated field IDs
   - Entity slug auto-generation (NEF-7):
     - Slug field is automatically generated from the name field when creating new entities
     - Slug field is editable - users can manually edit the auto-generated slug if needed
@@ -576,6 +673,124 @@ The project includes automated security testing with:
     - EntityView falls back to this endpoint when org-scoped fails with 404
     - Consistent with API route structure: `/api/*` = authenticated platform content
 
+  - Superadmin hard delete (superDelete) action (2026-01-15):
+    - **Feature**: Added `superDelete` action for superadmins to permanently remove entities
+    - **Endpoint**: `POST /api/super/entities/:id/transition` with `action: 'superDelete'`
+    - **Behavior**:
+      - Can be called from ANY entity status (bypasses normal state machine validation)
+      - Permanently deletes all R2 files: entity stub, all version files, latest pointer
+      - Deletes slug index if entity was public
+      - Regenerates bundles to remove entity from all bundle files
+      - Returns `{ deleted: true, entityId, action: 'superDelete', message: '...' }`
+    - **Security**: Only available through `/api/super/*` routes (requires superadmin auth)
+    - **Difference from soft delete**: Regular `delete` changes status to 'deleted' (recoverable with `restore`), `superDelete` removes data permanently
+    - **Frontend UI**: 
+      - **SuperEntityEditor**: "Hard Delete (Permanent)" button in Actions sidebar
+        - Available for ALL entity statuses (not just draft)
+        - Double confirmation required: first confirm dialog, then must type entity name
+        - Styled with red border and skull icon to indicate danger
+      - **SuperEntityTypeView** (entity type listing): Bulk hard delete in multi-select toolbar
+        - Select multiple entities with checkboxes
+        - "Hard Delete" button appears in bulk actions toolbar (alongside "Archive Selected")
+        - Confirmation modal requires typing "DELETE" to confirm
+        - Permanently deletes all selected entities
+
+  - Multi-select bulk delete in SuperEntityTypeView (2026-01-15):
+    - **Feature**: Added multi-select with bulk delete (archive) functionality
+    - **Location**: `/super/entity-types/:typeId` page for superadmins
+    - **Component updates**:
+      - `EntitiesTableCore.tsx`: Added checkbox column, select all, bulk actions toolbar
+      - `SuperEntityTypeView.tsx`: Added bulk delete handler calling transition API
+    - **Behavior**:
+      - Checkbox column appears when `onBulkDelete` prop is provided
+      - "Select all" checkbox in header selects/deselects all entities on current page
+      - Bulk actions toolbar shows when items are selected (count, clear, delete buttons)
+      - Confirmation modal before deletion with entity count
+      - Uses `POST /api/super/entities/:id/transition` with action `archive` for each entity
+      - Selection is cleared when entities list changes (pagination, filters)
+    - **Styling**: Selected rows have light primary background highlight
+    - **Error handling**: Uses `Promise.allSettled` to continue even if some fail
+
+  - Entity name display fix (2026-01-15):
+    - **Fixed TypeListingPage.tsx**: Interface was missing `name` property - entities were showing IDs
+    - **Fixed Alerts.tsx**: Was accessing `entity?.data?.name` instead of `entity?.name`
+    - **Root cause**: Entity `name` and `slug` are top-level common properties, not stored in `data`
+
+  - Entity Type hard delete (superadmin only) (2026-01-15):
+    - **Feature**: Added hard delete endpoint for permanently removing entity types
+    - **Endpoint**: `DELETE /api/entity-types/:id/hard`
+    - **Query parameters**:
+      - `deleteEntities` (boolean, optional): If true, also deletes all entities of this type
+    - **Requirements**: 
+      - If `deleteEntities` is false/omitted: Entity type must have NO entities associated with it (prevents orphaned data)
+      - If `deleteEntities` is true: All entities of this type will be permanently deleted first, then the type
+    - **Behavior**:
+      - Validates no entities exist of this type (returns error with count if entities exist and deleteEntities=false)
+      - Only counts entities that have actual data (not orphaned stubs)
+      - If `deleteEntities=true`: Deletes all entities of this type using same logic as superDelete (all version files, stubs, slug indexes, regenerates bundles)
+      - Cleans up any orphaned stubs (stubs without entity data) before deletion
+      - Permanently deletes entity type definition file from R2
+      - Removes type from all organization permissions (viewable/creatable arrays)
+      - Regenerates all manifests (global and org) to reflect the deletion
+      - **Manifest regeneration**: Uses `regenerateAllManifests()` which lists entity type files, so deleted types are automatically excluded from all manifests
+      - Returns `{ message: '...', typeId, typeName }`
+    - **Security**: Only available to superadmins
+    - **Difference from soft delete**: Regular `DELETE /api/entity-types/:id` sets `isActive: false` (recoverable), hard delete removes data permanently
+    - **Orphaned stub handling**: The count function verifies entities have actual data (latest pointer exists), and hard delete automatically cleans up orphaned stubs
+    - **Frontend UI** (TypeBuilder.tsx):
+      - "Hard Delete" button in Actions section (only shown when editing existing type)
+      - Confirmation modal requires typing exact entity type name to confirm
+      - Shows entity count when opening modal
+      - **Checkbox option**: "Also delete all X entities of this type" (only shown if type has entities)
+      - Shows warnings about what will be deleted
+      - Displays entity count in warning list if checkbox is checked
+      - Redirects to types list after successful deletion
+
+  - Bulk Content Deletion (superadmin only) (2026-01-15):
+    - **Feature**: Added bulk deletion tool to permanently delete all entities and entity types
+    - **Location**: Superadmin Dashboard (`/super`)
+    - **UI**:
+      - "Bulk Content Deletion" card with red border and warning styling
+      - "Delete All Content" button opens modal
+      - Modal shows list of all entity types with checkboxes
+      - Displays entity count for each type
+      - Shows total entities and entity types to be deleted for selected types
+      - Requires typing "DELETE ALL" to confirm
+      - Progress bar and status updates during deletion (includes both entities and types)
+    - **Behavior**:
+      - Fetches all entities for each selected type using `/api/entities?typeId=...`
+      - Uses pagination to get all entities (100 per page)
+      - Deletes each entity using `POST /api/super/entities/:id/transition` with `action: 'superDelete'`
+      - After all entities are deleted, hard deletes the entity types using `DELETE /api/entity-types/:id/hard`
+      - Shows progress: current/total count (entities + types) and current item being processed
+      - Handles errors gracefully - continues deleting even if some fail
+      - Reports success/failure counts for both entities and types after completion
+      - Reloads entity types to update counts after deletion
+    - **Security**: Only available to superadmins, requires explicit confirmation
+    - **Warning**: This is a destructive operation that permanently deletes:
+      - All entity data, versions, and files
+      - The selected entity types themselves
+      - All associated permissions and manifest references
+    - **All entity lists now correctly display names** from top-level property
+
+  - Debug Panel for client state inspection (2026-01-15):
+    - **Hidden debug UI**: Toggle with `Ctrl+Shift+D` (or `Cmd+Shift+D` on Mac)
+    - **Location**: `apps/web/src/components/DebugPanel.tsx`, integrated into Layout
+    - **Shows**:
+      - Auth state (user ID, email, current org, role, session expiry)
+      - Platform manifest status and entity types
+      - Platform bundles (loaded, version, entity count, generation time)
+      - Org manifest and org bundles (for authenticated users)
+      - Branding/app config (site name, colors, URLs)
+      - LocalStorage cache status (what's cached)
+      - Environment info (URL, online status)
+    - **Actions**:
+      - Force Sync: Triggers immediate sync with server
+      - Clear Cache: Clears all cached data (manifest, bundles, localStorage)
+      - Reload Branding: Reloads branding config from server
+    - **Status indicators**: Green (loaded), amber (partial/warning), red (error)
+    - **Helpful for debugging**: Why bundles aren't loading, auth state issues, cache problems
+
   - Entity duplicate detection (2026-01-11):
     - Added duplicate name/slug detection in entity create/edit forms
     - Scope: Same entity type + same organization (two different types CAN share slug)
@@ -595,15 +810,49 @@ The project includes automated security testing with:
       - Slug duplicate: Red error with link, blocks save button (blocking)
     - **Note**: Global entities (organizationId: null) skip duplicate checking since they don't belong to an org
 
+  - SuperEntityEditor API endpoint fix (2026-01-15):
+    - **Bug**: SuperEntityEditor was calling `/api/entities/:id` which only works for global entities
+    - **Fix**: Changed to use `/api/super/entities/:id` for GET, PATCH, and transition operations
+    - **Added endpoints**:
+      - `PATCH /api/super/entities/:id` - Update any entity (global or org-scoped)
+      - `POST /api/super/entities/:id/transition` - Status transitions (delete, archive, approve, etc.)
+    - **Location**: `apps/worker/src/routes/super/entities.ts`
+    - **Note**: `/api/entities/:id` returns 404 for org-scoped entities (by design)
+    - **Superadmin endpoints**: Can access/modify any entity (global or org-scoped)
+    - **Delete functionality**: Uses soft delete via 'delete' transition (status = 'deleted')
+
+  - Membership keys bundle system (2026-01-15) - **COMPLETED**:
+    - **Config-driven membership keys**: Keys defined in `app.json` under `membershipKeys`
+    - **Organization tiers**: Each org has `membershipTier` that grants specific keys
+    - **Entity type visibility**: `visibleTo` array specifies which keys can see the type
+    - **Field-level visibility**: `fieldVisibility` allows per-field access control
+    - **Bundle structure**: Global bundles per key (field-projected), org bundles (all fields)
+    - **Field projection**: Entities returned with only fields visible to user's membership keys
+    - **Security**: `/files/*` endpoint restricted to `uploads/` prefix only
+    - **Config validation**: `visibleTo`, `fieldVisibility`, and `membershipTier` validated against app.json
+    - **Middleware**: `requireMembershipKey()` available for route-level access control
+    - **Frontend sync**: Updated to fetch org-specific bundles for authenticated org members/admins
+    - **Removed legacy**: `apps/worker/src/routes/manifests.ts` replaced by new route files
+    - **Frontend cleanup**: Updated obsolete API references:
+      - `EntityEditor.tsx`, `SuperEntityEditor.tsx`: Changed `/manifests/bundles/org/...` to `/api/orgs/:orgId/bundles/:typeId`
+      - `SuperEntityTypeView.tsx`: Changed `defaultVisibility` to `visibleTo`
+      - `csv.test.ts`: Updated mock data to use `visibleTo` field
+
   - Bundle auto-regeneration system (2026-01-11):
     - **Problem**: Bundles and manifests were only regenerated on-demand (lazy) or during publish/unpublish
     - **Solution**: Centralized bundle-invalidation.ts service for synchronous regeneration
     - **Location**: `apps/worker/src/lib/bundle-invalidation.ts`
     - **Key functions**:
-      - `regenerateEntityBundles(bucket, typeId, orgId, visibility)` - Regenerate bundles when entity changes
-      - `regenerateManifestsForType(bucket, typeId)` - Regenerate manifests when entity type changes
+      - `regenerateEntityBundles(bucket, typeId, orgId, config)` - Regenerate bundles when entity changes
+      - `regenerateManifestsForType(bucket, typeId, config)` - Regenerate manifests when entity type changes
       - `regenerateOrgManifest(bucket, orgId)` - Regenerate org manifest
-      - `regenerateOrgBundles(bucket, orgId, typeIds)` - Regenerate all bundles for an org
+    - **Bundle creation triggers** (2026-01-XX):
+      - Bundles are automatically created when they logically should exist, even if empty:
+        - When entity types are created (if they have `visibleTo` configured)
+        - When organizations are created (for all entity types)
+        - When entity type `visibleTo` is updated
+      - This ensures bundles exist immediately, not just when entities are created
+      - `regenerateOrgBundles(bucket, orgId, typeIds, config)` - Regenerate all bundles for an org
     - **Trigger events**:
       - Entity create/update/delete (entities.ts, orgs/entities.ts)
       - Entity status transitions (publish/unpublish)
@@ -616,7 +865,7 @@ The project includes automated security testing with:
     - **Changes by file**:
       - `entities.ts`: POST /, PATCH /:id, POST /:id/transition, POST /bulk-import
       - `orgs/entities.ts`: POST /entities, PATCH /entities/:id, POST /entities/:id/transition (new routes)
-      - `entity-types.ts`: POST /, PATCH /:id, DELETE /:id
+      - `entity-types.ts`: POST /, PATCH /:id, DELETE /:id, DELETE /:id/hard (hard delete)
       - `organizations.ts`: PATCH /:id/permissions
     - **Synchronous regeneration**: All regeneration is synchronous for consistency
 
@@ -629,3 +878,67 @@ The project includes automated security testing with:
 - Bundles are pre-aggregated for fast client sync
 - Org bundles include ALL entity statuses for admin visibility
 - Bundle regeneration is synchronous and centralized in `bundle-invalidation.ts`
+
+### Bundle Data Structure
+
+Bundles use `typeId` (NOT `entityTypeId`) to identify the entity type:
+
+```typescript
+interface EntityBundle {
+  typeId: string;        // Entity type ID (NOT entityTypeId)
+  typeName: string;
+  generatedAt: string;
+  version: number;
+  entityCount: number;
+  entities: BundleEntity[];
+}
+
+interface BundleEntity {
+  id: string;
+  status: EntityStatus;
+  name: string;
+  slug: string;
+  data: Record<string, unknown>;  // Does NOT include entityTypeId
+  updatedAt: string;
+  // NOTE: entityTypeId is NOT included - type is identified by parent bundle's typeId
+}
+```
+
+**Important**: 
+- `EntityBundle` uses `typeId` at the bundle level (not `entityTypeId`)
+- `BundleEntity` does NOT include `entityTypeId` - the type is identified by the parent bundle's `typeId` field
+- This keeps bundle entities compact and avoids redundancy
+
+### Entity Data Structure
+
+Entity `name` and `slug` are **common properties stored at the top level** of the Entity object (not in `.data`):
+
+```typescript
+interface Entity {
+  id: string;
+  name: string;           // Common property (top-level) - REQUIRED
+  slug: string;           // Common property (top-level) - REQUIRED
+  data: Record<string, unknown>;  // Dynamic fields only (NOT name/slug)
+  // ... other fields
+}
+```
+
+**Important**: Name and Slug are always top-level Entity properties (`entity.name`, `entity.slug`), never dynamic fields. The CSV export/import:
+- Skips any fields named "Name" or "Slug" from entity type fields (regardless of field ID)
+- Reads name/slug from `entity.name`/`entity.slug`, with fallback to `entity.data[fieldId]` for legacy entities
+- Entity types should NOT include Name/Slug as fields - they are implicit system fields
+
+Related code paths:
+- CSV export (`apps/web/src/lib/csv.ts:generateCSV`) - skips fields by `field.name === 'Name' || field.name === 'Slug'`
+- CSV import (`apps/web/src/lib/csv.ts:convertToImportData`) - same skip logic
+- Backend validation (`apps/worker/src/lib/entity-validation.ts:validateEntityData`) - skips Name/Slug fields
+- API entity listing (`apps/worker/src/routes/api/entities.ts`)
+- Entity create/update routes enforce storing `name` and `slug` at top-level
+
+**Frontend display**: All entity lists and cards must access `entity.name` directly, NOT `entity.data.name`. Key files that display entity names:
+- `EntityCard.tsx`: Uses `entity.name || \`Entity ${entity.id}\``
+- `EntitiesTableCore.tsx`: Uses `entity.name || entity.id`
+- `EntityDetail.tsx`, `EntityView.tsx`, `EntityViewCore.tsx`: Uses `entity.name || 'Untitled'`
+- `TypeListingPage.tsx`: Uses `entity.name || \`Entity ${entity.id}\``
+- `Alerts.tsx`: Uses `entity?.name || \`Entity ${flag.entityId}\``
+- `ApprovalQueue.tsx`: Uses `entity.name || \`Entity ${entity.id}\``

@@ -27,10 +27,10 @@ import {
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath,
   getEntityTypePath, getOrgPermissionsPath, getUserMembershipPath
 } from '../lib/r2';
-import { regenerateEntityBundles } from '../lib/bundle-invalidation';
+import { regenerateEntityBundles, loadAppConfig, getUserHighestMembershipKey, projectFieldsForKey } from '../lib/bundle-invalidation';
 import { upsertSlugIndex, deleteSlugIndex } from '../lib/slug-index';
 import { R2_PATHS } from '@1cc/shared';
-import { createEntityId, createSlug } from '../lib/id';
+import { createEntityId } from '../lib/id';
 import { requireOrgAdmin } from '../middleware/auth';
 import { NotFoundError, ForbiddenError, ValidationError, AppError } from '../middleware/error';
 import { isValidTransition, getAllowedTransitions } from '@1cc/xstate-machines';
@@ -53,7 +53,7 @@ entityRoutes.post('/',
   async (c) => {
   console.log('[Entities] Creating entity');
   
-  const { entityTypeId, data, visibility, organizationId: requestedOrgId } = c.req.valid('json');
+  const { entityTypeId, name, slug, data, visibility, organizationId: requestedOrgId } = c.req.valid('json');
   const userId = c.get('userId')!;
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
@@ -112,11 +112,12 @@ entityRoutes.post('/',
     throw new NotFoundError('Entity Type', entityTypeId);
   }
   
-  // Validate each field individually before creating entity
-  const validatedData = validateEntityFields(data, entityType);
+  // Validate dynamic fields (name and slug are already validated by schema)
+  const entityData = data ? validateEntityFields(data, entityType) : {};
   
-  // Final validation to ensure required fields are present
-  validateEntityData(validatedData, entityType);
+  // Remove name and slug from entityData if accidentally included
+  delete entityData.name;
+  delete entityData.slug;
   
   // Determine visibility (public, authenticated, members)
   // For global entities, force visibility to 'public' or 'authenticated' (not 'members')
@@ -129,23 +130,10 @@ entityRoutes.post('/',
   
   // Generate entity ID
   const entityId = createEntityId();
-  const entityName = (data.name as string) || `Entity ${entityId}`;
-  
-  // Use provided slug if valid, otherwise auto-generate from name
-  // Slug is stored at entity.slug (top-level), not in entity.data
-  let slug: string;
-  if (validatedData.slug && typeof validatedData.slug === 'string') {
-    // User provided a slug - use it and remove it from data
-    slug = validatedData.slug;
-    delete validatedData.slug;
-  } else {
-    // No slug provided - auto-generate from name
-    slug = createSlug(entityName);
-  }
   
   const now = new Date().toISOString();
   
-  // Create entity
+  // Create entity with name and slug at top-level (from request body)
   const entity: Entity = {
     id: entityId,
     entityTypeId,
@@ -153,8 +141,9 @@ entityRoutes.post('/',
     version: 1,
     status: 'draft',
     visibility: finalVisibility,
-    slug,
-    data: validatedData,
+    name: name.trim(),
+    slug: slug.trim(),
+    data: entityData, // Dynamic fields only
     createdAt: now,
     updatedAt: now,
     createdBy: userId,
@@ -195,7 +184,7 @@ entityRoutes.post('/',
       c.env.R2_BUCKET,
       targetOrgId,
       entityType.slug,
-      slug,
+      slug.trim(),
       {
         entityId,
         visibility: finalVisibility,
@@ -208,11 +197,12 @@ entityRoutes.post('/',
   console.log('[Entities] Created entity:', entityId);
   
   // Regenerate affected bundles synchronously
+  const config = await loadAppConfig(c.env.R2_BUCKET);
   await regenerateEntityBundles(
     c.env.R2_BUCKET,
     entityTypeId,
     targetOrgId,
-    finalVisibility
+    config
   );
   
   return c.json({
@@ -323,50 +313,42 @@ entityRoutes.get('/',
     // Get entity type to find the name field
     const entityType = await getEntityType(entity.entityTypeId);
     
-    // Extract name field value - try multiple strategies:
-    // 1. Direct entity.data.name (if field ID is 'name')
-    // 2. First field in entity type (typically the name field)
-    // 3. Fallback to entity ID
-    let nameValue: string | undefined;
-    if (entity.data.name) {
-      nameValue = entity.data.name as string;
-    } else if (entityType && entityType.fields.length > 0) {
-      // Use the first field's ID (typically the name field)
-      const nameFieldId = entityType.fields[0].id;
-      nameValue = entity.data[nameFieldId] as string | undefined;
-    }
+    // Name is stored at top-level (common property)
+    const nameValue = entity.name || `Entity ${entity.id}`;
     
-    // Extract description field value similarly
+    // Extract description from dynamic data
     let descriptionValue: string | undefined;
     if (entity.data.description) {
       descriptionValue = entity.data.description as string;
-    } else if (entityType && entityType.fields.length > 1) {
-      // Try second field as description (common pattern)
-      const descFieldId = entityType.fields[1].id;
-      descriptionValue = entity.data[descFieldId] as string | undefined;
+    } else if (entityType && entityType.fields.length > 0) {
+      // Try to find description field
+      const descField = entityType.fields.find(f => f.id === 'description' || f.name?.toLowerCase() === 'description');
+      if (descField) {
+        descriptionValue = entity.data[descField.id] as string | undefined;
+      }
     }
     
     // Filter by search query
     if (query.search) {
       const searchLower = query.search.toLowerCase();
-      const name = (nameValue || '').toLowerCase();
+      const name = nameValue.toLowerCase();
       const description = (descriptionValue || '').toLowerCase();
       
       if (!name.includes(searchLower) && !description.includes(searchLower)) continue;
     }
     
-    const listItem = {
+    const listItem: EntityListItem = {
       id: entity.id,
       entityTypeId: entity.entityTypeId,
       organizationId: entity.organizationId,
-      slug: entity.slug,
+      name: nameValue, // Top-level property
+      slug: entity.slug, // Top-level property
       status: entity.status,
       visibility: entity.visibility,
       data: {
-        name: nameValue || `Entity ${entity.id}`,
-        description: descriptionValue
+        // Only dynamic fields (name is at top-level, not in data)
+        ...(descriptionValue && { description: descriptionValue })
       },
-      version: entity.version,
       updatedAt: entity.updatedAt
     };
     
@@ -519,6 +501,37 @@ entityRoutes.get('/:id',
     throw new NotFoundError('Entity version', `${entityId} v${version}`);
   }
   
+  // Apply field projection based on user's membership key
+  // Skip projection for:
+  // 1. Superadmins (see all fields)
+  // 2. Users viewing their own org's entities (see all fields)
+  const isOwnOrgEntity = userOrgId === stub.organizationId;
+  const isSuperadmin = userRole === 'superadmin';
+  
+  if (!isSuperadmin && !isOwnOrgEntity) {
+    // Get entity type for field visibility config
+    const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entity.entityTypeId));
+    
+    if (entityType) {
+      // Get user's highest membership key and project fields
+      const config = await loadAppConfig(c.env.R2_BUCKET);
+      const highestKey = await getUserHighestMembershipKey(
+        c.env.R2_BUCKET,
+        userOrgId || null,
+        false, // not superadmin (already checked above)
+        config
+      );
+      
+      console.log('[Entities] Projecting fields for key:', highestKey);
+      const projectedEntity = projectFieldsForKey(entity, entityType, highestKey, config);
+      
+      return c.json({
+        success: true,
+        data: projectedEntity
+      });
+    }
+  }
+  
   return c.json({
     success: true,
     data: entity
@@ -605,14 +618,19 @@ entityRoutes.patch('/:id',
     throw new NotFoundError('Entity Type', currentEntity.entityTypeId);
   }
   
-  // Validate each field individually before merging
-  let newData = currentEntity.data;
+  // Get name and slug from top-level request (or keep existing values)
+  const entityName = updates.name !== undefined ? updates.name : currentEntity.name;
+  const entitySlug = updates.slug !== undefined ? updates.slug : currentEntity.slug;
+  
+  // Validate dynamic fields (name and slug are handled above)
+  let entityData = currentEntity.data;
   if (updates.data) {
     const validatedUpdates = validateEntityFields(updates.data, entityType);
-    // Merge only validated fields
-    newData = { ...currentEntity.data, ...validatedUpdates };
-    // Final validation to ensure required fields are still present
-    validateEntityData(newData, entityType);
+    // Remove name and slug from validated updates if accidentally included
+    delete validatedUpdates.name;
+    delete validatedUpdates.slug;
+    entityData = { ...currentEntity.data, ...validatedUpdates };
+    validateEntityData(entityData, entityType);
   }
   
   const newVersion = currentEntity.version + 1;
@@ -620,22 +638,16 @@ entityRoutes.patch('/:id',
   
   // Get the new visibility for the entity
   const newVisibility = updates.visibility || currentEntity.visibility;
+  const trimmedSlug = entitySlug.trim();
   
-  // Extract slug from data if provided (slug is top-level, not in entity.data)
-  // Slug should NOT auto-update from name changes after entity has been saved
-  let newSlug = currentEntity.slug;
-  if (newData.slug && typeof newData.slug === 'string') {
-    newSlug = newData.slug;
-    delete newData.slug; // Remove slug from data (it's stored at top level)
-  }
-  
-  // Create new version
+  // Create new version with name and slug at top-level
   const updatedEntity: Entity = {
     ...currentEntity,
     version: newVersion,
     visibility: newVisibility,
-    slug: newSlug,
-    data: newData,
+    name: entityName.trim(),
+    slug: trimmedSlug,
+    data: entityData, // Dynamic fields only
     updatedAt: now,
     updatedBy: userId
   };
@@ -674,13 +686,14 @@ entityRoutes.patch('/:id',
   await writeJSON(c.env.R2_BUCKET, newLatestPath, newPointer);
   
   // Update slug index if visibility is public and slug or visibility changed
+  const currentSlug = currentEntity.slug;
   if (newVisibility === 'public') {
     // Delete old slug index if slug changed
-    if (currentEntity.slug !== newSlug && currentEntity.visibility === 'public') {
-      await deleteSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, currentEntity.slug);
+    if (currentSlug !== trimmedSlug && currentEntity.visibility === 'public') {
+      await deleteSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, currentSlug);
     }
     // Create/update slug index
-    await upsertSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, newSlug, {
+    await upsertSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, trimmedSlug, {
       entityId,
       visibility: newVisibility,
       organizationId: stub.organizationId,
@@ -688,29 +701,19 @@ entityRoutes.patch('/:id',
     });
   } else if (currentEntity.visibility === 'public' && newVisibility !== 'public') {
     // Visibility changed from public to non-public - delete slug index
-    await deleteSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, currentEntity.slug);
+    await deleteSlugIndex(c.env.R2_BUCKET, stub.organizationId, entityType.slug, currentSlug);
   }
   
   console.log('[Entities] Updated entity:', entityId, 'to v' + newVersion);
   
   // Regenerate affected bundles synchronously
-  // If visibility changed, regenerate bundles for both old and new visibility
+  const config = await loadAppConfig(c.env.R2_BUCKET);
   await regenerateEntityBundles(
     c.env.R2_BUCKET,
     currentEntity.entityTypeId,
     stub.organizationId,
-    newVisibility
+    config
   );
-  
-  // If visibility changed from a different scope, also regenerate old visibility bundle
-  if (currentEntity.visibility !== newVisibility) {
-    await regenerateEntityBundles(
-      c.env.R2_BUCKET,
-      currentEntity.entityTypeId,
-      stub.organizationId,
-      currentEntity.visibility
-    );
-  }
   
   return c.json({
     success: true,
@@ -895,11 +898,12 @@ entityRoutes.post('/:id/transition',
   // This affects bundles when entities become published or are unpublished
   if (newStatus === 'published' || currentStatus === 'published') {
     console.log('[Entities] Triggering bundle regeneration for type:', stub.entityTypeId);
+    const config = await loadAppConfig(c.env.R2_BUCKET);
     await regenerateEntityBundles(
       c.env.R2_BUCKET,
       stub.entityTypeId,
       stub.organizationId,
-      currentEntity.visibility
+      config
     );
   }
   

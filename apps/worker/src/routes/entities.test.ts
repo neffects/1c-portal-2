@@ -206,7 +206,8 @@ describe('Entity Routes', () => {
       expect(body.success).toBe(true);
       expect(body.data.entityTypeId).toBe('type_123');
       expect(body.data.status).toBe('draft');
-      expect(body.data.data.name).toBe('New Entity');
+      expect(body.data.name).toBe('New Entity'); // Name is now at top-level
+      expect(body.data.data.name).toBeUndefined(); // Name should not be in data
     });
     
     it('should create entity successfully for superadmin', async () => {
@@ -416,7 +417,8 @@ describe('Entity Routes', () => {
       expect(body.success).toBe(true);
       expect(body.data.version).toBe(2);
       // Original name preserved, description updated
-      expect(body.data.data.name).toBe('Test Entity');
+      expect(body.data.name).toBe('Test Entity'); // Name is now at top-level
+      expect(body.data.data.name).toBeUndefined(); // Name should not be in data
       expect(body.data.data.description).toBe('Updated description');
     });
     

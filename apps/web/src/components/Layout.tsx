@@ -2,12 +2,14 @@
  * Main Layout Component
  * 
  * Provides the application shell with header, navigation, and footer.
+ * Includes hidden debug panel (toggle with Ctrl+Shift+D).
  */
 
 import { useEffect } from 'preact/hooks';
 import { useAuth } from '../stores/auth';
 import { useSync } from '../stores/sync';
 import { useBranding, loadBranding } from '../stores/branding';
+import { DebugPanel } from './DebugPanel';
 
 interface LayoutProps {
   children: preact.ComponentChildren;
@@ -300,6 +302,8 @@ export function Layout({ children }: LayoutProps) {
         {children}
       </main>
       <Footer />
+      {/* Hidden debug panel - toggle with Ctrl+Shift+D */}
+      <DebugPanel />
     </div>
   );
 }

@@ -227,7 +227,7 @@ export function checkDuplicatesInBundle(
     
     // Check name match (case-insensitive)
     if (normalizedName && !result.nameMatch) {
-      const entityName = (entity.data?.name as string || '').trim().toLowerCase();
+      const entityName = (entity.name || '').trim().toLowerCase();
       if (entityName === normalizedName) {
         console.log('[checkDuplicatesInBundle] Found name match:', entity.id, entityName);
         result.nameMatch = entity;
@@ -235,6 +235,7 @@ export function checkDuplicatesInBundle(
     }
     
     // Check slug match (case-insensitive, though slugs should be lowercase)
+    // Slug is stored at top-level (common property)
     if (normalizedSlug && !result.slugMatch) {
       const entitySlug = (entity.slug || '').trim().toLowerCase();
       if (entitySlug === normalizedSlug) {

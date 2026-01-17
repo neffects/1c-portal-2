@@ -43,12 +43,14 @@ function formatDate(dateStr: string): string {
  * Entity card for listings
  */
 export function EntityCard({ entity, typeSlug, showStatus = false }: EntityCardProps) {
-  const name = (entity.data.name as string) || `Entity ${entity.id}`;
+  // Name and slug are stored at top-level (common properties)
+  const name = entity.name || `Entity ${entity.id}`;
   const description = (entity.data.description as string) || '';
+  const entitySlug = entity.slug || '';
   
   return (
     <a
-      href={`/browse/${typeSlug}/${entity.slug}`}
+      href={`/browse/${typeSlug}/${entitySlug}`}
       class="card-hover p-5 block group"
     >
       <div class="flex items-start justify-between gap-4">

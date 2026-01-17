@@ -10,6 +10,8 @@ import type { Env, Variables } from '../../types';
 import { entityQueryParamsSchema } from '@1cc/shared';
 import { readJSON, listFiles, getEntityLatestPath, getEntityVersionPath, getEntityStubPath, getEntityTypePath } from '../../lib/r2';
 import { R2_PATHS } from '@1cc/shared';
+import { projectFieldsForKey, getUserHighestMembershipKey, loadAppConfig } from '../../lib/bundle-invalidation';
+import { NotFoundError } from '../../middleware/error';
 import type { Entity, EntityStub, EntityLatestPointer, EntityListItem, EntityType, VisibilityScope } from '@1cc/shared';
 
 export const apiEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -26,8 +28,9 @@ apiEntityRoutes.get('/entities',
   const query = c.req.valid('query');
   const userRole = c.get('userRole');
   const userOrgId = c.get('organizationId');
+  const isSuperadmin = userRole === 'superadmin';
   
-  console.log('[API] Query params:', query, 'userRole:', userRole, 'userOrgId:', userOrgId);
+  console.log('[API] Query params:', query, 'userRole:', userRole, 'isSuperadmin:', isSuperadmin, 'userOrgId:', userOrgId);
   
   const items: EntityListItem[] = [];
   
@@ -48,20 +51,51 @@ apiEntityRoutes.get('/entities',
   // Get all entity stubs
   const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
   console.log('[API] Found', stubFiles.length, 'entity stubs');
+  console.log('[API] Listing entities - filters:', {
+    typeId: query.typeId,
+    organizationId: query.organizationId,
+    status: query.status,
+    visibility: query.visibility,
+    search: query.search,
+    userRole,
+    userOrgId
+  });
+  
+  let processedCount = 0;
+  let skippedCount = 0;
+  let addedCount = 0;
   
   for (const stubFile of stubFiles) {
     if (!stubFile.endsWith('.json')) continue;
     
     const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile);
-    if (!stub) continue;
+    if (!stub) {
+      skippedCount++;
+      continue;
+    }
+    
+    processedCount++;
     
     // Filter by entity type if specified
-    if (query.typeId && stub.entityTypeId !== query.typeId) continue;
+    if (query.typeId && stub.entityTypeId !== query.typeId) {
+      skippedCount++;
+      continue;
+    }
+    
+    console.log('[API] Processing stub for entity:', stub.entityId, 'type:', stub.entityTypeId, 'orgId:', stub.organizationId);
     
     // Filter by organization if specified
     if (query.organizationId !== undefined) {
-      if (query.organizationId === null && stub.organizationId !== null) continue;
-      if (query.organizationId !== null && stub.organizationId !== query.organizationId) continue;
+      if (query.organizationId === null && stub.organizationId !== null) {
+        skippedCount++;
+        console.log('[API] Skipping org entity (looking for global)');
+        continue;
+      }
+      if (query.organizationId !== null && stub.organizationId !== query.organizationId) {
+        skippedCount++;
+        console.log('[API] Skipping entity (orgId mismatch)');
+        continue;
+      }
     }
     
     // Access control: authenticated users can see published public/platform entities
@@ -76,27 +110,59 @@ apiEntityRoutes.get('/entities',
         if (latestPointer) break;
       }
     } else {
-      // Org entity - only show if user is member or superadmin
-      if (userRole !== 'superadmin' && userOrgId !== stub.organizationId) {
+      // Org entity - superadmins can see entities from ALL organizations
+      // Regular users can only see entities from their own organization
+      if (!isSuperadmin && userOrgId !== stub.organizationId) {
+        skippedCount++;
+        console.log('[API] Skipping org entity (not member, userRole:', userRole, 'userOrgId:', userOrgId, 'entityOrgId:', stub.organizationId, ')');
         continue;
       }
+      // For superadmins viewing org entities, check members path for that organization
       latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
+      console.log('[API] Checking latest pointer for org entity:', stub.entityId, 'in org:', stub.organizationId, 'at path:', latestPath);
       latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
     }
     
-    if (!latestPointer) continue;
+    if (!latestPointer) {
+      skippedCount++;
+      console.log('[API] No latest pointer found for entity:', stub.entityId);
+      continue;
+    }
     
     // Filter by status if specified
-    if (query.status && latestPointer.status !== query.status) continue;
+    if (query.status && latestPointer.status !== query.status) {
+      skippedCount++;
+      console.log('[API] Status filter mismatch:', latestPointer.status, '!=', query.status);
+      continue;
+    }
     
     // Filter by visibility if specified
-    if (query.visibility && latestPointer.visibility !== query.visibility) continue;
+    if (query.visibility && latestPointer.visibility !== query.visibility) {
+      skippedCount++;
+      console.log('[API] Visibility filter mismatch:', latestPointer.visibility, '!=', query.visibility);
+      continue;
+    }
     
-    // Only show published entities for authenticated users (unless superadmin)
-    if (userRole !== 'superadmin' && latestPointer.status !== 'published') continue;
-    
-    // Only show public or authenticated visibility (not members-only)
-    if (userRole !== 'superadmin' && latestPointer.visibility === 'members') continue;
+    // Superadmins can see ALL entities regardless of status or visibility
+    // Regular users can only see published entities with public/authenticated visibility
+    if (!isSuperadmin) {
+      // Only show published entities for authenticated users
+      if (latestPointer.status !== 'published') {
+        skippedCount++;
+        console.log('[API] Skipping non-published entity (status:', latestPointer.status, ')');
+        continue;
+      }
+      
+      // Only show public or authenticated visibility (not members-only)
+      if (latestPointer.visibility === 'members') {
+        skippedCount++;
+        console.log('[API] Skipping members-only entity');
+        continue;
+      }
+    } else {
+      // Superadmin: log but don't filter - show all entities
+      console.log('[API] Superadmin access - including entity:', stub.entityId, 'status:', latestPointer.status, 'visibility:', latestPointer.visibility);
+    }
     
     // Get full entity
     const storageVisibility: VisibilityScope = stub.organizationId === null 
@@ -105,55 +171,69 @@ apiEntityRoutes.get('/entities',
     const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
     const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
     
-    if (!entity) continue;
+    if (!entity) {
+      skippedCount++;
+      console.log('[API] Entity file not found at path:', entityPath);
+      continue;
+    }
     
     // Get entity type
     const entityType = await getEntityType(entity.entityTypeId);
     
-    // Extract name
-    let nameValue: string | undefined;
-    if (entity.data.name) {
-      nameValue = entity.data.name as string;
-    } else if (entityType && entityType.fields.length > 0) {
-      const nameFieldId = entityType.fields[0].id;
-      nameValue = entity.data[nameFieldId] as string | undefined;
-    }
+    // Name is stored at top-level (common property)
+    const nameValue = entity.name || `Entity ${entity.id}`;
+    console.log('[API] Entity', entity.id, 'name:', nameValue);
     
-    // Extract description
+    // Extract description from dynamic data
     let descriptionValue: string | undefined;
     if (entity.data.description) {
       descriptionValue = entity.data.description as string;
-    } else if (entityType && entityType.fields.length > 1) {
-      const descFieldId = entityType.fields[1].id;
-      descriptionValue = entity.data[descFieldId] as string | undefined;
+    } else if (entityType && entityType.fields.length > 0) {
+      // Try to find description field
+      const descField = entityType.fields.find(f => f.id === 'description' || f.name?.toLowerCase() === 'description');
+      if (descField) {
+        descriptionValue = entity.data[descField.id] as string | undefined;
+      }
     }
     
     // Filter by search query
     if (query.search) {
       const searchLower = query.search.toLowerCase();
-      const name = (nameValue || '').toLowerCase();
+      const name = nameValue.toLowerCase();
       const description = (descriptionValue || '').toLowerCase();
       
       if (!name.includes(searchLower) && !description.includes(searchLower)) continue;
     }
     
+    // Slug is stored at top-level (common property)
+    const slugValue = entity.slug || '';
+    
     const listItem: EntityListItem = {
       id: entity.id,
       entityTypeId: entity.entityTypeId,
       organizationId: entity.organizationId,
-      slug: entity.slug,
+      slug: slugValue, // Top-level property
+      name: nameValue, // Top-level property
       status: entity.status,
       visibility: entity.visibility,
       data: {
-        name: nameValue || `Entity ${entity.id}`,
-        description: descriptionValue
+        // Only dynamic fields (description, etc.)
+        ...(descriptionValue && { description: descriptionValue })
       },
-      version: entity.version,
       updatedAt: entity.updatedAt
     };
     
     items.push(listItem);
+    addedCount++;
+    console.log('[API] Added entity to list:', entity.id, 'name:', nameValue, '(total so far:', items.length, ')');
   }
+  
+  console.log('[API] Entity processing summary:', {
+    processed: processedCount,
+    skipped: skippedCount,
+    added: addedCount,
+    totalInList: items.length
+  });
   
   // Sort by updatedAt descending
   items.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
@@ -162,7 +242,7 @@ apiEntityRoutes.get('/entities',
   const start = (query.page - 1) * query.pageSize;
   const paginatedItems = items.slice(start, start + query.pageSize);
   
-  console.log('[API] Returning', paginatedItems.length, 'of', items.length, 'entities');
+  console.log('[API] Returning', paginatedItems.length, 'of', items.length, 'entities (page', query.page, 'of', Math.ceil(items.length / query.pageSize) + ')');
   
   return c.json({
     success: true,
@@ -246,10 +326,39 @@ apiEntityRoutes.get('/entities/:id', async (c) => {
     }, 404);
   }
   
+  // Project fields based on user's highest membership key
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entity.entityTypeId));
+  if (!entityType) {
+    throw new NotFoundError('Entity Type', entity.entityTypeId);
+  }
+  
+  const userId = c.get('userId');
+  const userOrgId = c.get('organizationId');
+  const isSuperadmin = c.get('isSuperadmin') || false;
+  
+  let projectedEntity = entity;
+  
+  if (userId) {
+    const config = await loadAppConfig(c.env.R2_BUCKET);
+    const highestKey = await getUserHighestMembershipKey(c.env.R2_BUCKET, userOrgId || null, isSuperadmin, config);
+    
+    // Check if type is visible to this key
+    if (entityType.visibleTo?.includes(highestKey)) {
+      projectedEntity = projectFieldsForKey(entity, entityType, highestKey, config);
+    } else {
+      // Fallback: return with public fields only
+      projectedEntity = projectFieldsForKey(entity, entityType, 'public', config);
+    }
+  } else {
+    // Unauthenticated: return with public fields only
+    const config = await loadAppConfig(c.env.R2_BUCKET);
+    projectedEntity = projectFieldsForKey(entity, entityType, 'public', config);
+  }
+  
   console.log('[API] Returning global entity:', entityId, 'status:', entity.status);
   
   return c.json({
     success: true,
-    data: entity
+    data: projectedEntity
   });
 });

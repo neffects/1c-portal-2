@@ -117,6 +117,22 @@ export function EntityImportExport() {
     setExportStatus(null);
     
     try {
+      // First, get the count from the listing endpoint to compare
+      let listingCount: number | null = null;
+      try {
+        const listResponse = await api.get(`/api/super/entities?typeId=${exportTypeId}&page=1&pageSize=1`) as {
+          success: boolean;
+          data?: { total?: number };
+        };
+        if (listResponse.success && listResponse.data?.total !== undefined) {
+          listingCount = listResponse.data.total;
+          console.log('[EntityImportExport] Listing count:', listingCount);
+        }
+      } catch (err) {
+        console.warn('[EntityImportExport] Failed to fetch listing count:', err);
+      }
+      
+      // Export entities
       const response = await api.get(`/api/super/entities/export?typeId=${exportTypeId}`) as {
         success: boolean;
         data?: { entityType: EntityType; entities: Entity[]; exportedAt: string };
@@ -138,6 +154,13 @@ export function EntityImportExport() {
       }
       
       const { entityType, entities } = response.data;
+      const exportedCount = entities.length;
+      
+      console.log('[EntityImportExport] Export response received:', {
+        entityCount: exportedCount,
+        entityIds: entities.map(e => e.id),
+        entityNames: entities.map(e => e.name)
+      });
       
       if (exportFormat === 'csv') {
         downloadCSV(entities, entityType as EntityType);
@@ -145,7 +168,18 @@ export function EntityImportExport() {
         downloadJSON(entities, entityType as EntityType);
       }
       
-      setExportStatus(`Exported ${entities.length} entities as ${exportFormat.toUpperCase()}`);
+      // Build status message with count comparison
+      let statusMsg = `Exported ${exportedCount} entities as ${exportFormat.toUpperCase()}`;
+      if (listingCount !== null) {
+        if (exportedCount === listingCount) {
+          statusMsg += ` (matches listing count: ${listingCount})`;
+        } else {
+          statusMsg += ` ⚠️ WARNING: Listing shows ${listingCount} entities, but exported ${exportedCount}`;
+          console.warn('[EntityImportExport] Count mismatch - listing:', listingCount, 'exported:', exportedCount);
+        }
+      }
+      
+      setExportStatus(statusMsg);
     } catch (err) {
       console.error('[EntityImportExport] Export error:', err);
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
@@ -469,8 +503,10 @@ export function EntityImportExport() {
             {exportStatus && (
               <div class={`p-4 rounded-lg ${
                 exportStatus.includes('failed') 
-                  ? 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
-                  : 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
+                  ? 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border border-red-200 dark:border-red-800'
+                  : exportStatus.includes('WARNING')
+                  ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400 border border-amber-200 dark:border-amber-800'
+                  : 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400 border border-green-200 dark:border-green-800'
               }`}>
                 {exportStatus}
               </div>
@@ -597,6 +633,121 @@ export function EntityImportExport() {
               totalRows={importData.length}
               isLoading={false}
             />
+          )}
+          
+          {/* Preview Entities to Import */}
+          {importTypeId && importData.length > 0 && entityTypeSchema && (
+            <div class="card overflow-hidden">
+              <div class="p-4 border-b border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800/50">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <span class="i-lucide-eye text-xl text-primary-500"></span>
+                    <div>
+                      <h3 class="font-medium text-surface-900 dark:text-surface-100">
+                        Preview: {importData.length} {importData.length === 1 ? 'Entity' : 'Entities'} to Import
+                      </h3>
+                      <p class="text-sm text-surface-500 dark:text-surface-400 mt-0.5">
+                        Review the entities below before importing
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="overflow-x-auto max-h-96 overflow-y-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-surface-50 dark:bg-surface-800 sticky top-0">
+                    <tr>
+                      <th class="text-left px-4 py-2 font-medium text-surface-500 w-16">Row</th>
+                      <th class="text-left px-4 py-2 font-medium text-surface-500">Name</th>
+                      <th class="text-left px-4 py-2 font-medium text-surface-500">Slug</th>
+                      {entityTypeSchema.fields
+                        .filter(f => f.id !== 'name' && f.id !== 'slug' && f.name !== 'Name' && f.name !== 'Slug')
+                        .slice(0, 5) // Show up to 5 additional fields
+                        .map(field => (
+                          <th key={field.id} class="text-left px-4 py-2 font-medium text-surface-500">
+                            {field.name}
+                          </th>
+                        ))}
+                      <th class="text-left px-4 py-2 font-medium text-surface-500 w-20">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-surface-100 dark:divide-surface-700">
+                    {importData.map((entity, index) => {
+                      const rowErrors = importErrors.filter(e => e.rowIndex === index);
+                      const hasErrors = rowErrors.length > 0;
+                      const name = (entity.data.name as string) || `Entity ${index + 1}`;
+                      const slug = (entity.slug || entity.data.slug) as string || '(auto-generated)';
+                      const previewFields = entityTypeSchema.fields
+                        .filter(f => f.id !== 'name' && f.id !== 'slug' && f.name !== 'Name' && f.name !== 'Slug')
+                        .slice(0, 5);
+                      
+                      // Helper to format field value for display
+                      const formatFieldValue = (value: unknown, fieldType?: string): string => {
+                        if (value === null || value === undefined || value === '') {
+                          return '—';
+                        }
+                        if (Array.isArray(value)) {
+                          return value.length > 0 ? value.join(', ') : '—';
+                        }
+                        if (typeof value === 'boolean') {
+                          return value ? 'Yes' : 'No';
+                        }
+                        const str = String(value);
+                        // Truncate long values
+                        return str.length > 50 ? str.substring(0, 47) + '...' : str;
+                      };
+                      
+                      return (
+                        <tr
+                          key={index}
+                          class={`hover:bg-surface-50 dark:hover:bg-surface-800/50 ${
+                            hasErrors ? 'bg-red-50/50 dark:bg-red-900/10' : ''
+                          }`}
+                        >
+                          <td class="px-4 py-2 text-surface-700 dark:text-surface-300 font-mono text-xs">
+                            {index + 3}
+                          </td>
+                          <td class="px-4 py-2 text-surface-900 dark:text-surface-100 font-medium">
+                            {name}
+                          </td>
+                          <td class="px-4 py-2 text-surface-600 dark:text-surface-400 font-mono text-xs">
+                            {slug}
+                          </td>
+                          {previewFields.map(field => {
+                            const value = entity.data[field.id];
+                            return (
+                              <td key={field.id} class="px-4 py-2 text-surface-700 dark:text-surface-300">
+                                {formatFieldValue(value, field.type)}
+                              </td>
+                            );
+                          })}
+                          <td class="px-4 py-2">
+                            {hasErrors ? (
+                              <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">
+                                <span class="i-lucide-alert-circle text-xs"></span>
+                                Error
+                              </span>
+                            ) : (
+                              <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                                <span class="i-lucide-check-circle text-xs"></span>
+                                Ready
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              
+              {importData.length > 10 && (
+                <div class="px-4 py-3 border-t border-surface-100 dark:border-surface-700 bg-surface-50 dark:bg-surface-800/50 text-xs text-surface-500">
+                  Showing all {importData.length} entities. Scroll to view more.
+                </div>
+              )}
+            </div>
           )}
           
           {/* Import Button */}

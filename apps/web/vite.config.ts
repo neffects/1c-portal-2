@@ -23,7 +23,11 @@ export default defineConfig({
     }
   },
   server: {
+    // IMPORTANT: Port 5173 is fixed and must not be changed
+    // This port is referenced in wrangler.toml FRONTEND_URL and AGENTS.md
     port: 5173,
+    // Strict mode: fail if port is already in use (don't try another port)
+    strictPort: true,
     // Proxy API requests to worker in development
     proxy: {
       '/api': {

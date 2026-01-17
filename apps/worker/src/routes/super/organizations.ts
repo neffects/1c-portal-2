@@ -11,9 +11,10 @@ import { createOrganizationRequestSchema, updateOrganizationRequestSchema } from
 import { readJSON, writeJSON, listFiles, getOrgProfilePath, getOrgPermissionsPath } from '../../lib/r2';
 import { createOrgId, createSlug } from '../../lib/id';
 import { findOrgBySlug } from '../../lib/organizations';
+import { regenerateEntityBundles, loadAppConfig } from '../../lib/bundle-invalidation';
 import { ConflictError, NotFoundError } from '../../middleware/error';
 import { R2_PATHS } from '@1cc/shared';
-import type { Organization, EntityTypePermissions } from '@1cc/shared';
+import type { Organization, EntityTypePermissions, EntityType } from '@1cc/shared';
 
 export const superOrgRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -61,6 +62,31 @@ superOrgRoutes.post('/organizations',
   };
   
   await writeJSON(c.env.R2_BUCKET, getOrgPermissionsPath(orgId), permissions);
+  
+  // Generate bundles for all entity types for this new organization (even if empty)
+  // This ensures bundles exist immediately when the organization is created
+  console.log('[SuperOrgs] Generating bundles for all entity types for new organization:', orgId);
+  try {
+    const config = await loadAppConfig(c.env.R2_BUCKET);
+    const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`);
+    const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
+    
+    for (const file of definitionFiles) {
+      const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, file);
+      if (entityType && entityType.isActive) {
+        try {
+          await regenerateEntityBundles(c.env.R2_BUCKET, entityType.id, orgId, config);
+        } catch (error) {
+          console.error('[SuperOrgs] Error generating bundles for type', entityType.id, ':', error);
+          // Continue with other types even if one fails
+        }
+      }
+    }
+    console.log('[SuperOrgs] Bundle generation complete for new organization:', orgId);
+  } catch (error) {
+    console.error('[SuperOrgs] Error generating bundles for new organization:', orgId, error);
+    // Don't fail organization creation if bundle generation fails - log and continue
+  }
   
   return c.json({ success: true, data: organization }, 201);
 });

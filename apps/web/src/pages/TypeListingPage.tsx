@@ -8,6 +8,10 @@
 import { useEffect, useState } from 'preact/hooks';
 import { api } from '../lib/api';
 
+/**
+ * Type listing data returned from the API
+ * Entities have name as a top-level property (common property)
+ */
 interface TypeListingData {
   organization: {
     id: string;
@@ -22,6 +26,8 @@ interface TypeListingData {
   };
   entities: Array<{
     id: string;
+    /** Entity name (top-level common property) */
+    name: string;
     slug: string;
     data: Record<string, unknown>;
   }>;
@@ -95,13 +101,16 @@ export function TypeListingPage({ orgSlug, typeSlug }: TypeListingPageProps) {
         <h1 class="text-4xl font-bold mb-8">{data.entityType.pluralName}</h1>
         
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {data.entities.map(entity => (
+          {data.entities.map(entity => {
+            // Slug is stored at top-level (common property)
+            const entitySlug = entity.slug || '';
+            return (
             <a
-              href={`/${data.organization.slug}/${data.entityType.slug}/${entity.slug}`}
+              href={`/${data.organization.slug}/${data.entityType.slug}/${entitySlug}`}
               class="card p-6 hover:shadow-lg transition-shadow"
             >
               <h2 class="text-xl font-semibold mb-2">
-                {entity.data.name as string || `Entity ${entity.id}`}
+                {entity.name || `Entity ${entity.id}`}
               </h2>
               {entity.data.description && (
                 <p class="text-surface-600 dark:text-surface-400 line-clamp-2">
@@ -109,7 +118,8 @@ export function TypeListingPage({ orgSlug, typeSlug }: TypeListingPageProps) {
                 </p>
               )}
             </a>
-          ))}
+            );
+          })}
         </div>
         
         {data.entities.length === 0 && (

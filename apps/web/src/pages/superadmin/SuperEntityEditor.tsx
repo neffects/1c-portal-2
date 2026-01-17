@@ -30,6 +30,8 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
   
   const [loading, setLoading] = useState(!!id);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [hardDeleting, setHardDeleting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const [manuallyEditedFields, setManuallyEditedFields] = useState<Set<string>>(new Set());
@@ -137,7 +139,8 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
     console.log('[SuperEntityEditor] Loading org bundle for duplicate checking:', orgId, typeId);
     
     try {
-      const response = await api.get(`/manifests/bundles/org/${orgId}/${typeId}`) as {
+      // Fetch org bundle for duplicate checking (uses new membership keys bundle endpoint)
+      const response = await api.get(`/api/orgs/${orgId}/bundles/${typeId}`) as {
         success: boolean;
         data?: EntityBundle;
       };
@@ -239,6 +242,12 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
   function initializeFormData(type: EntityType) {
     const data: Record<string, unknown> = {};
     
+    // Find name and slug field IDs (may be 'name'/'slug' or auto-generated IDs like 'field_0_xxx')
+    const nameFieldDef = type.fields.find(f => f.id === 'name' || f.name?.toLowerCase() === 'name');
+    const slugFieldDef = type.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+    const nameFieldId = nameFieldDef?.id || 'name';
+    const slugFieldId = slugFieldDef?.id || 'slug';
+    
     type.fields.forEach(field => {
       if (field.defaultValue !== undefined) {
         data[field.id] = field.defaultValue;
@@ -256,8 +265,10 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
       }
     });
     
-    if (data.name && typeof data.name === 'string') {
-      data.slug = slugify(data.name);
+    // Auto-generate slug from name if name has a default value
+    const nameValue = data[nameFieldId];
+    if (nameValue && typeof nameValue === 'string') {
+      data[slugFieldId] = slugify(nameValue);
     }
     
     setFormData(data);
@@ -268,12 +279,39 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
     console.log('[SuperEntityEditor] Loading entity:', entityId);
     
     try {
-      const response = await api.get<Entity>(`/api/entities/${entityId}`);
+      // Use superadmin endpoint to access any entity (global or org-scoped)
+      const response = await api.get<Entity>(`/api/super/entities/${entityId}`);
       
       if (response.success && response.data) {
         const loadedEntity = response.data;
         setEntity(loadedEntity);
-        setFormData(loadedEntity.data);
+        
+        // Load entity type to find correct field IDs for name and slug
+        const typeResponse = await api.get(`/api/entity-types/${loadedEntity.entityTypeId}`) as {
+          success: boolean;
+          data?: EntityType;
+        };
+        
+        if (typeResponse.success && typeResponse.data) {
+          const type = typeResponse.data;
+          setEntityType(type);
+          
+          // Find name and slug field IDs (may be 'name'/'slug' or auto-generated IDs)
+          const nameFieldDef = type.fields.find(f => f.id === 'name' || f.name?.toLowerCase() === 'name');
+          const slugFieldDef = type.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+          const nameFieldId = nameFieldDef?.id || 'name';
+          const slugFieldId = slugFieldDef?.id || 'slug';
+          
+          // Populate formData with entity data, mapping name and slug to correct field IDs
+          const formDataWithNameSlug = {
+            ...loadedEntity.data,
+            [nameFieldId]: loadedEntity.name, // Map to correct field ID
+            [slugFieldId]: loadedEntity.slug  // Map to correct field ID
+          };
+          setFormData(formDataWithNameSlug);
+          console.log('[SuperEntityEditor] Populated form data with nameFieldId:', nameFieldId, 'slugFieldId:', slugFieldId);
+        }
+        
         setHasBeenSaved(true);
         
         if (loadedEntity.organizationId) {
@@ -416,23 +454,66 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
     setSaving(true);
     setSaveError(null);
     
+    // Find name and slug fields by ID or by their name property
+    const nameFieldDef = entityType.fields.find(f => f.id === 'name' || f.name?.toLowerCase() === 'name');
+    const slugFieldDef = entityType.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+    const nameFieldId = nameFieldDef?.id || 'name';
+    const slugFieldId = slugFieldDef?.id || 'slug';
+    
     try {
-      const payload = {
-        data: formData
-      };
+      // Extract name value from the form (by field ID)
+      const nameValue = (formData[nameFieldId] as string || '').trim();
+      if (!nameValue) {
+        setSaveError('Name field is required');
+        setSaving(false);
+        return;
+      }
+      
+      // Extract slug value from the form, or generate from name
+      let slugValue = (formData[slugFieldId] as string || '').trim();
+      if (!slugValue) {
+        slugValue = slugify(nameValue);
+        console.log('[SuperEntityEditor] Slug missing/empty, generating from name:', slugValue);
+      }
+      
+      // Build dynamic data object (excluding name and slug which are top-level)
+      const dynamicData: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(formData)) {
+        // Skip name and slug fields - they go at top-level
+        if (key === nameFieldId || key === slugFieldId || key === 'name' || key === 'slug') {
+          continue;
+        }
+        dynamicData[key] = value;
+      }
+      
+      console.log('[SuperEntityEditor] Prepared payload:', {
+        name: nameValue,
+        slug: slugValue,
+        dynamicDataKeys: Object.keys(dynamicData)
+      });
       
       let response;
       
       if (isNew) {
-        const createPayload: Record<string, unknown> = {
+        // Build create payload with name and slug at top-level
+        const createPayload = {
           entityTypeId: entityType.id,
-          ...payload,
+          name: nameValue,
+          slug: slugValue,
+          data: dynamicData, // Only dynamic fields
           organizationId: selectedOrgId // null = global, string = specific org
         };
         
-        response = await api.post<Entity>('/api/entities', createPayload);
+        response = await api.post<Entity>('/api/super/entities', createPayload);
       } else {
-        response = await api.patch<Entity>(`/api/entities/${id}`, payload);
+        // Build update payload with name and slug at top-level
+        const updatePayload = {
+          name: nameValue,
+          slug: slugValue,
+          data: dynamicData // Only dynamic fields
+        };
+        
+        response = await api.patch<Entity>(`/api/super/entities/${id}`, updatePayload);
       }
       
       if (response.success && response.data) {
@@ -460,7 +541,8 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
     setSaving(true);
     setSaveError(null);
     
-    const response = await api.post(`/api/entities/${entity.id}/transition`, {
+    // Use superadmin endpoint for transitions
+    const response = await api.post(`/api/super/entities/${entity.id}/transition`, {
       action: 'submitForApproval'
     });
     
@@ -471,6 +553,98 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
     }
     
     setSaving(false);
+  }
+  
+  /**
+   * Handle entity deletion (soft delete via status transition)
+   * Prompts for confirmation before deleting
+   */
+  async function handleDelete() {
+    if (!entity) return;
+    
+    // Confirm deletion with user
+    const confirmed = window.confirm(
+      `Are you sure you want to delete "${entity.name || 'this entity'}"?\n\nThis action will mark the entity as deleted. It can be restored later if needed.`
+    );
+    
+    if (!confirmed) return;
+    
+    setDeleting(true);
+    setSaveError(null);
+    
+    console.log('[SuperEntityEditor] Deleting entity:', entity.id);
+    
+    try {
+      // Use superadmin transition endpoint with 'delete' action
+      const response = await api.post(`/api/super/entities/${entity.id}/transition`, {
+        action: 'delete'
+      });
+      
+      if (response.success) {
+        console.log('[SuperEntityEditor] Entity deleted successfully');
+        // Redirect to entities list after successful deletion
+        route('/super/entities');
+      } else {
+        console.error('[SuperEntityEditor] Delete failed:', response);
+        setSaveError(response.error?.message || 'Failed to delete entity');
+      }
+    } catch (err) {
+      console.error('[SuperEntityEditor] Delete error:', err);
+      setSaveError(err instanceof Error ? err.message : 'Failed to delete entity');
+    } finally {
+      setDeleting(false);
+    }
+  }
+  
+  /**
+   * Handle hard delete (superDelete) - permanently removes entity from storage
+   * This action cannot be undone! Prompts for double confirmation.
+   */
+  async function handleHardDelete() {
+    if (!entity) return;
+    
+    // First confirmation
+    const confirmed1 = window.confirm(
+      `⚠️ PERMANENT DELETION ⚠️\n\nAre you sure you want to PERMANENTLY delete "${entity.name || 'this entity'}"?\n\nThis will remove ALL data including all versions. This action CANNOT be undone!`
+    );
+    
+    if (!confirmed1) return;
+    
+    // Second confirmation - type the entity name
+    const confirmText = window.prompt(
+      `To confirm permanent deletion, type the entity name:\n\n"${entity.name || entity.id}"`
+    );
+    
+    if (confirmText !== (entity.name || entity.id)) {
+      alert('Entity name did not match. Deletion cancelled.');
+      return;
+    }
+    
+    setHardDeleting(true);
+    setSaveError(null);
+    
+    console.log('[SuperEntityEditor] HARD DELETING entity:', entity.id);
+    
+    try {
+      // Use superadmin transition endpoint with 'superDelete' action
+      const response = await api.post(`/api/super/entities/${entity.id}/transition`, {
+        action: 'superDelete'
+      });
+      
+      if (response.success) {
+        console.log('[SuperEntityEditor] Entity permanently deleted');
+        // Redirect to entities list after successful deletion
+        route('/super/entities');
+      } else {
+        console.error('[SuperEntityEditor] Hard delete failed:', response);
+        setSaveError(response.error?.message || 'Failed to permanently delete entity');
+      }
+    } catch (err) {
+      console.error('[SuperEntityEditor] Hard delete error:', err);
+      setSaveError(err instanceof Error ? err.message : 'Failed to permanently delete entity');
+    } finally {
+      setHardDeleting(false);
+    }
   }
   
   // Render loading state
@@ -829,9 +1003,46 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
                 Duplicate
               </button>
               {entity && entity.status === 'draft' && (
-                <button type="button" class="btn-ghost w-full justify-start text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20">
-                  <span class="i-lucide-trash-2 mr-2"></span>
-                  Delete
+                <button 
+                  type="button" 
+                  onClick={handleDelete}
+                  disabled={deleting || saving || hardDeleting}
+                  class="btn-ghost w-full justify-start text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
+                >
+                  {deleting ? (
+                    <>
+                      <span class="i-lucide-loader-2 animate-spin mr-2"></span>
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <span class="i-lucide-trash-2 mr-2"></span>
+                      Delete
+                    </>
+                  )}
+                </button>
+              )}
+              
+              {/* Hard Delete - Superadmin only, available for all statuses */}
+              {entity && (
+                <button 
+                  type="button" 
+                  onClick={handleHardDelete}
+                  disabled={hardDeleting || deleting || saving}
+                  class="btn-ghost w-full justify-start text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30 disabled:opacity-50 border border-red-200 dark:border-red-800 mt-2"
+                  title="Permanently delete this entity and all its versions. This cannot be undone!"
+                >
+                  {hardDeleting ? (
+                    <>
+                      <span class="i-lucide-loader-2 animate-spin mr-2"></span>
+                      Permanently Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <span class="i-lucide-skull mr-2"></span>
+                      Hard Delete (Permanent)
+                    </>
+                  )}
                 </button>
               )}
             </div>

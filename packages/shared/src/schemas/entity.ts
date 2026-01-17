@@ -34,27 +34,48 @@ export const entitySlugSchema = z
 
 /**
  * Create entity request schema
+ * 
+ * name and slug are top-level required fields (stored as entity.name and entity.slug)
+ * data contains only dynamic fields defined by the entity type
  */
 export const createEntityRequestSchema = z.object({
   entityTypeId: entityIdSchema,
-  data: z.record(z.unknown()),
+  name: z.string().min(1, 'Name is required').max(200, 'Name must not exceed 200 characters'),
+  slug: entitySlugSchema,
+  data: z.record(z.unknown()).optional().default({}), // Dynamic fields only
   visibility: visibilityScopeSchema.optional(),
   organizationId: entityIdSchema.nullable().optional() // Allow null for global entities (superadmin only)
 });
 
 /**
  * Update entity request schema (atomic field updates)
+ * 
+ * name and slug can be updated as top-level fields
+ * data contains only dynamic fields defined by the entity type
  */
 export const updateEntityRequestSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  slug: entitySlugSchema.optional(),
   data: z.record(z.unknown()).optional(),
   visibility: visibilityScopeSchema.optional()
 }).refine(
-  data => data.data !== undefined || data.visibility !== undefined,
+  data => data.name !== undefined || data.slug !== undefined || data.data !== undefined || data.visibility !== undefined,
   { message: 'At least one field must be provided for update' }
 );
 
 /**
  * Entity transition actions
+ * 
+ * Standard actions:
+ * - submitForApproval: draft -> pending
+ * - approve: pending -> published
+ * - reject: pending -> draft
+ * - archive: published -> archived
+ * - restore: archived/deleted -> draft
+ * - delete: draft -> deleted (soft delete)
+ * 
+ * Superadmin-only actions:
+ * - superDelete: Any status -> permanently removed (hard delete)
  */
 export const entityTransitionActionSchema = z.enum([
   'submitForApproval',
@@ -62,7 +83,8 @@ export const entityTransitionActionSchema = z.enum([
   'reject',
   'archive',
   'restore',
-  'delete'
+  'delete',
+  'superDelete' // Superadmin only - permanently removes entity from storage
 ]);
 
 /**

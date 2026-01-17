@@ -3,6 +3,11 @@
  */
 
 /**
+ * Membership key ID type (references membershipKeys.keys[].id)
+ */
+export type MembershipKeyId = string;
+
+/**
  * Application configuration loaded on startup
  * Location: config/app.json
  */
@@ -23,6 +28,8 @@ export interface AppConfig {
   sync: SyncConfig;
   /** Authentication configuration */
   auth: AuthConfig;
+  /** Membership key configuration */
+  membershipKeys: MembershipConfig;
 }
 
 /**
@@ -85,6 +92,44 @@ export interface AuthConfig {
   sessionDuration: number;
   /** Enable email domain restrictions */
   domainRestrictions: boolean;
+}
+
+/**
+ * Membership key definition
+ */
+export interface MembershipKeyDefinition {
+  /** Unique key identifier (used in R2 paths) */
+  id: string;
+  /** Display name */
+  name: string;
+  /** Description of what this key grants access to */
+  description?: string;
+  /** Whether authentication is required for this key */
+  requiresAuth: boolean;
+  /** Order for hierarchy (higher = more access) */
+  order: number;
+}
+
+/**
+ * Organization tier definition
+ */
+export interface OrganizationTierDefinition {
+  /** Tier identifier */
+  id: string;
+  /** Display name */
+  name: string;
+  /** Which membership keys this tier grants */
+  grantedKeys: string[];
+}
+
+/**
+ * Membership configuration
+ */
+export interface MembershipConfig {
+  /** Available membership keys */
+  keys: MembershipKeyDefinition[];
+  /** Organization tiers and their granted keys */
+  organizationTiers: OrganizationTierDefinition[];
 }
 
 /**

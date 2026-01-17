@@ -34,9 +34,11 @@ export interface Entity {
   status: EntityStatus;
   /** Visibility scope determining who can access */
   visibility: VisibilityScope;
+  /** Entity name (common property, moved from data) */
+  name: string;
   /** URL-friendly slug generated from name */
   slug: string;
-  /** Dynamic data fields defined by entity type */
+  /** Dynamic data fields defined by entity type (does NOT include name or slug) */
   data: Record<string, unknown>;
   /** When the entity was created (ISO 8601) */
   createdAt: string;
@@ -126,12 +128,10 @@ export interface EntityListItem {
   slug: string;
   status: EntityStatus;
   visibility: VisibilityScope;
-  /** Subset of data fields for display */
-  data: {
-    name?: string;
-    [key: string]: unknown;
-  };
-  version: number;
+  /** Entity name (common property, top-level) */
+  name: string;
+  /** Subset of dynamic data fields for display (does NOT include name or slug) */
+  data: Record<string, unknown>;
   updatedAt: string;
 }
 

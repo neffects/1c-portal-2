@@ -104,9 +104,19 @@ files.post('/upload', authMiddleware, async (c: Context) => {
 /**
  * Get a file
  * GET /files/:path+
+ * Security: Only allows access to files in uploads/ prefix
  */
 files.get('/:path{.+}', async (c: Context) => {
   const path = c.req.param('path');
+  
+  // Security: Only allow access to uploads/ prefix
+  if (!path.startsWith('uploads/')) {
+    console.warn('[Files] Attempted access to non-uploads path:', path);
+    return c.json({ 
+      success: false, 
+      error: { code: 'FORBIDDEN', message: 'Access denied' } 
+    }, 403);
+  }
   
   try {
     const object = await c.env.R2_BUCKET.get(path);

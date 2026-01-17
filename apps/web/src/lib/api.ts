@@ -140,6 +140,13 @@ async function post<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
     
     if (!response.ok) {
       console.error('[API] POST error:', path, response.status, data);
+      if (data.error) {
+        console.error('[API] POST error details:', {
+          code: data.error.code,
+          message: data.error.message,
+          details: data.error.details
+        });
+      }
     }
     
     return data;

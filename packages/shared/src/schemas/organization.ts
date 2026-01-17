@@ -48,6 +48,11 @@ export const organizationSettingsSchema = z.object({
 });
 
 /**
+ * Membership key schema (references membershipKeys.keys[].id from app config)
+ */
+export const membershipKeySchema = z.string().min(1).max(50);
+
+/**
  * Create organization request schema
  */
 export const createOrganizationRequestSchema = z.object({
@@ -58,7 +63,8 @@ export const createOrganizationRequestSchema = z.object({
   slug: orgSlugSchema,
   description: z.string().max(500).optional(),
   domainWhitelist: z.array(domainSchema).max(20).optional(),
-  allowSelfSignup: z.boolean().optional()
+  allowSelfSignup: z.boolean().optional(),
+  membershipKey: membershipKeySchema.optional()
 });
 
 /**
@@ -68,7 +74,8 @@ export const updateOrganizationRequestSchema = z.object({
   name: z.string().min(2).max(100).optional(),
   slug: orgSlugSchema.optional(),
   profile: organizationProfileSchema.partial().optional(),
-  settings: organizationSettingsSchema.partial().optional()
+  settings: organizationSettingsSchema.partial().optional(),
+  membershipKey: membershipKeySchema.optional()
 });
 
 /**

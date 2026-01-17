@@ -148,7 +148,8 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     console.log('[EntityEditor] Loading org bundle for duplicate checking:', orgId, typeId);
     
     try {
-      const response = await api.get(`/manifests/bundles/org/${orgId}/${typeId}`) as {
+      // Fetch org bundle for duplicate checking (uses new membership keys bundle endpoint)
+      const response = await api.get(`/api/orgs/${orgId}/bundles/${typeId}`) as {
         success: boolean;
         data?: EntityBundle;
       };
@@ -273,6 +274,12 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
   function initializeFormData(type: EntityType) {
     const data: Record<string, unknown> = {};
     
+    // Find name and slug field IDs (may be 'name'/'slug' or auto-generated IDs like 'field_0_xxx')
+    const nameFieldDef = type.fields.find(f => f.id === 'name' || f.name?.toLowerCase() === 'name');
+    const slugFieldDef = type.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+    const nameFieldId = nameFieldDef?.id || 'name';
+    const slugFieldId = slugFieldDef?.id || 'slug';
+    
     type.fields.forEach(field => {
       if (field.defaultValue !== undefined) {
         data[field.id] = field.defaultValue;
@@ -292,10 +299,10 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     });
     
     // Auto-generate slug from name if name has a default value
-    // Name and slug are hard-coded required fields that always exist
-    if (data.name && typeof data.name === 'string') {
-      data.slug = slugify(data.name);
-      console.log('[EntityEditor] Auto-generated slug from default name:', data.slug);
+    const nameValue = data[nameFieldId];
+    if (nameValue && typeof nameValue === 'string') {
+      data[slugFieldId] = slugify(nameValue);
+      console.log('[EntityEditor] Auto-generated slug from default name:', data[slugFieldId]);
     }
     
     setFormData(data);
@@ -309,7 +316,33 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     if (response.success && response.data) {
       const loadedEntity = response.data;
       setEntity(loadedEntity);
-      setFormData(loadedEntity.data);
+      
+      // Load entity type to find correct field IDs for name and slug
+      const typeResponse = await api.get(`/api/entity-types/${loadedEntity.entityTypeId}`) as {
+        success: boolean;
+        data?: EntityType;
+      };
+      
+      if (typeResponse.success && typeResponse.data) {
+        const type = typeResponse.data;
+        setEntityType(type);
+        
+        // Find name and slug field IDs (may be 'name'/'slug' or auto-generated IDs)
+        const nameFieldDef = type.fields.find(f => f.id === 'name' || f.name?.toLowerCase() === 'name');
+        const slugFieldDef = type.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+        const nameFieldId = nameFieldDef?.id || 'name';
+        const slugFieldId = slugFieldDef?.id || 'slug';
+        
+        // Populate formData with entity data, mapping name and slug to correct field IDs
+        const formDataWithNameSlug = {
+          ...loadedEntity.data,
+          [nameFieldId]: loadedEntity.name, // Map to correct field ID
+          [slugFieldId]: loadedEntity.slug  // Map to correct field ID
+        };
+        setFormData(formDataWithNameSlug);
+        console.log('[EntityEditor] Populated form data with nameFieldId:', nameFieldId, 'slugFieldId:', slugFieldId);
+      }
+      
       // Entity already exists, so it has been saved
       setHasBeenSaved(true);
       
@@ -354,10 +387,6 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
   }
   
   function handleFieldChange(fieldId: string, value: unknown) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:224',message:'handleFieldChange called',data:{fieldId,valueType:typeof value,valueStr:String(value).substring(0,50),isNew,manuallyEditedFields:Array.from(manuallyEditedFields)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    
     // Auto-populate slug from name field when creating new entity
     // Name and slug are hard-coded required fields that always exist
     // Find name field by ID or by name property (for backward compatibility)
@@ -366,24 +395,16 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     // Update both name and slug in a single state update for immediate sync
     // Only auto-generate slug if: creating new entity AND entity hasn't been saved yet
     if (isNew && !hasBeenSaved && isNameField && typeof value === 'string') {
-      // Find slug field by ID or by name property (for backward compatibility)
-      const slugFieldId = entityType 
-        ? entityType.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug')?.id || 'slug'
-        : 'slug';
-      
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:232',message:'Name field condition met',data:{fieldId,value,isNew,slugFieldId,slugManuallyEdited:manuallyEditedFields.has(slugFieldId)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
+      // Find slug field ID consistently (same logic as backend)
+      // Standard convention: slug field has id='slug', but support finding by name for backward compatibility
+      const slugFieldDef = entityType?.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+      const slugFieldId = slugFieldDef?.id || 'slug'; // Default to 'slug' if not found
       
       // Auto-populate slug if it hasn't been manually edited
       // This allows the slug to auto-update as the user types, but if they manually edit
       // the slug, it won't be overwritten
       if (!manuallyEditedFields.has(slugFieldId)) {
         const slugValue = slugify(value);
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:238',message:'Generating slug',data:{nameValue:value,slugValue,slugFieldId,formDataBefore:JSON.stringify(formData)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        
         console.log('[EntityEditor] Auto-generating slug from name:', slugValue);
         // Update both name and slug in a single state update
         setFormData(prev => {
@@ -392,28 +413,17 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
             [fieldId]: value,
             [slugFieldId]: slugValue 
           };
-          // #region agent log
-          fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:248',message:'setFormData callback - updating slug',data:{fieldId,value,slugValue,slugFieldId,prevSlug:prev[slugFieldId],updatedSlug:updated[slugFieldId]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
           return updated;
         });
         // Mark name as manually edited, but NOT slug (so it keeps auto-updating)
         setManuallyEditedFields(prev => new Set(prev).add(fieldId));
       } else {
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:258',message:'Slug manually edited - skipping auto-gen',data:{fieldId,value,slugFieldId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
-        
         // Just update the name field (slug was manually edited, don't overwrite)
         setFormData(prev => ({ ...prev, [fieldId]: value }));
         // Mark name as manually edited
         setManuallyEditedFields(prev => new Set(prev).add(fieldId));
       }
     } else {
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:266',message:'Name condition not met',data:{fieldId,isNew,isNameField,valueType:typeof value,fieldName:entityType?.fields.find(f => f.id === fieldId)?.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-      // #endregion
-      
       // Update the field normally
       setFormData(prev => ({ ...prev, [fieldId]: value }));
       // Mark field as manually edited
@@ -494,50 +504,102 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     setSaving(true);
     setSaveError(null);
     
-    // #region agent log
-    const slugField = entityType.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:348',message:'handleSave called',data:{isNew,slugFieldId:slugField?.id,slugFieldPattern:slugField?.constraints?.pattern,slugValue:formData[slugField?.id || 'slug'],allFieldPatterns:entityType.fields.filter(f => f.constraints?.pattern).map(f => ({id:f.id,name:f.name,pattern:f.constraints?.pattern}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'J'})}).catch(()=>{});
-    // #endregion
+    // Find name and slug fields by ID or by their name property
+    // Entity types may have field IDs like 'name'/'slug' or auto-generated IDs like 'field_0_xxx'
+    const nameFieldDef = entityType.fields.find(f => f.id === 'name' || f.name?.toLowerCase() === 'name');
+    const slugFieldDef = entityType.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+    const nameFieldId = nameFieldDef?.id || 'name';
+    const slugFieldId = slugFieldDef?.id || 'slug';
+    
+    console.log('[EntityEditor] handleSave called:', {
+      isNew,
+      nameFieldId,
+      slugFieldId,
+      formDataKeys: Object.keys(formData)
+    });
     
     try {
-      const payload = {
-        data: formData
-      };
+      // Extract name value from the form (by field ID)
+      const nameValue = (formData[nameFieldId] as string || '').trim();
+      if (!nameValue) {
+        console.error('[EntityEditor] Cannot save: name field is missing or empty');
+        setSaveError('Name field is required');
+        setSaving(false);
+        return;
+      }
+      
+      // Extract slug value from the form, or generate from name
+      let slugValue = (formData[slugFieldId] as string || '').trim();
+      if (!slugValue) {
+        slugValue = slugify(nameValue);
+        console.log('[EntityEditor] Slug missing/empty, generating from name:', slugValue);
+      }
+      
+      // Build dynamic data object (excluding name and slug which are top-level)
+      const dynamicData: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(formData)) {
+        // Skip name and slug fields - they go at top-level
+        if (key === nameFieldId || key === slugFieldId || key === 'name' || key === 'slug') {
+          continue;
+        }
+        dynamicData[key] = value;
+      }
+      
+      console.log('[EntityEditor] Prepared payload:', {
+        name: nameValue,
+        slug: slugValue,
+        dynamicDataKeys: Object.keys(dynamicData)
+      });
       
       let response;
       
       if (isNew) {
-        const createPayload: Record<string, unknown> = {
-          entityTypeId: entityType.id,
-          ...payload
-        };
-        
         // Determine target organization ID
-        // null = global entity (superadmin only), use default org otherwise
         let targetOrgId: string;
         if (selectedOrgId === null) {
-          // Global entity - superadmin only, but still need to use org route structure
-          // For now, use user's default org (API will handle global entities differently)
+          // Global entity - superadmin only
           if (!organizationId.value) {
             throw new Error('You must belong to an organization to create entities');
           }
           targetOrgId = organizationId.value;
-          // Note: Global entities (null orgId) may need special handling
         } else {
           targetOrgId = selectedOrgId || organizationId.value!;
         }
         
-        // Remove organizationId from payload - it's in the URL path
-        delete createPayload.organizationId;
+        // Build create payload with name and slug at top-level
+        const createPayload = {
+          entityTypeId: entityType.id,
+          name: nameValue,
+          slug: slugValue,
+          data: dynamicData // Only dynamic fields
+        };
         
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:375',message:'Sending create request',data:{payload:JSON.stringify(createPayload).substring(0,200),targetOrgId},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'K'})}).catch(()=>{});
-        // #endregion
+        console.log('[EntityEditor] Sending create request:', {
+          targetOrgId,
+          entityTypeId: createPayload.entityTypeId,
+          name: createPayload.name,
+          slug: createPayload.slug,
+          dataKeys: Object.keys(createPayload.data)
+        });
         
         // Use organization-scoped route: /api/orgs/:orgId/entities
         response = await api.post<Entity>(`/api/orgs/${targetOrgId}/entities`, createPayload);
       } else {
-        response = await api.patch<Entity>(`/api/entities/${id}`, payload);
+        // Build update payload with name and slug at top-level
+        const updatePayload = {
+          name: nameValue,
+          slug: slugValue,
+          data: dynamicData // Only dynamic fields
+        };
+        
+        // Use org-scoped route for updates too
+        const targetOrgId = entity?.organizationId || selectedOrgId || organizationId.value;
+        if (targetOrgId) {
+          response = await api.patch<Entity>(`/api/orgs/${targetOrgId}/entities/${id}`, updatePayload);
+        } else {
+          // Fallback to global entity route
+          response = await api.patch<Entity>(`/api/entities/${id}`, updatePayload);
+        }
       }
       
       if (response.success && response.data) {
@@ -551,7 +613,26 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
           setEntity(response.data);
         }
       } else {
-        setSaveError(response.error?.message || 'Failed to save entity');
+        // Log full error details for debugging
+        console.error('[EntityEditor] Save failed:', {
+          error: response.error,
+          fullResponse: response
+        });
+        
+        // Build error message with field-level details if available
+        let errorMessage = response.error?.message || 'Failed to save entity';
+        const errorCode = response.error?.code;
+        const errorDetails = response.error?.details as Record<string, unknown> | undefined;
+        
+        // If there are field-level validation errors, include them
+        if (errorDetails?.fields && typeof errorDetails.fields === 'object') {
+          const fieldErrors = Object.entries(errorDetails.fields as Record<string, string[]>)
+            .map(([field, messages]) => `${field}: ${messages.join(', ')}`)
+            .join('; ');
+          errorMessage = `${errorMessage} (${fieldErrors})`;
+        }
+        
+        setSaveError(errorCode ? `${errorCode}: ${errorMessage}` : errorMessage);
       }
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Failed to save entity');
@@ -803,12 +884,6 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
                       
                       return (
                         <div key={field.id}>
-                          {/* #region agent log */}
-                          {field.id === 'slug' && (() => {
-                            fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EntityEditor.tsx:580',message:'Rendering slug field',data:{fieldId:field.id,formDataSlug:formData.slug,formDataName:formData.name,allFormDataKeys:Object.keys(formData)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-                            return null;
-                          })()}
-                          {/* #endregion */}
                           <FieldRenderer
                             field={field}
                             value={formData[field.id]}

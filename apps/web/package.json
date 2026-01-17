@@ -12,7 +12,8 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "reset:r2": "cd apps/worker && wrangler r2 object list 1cc-portal-data-dev --json | jq -r '.[].key' | xargs -I {} wrangler r2 object delete 1cc-portal-data-dev {}"
   },
   "dependencies": {
     "@1cc/shared": "*",

@@ -510,7 +510,7 @@ export function AdminDashboard() {
                   <tr key={entity.id} class="hover:bg-surface-50 dark:hover:bg-surface-800/50">
                     <td class="px-4 py-3">
                       <span class="font-medium text-surface-900 dark:text-surface-100">
-                        {(entity.data.name as string) || entity.id}
+                        {entity.name || entity.id}
                       </span>
                     </td>
                     <td class="px-4 py-3">

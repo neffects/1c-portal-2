@@ -562,12 +562,14 @@ function FieldEditorModal({
   field,
   sections,
   entityTypes,
+  existingFieldIds,
   onSave,
   onClose
 }: {
   field: Partial<FieldDefinition> | null;
   sections: FieldSection[];
   entityTypes: EntityTypeListItem[];
+  existingFieldIds: string[]; // IDs of all existing fields for uniqueness validation
   onSave: (field: Partial<FieldDefinition>) => void;
   onClose: () => void;
 }) {
@@ -576,6 +578,12 @@ function FieldEditorModal({
   // #endregion
   const [editingField, setEditingField] = useState<Partial<FieldDefinition>>(
     field || { ...defaultField, sectionId: sections[0]?.id || '' }
+  );
+  
+  // Track whether the field ID has been manually edited
+  // For existing fields (not starting with 'new-'), we consider ID as already set
+  const [fieldIdManuallySet, setFieldIdManuallySet] = useState(
+    field?.id ? !field.id.startsWith('new-') : false
   );
   
   // Sync local state when the field prop changes (e.g., when editing a different field)
@@ -587,20 +595,80 @@ function FieldEditorModal({
     if (field) {
       console.log('[FieldEditorModal] Field prop changed, syncing state:', field.name, field.id);
       setEditingField({ ...field });
+      // Reset the manual ID flag based on whether this is a new or existing field
+      setFieldIdManuallySet(field.id ? !field.id.startsWith('new-') : false);
     } else {
       console.log('[FieldEditorModal] No field, setting defaults');
       setEditingField({ ...defaultField, sectionId: sections[0]?.id || '' });
+      setFieldIdManuallySet(false);
     }
   }, [field?.id]); // Only re-sync when field ID changes
+  
+  // Auto-generate field ID from field name when name changes (if not manually set)
+  // Only for new fields (ID starting with 'new-' or empty)
+  useEffect(() => {
+    const isNewField = !editingField.id || editingField.id.startsWith('new-');
+    if (isNewField && editingField.name && !fieldIdManuallySet) {
+      const generatedId = slugify(editingField.name);
+      console.log('[FieldEditorModal] Auto-generated field ID:', generatedId, 'from name:', editingField.name);
+      setEditingField(prev => ({ ...prev, id: `new-${generatedId}` }));
+    }
+  }, [editingField.name, fieldIdManuallySet]);
   
   console.log('[FieldEditorModal] Current editing field:', editingField.name, editingField.id);
   
   if (!field && !editingField) return null;
   
+  // Helper to get the actual field ID (strip 'new-' prefix for new fields)
+  const getActualFieldId = () => {
+    const isNewField = !editingField.id || editingField.id.startsWith('new-');
+    return isNewField && editingField.id?.startsWith('new-') 
+      ? editingField.id.slice(4) 
+      : editingField.id || '';
+  };
+  
+  // Check if the field ID is unique (not already used by another field)
+  const isFieldIdUnique = () => {
+    const actualId = getActualFieldId();
+    if (!actualId) return true; // Empty IDs are handled by required validation
+    
+    // For existing fields being edited, exclude their own ID from the check
+    const isNewField = !field?.id || field.id.startsWith('new-');
+    const originalId = !isNewField ? field?.id : null;
+    
+    // Check if the ID exists in other fields (excluding the current field if editing)
+    return !existingFieldIds.some(id => id === actualId && id !== originalId);
+  };
+  
+  // Helper for save button validation - ID must exist and be unique
+  const getFieldIdForValidation = () => {
+    const actualId = getActualFieldId();
+    // Return empty string (falsy) if ID is missing or not unique
+    return actualId && isFieldIdUnique() ? actualId : '';
+  };
+  
   // Handle save with validation
   const handleSave = () => {
+    // Prevent saving built-in fields
+    const actualFieldId = getActualFieldId();
+    if (actualFieldId === 'name' || actualFieldId === 'slug') {
+      console.warn('[FieldEditorModal] Cannot save - built-in fields cannot be edited');
+      return;
+    }
+    
     if (!editingField.name || !editingField.type) {
-      console.warn('[FieldEditorModal] Cannot save - missing required fields');
+      console.warn('[FieldEditorModal] Cannot save - missing required fields (name or type)');
+      return;
+    }
+    // Validate field ID
+    const fieldId = getActualFieldId();
+    if (!fieldId) {
+      console.warn('[FieldEditorModal] Cannot save - missing field ID');
+      return;
+    }
+    // Check uniqueness
+    if (!isFieldIdUnique()) {
+      console.warn('[FieldEditorModal] Cannot save - field ID already exists:', fieldId);
       return;
     }
     console.log('[FieldEditorModal] Saving field:', editingField);
@@ -638,14 +706,18 @@ function FieldEditorModal({
         <div class="p-6 space-y-6 overflow-y-auto flex-1">
           {/* Check if this is a built-in field */}
           {(() => {
-            const isBuiltInField = editingField.id === 'entity_name' || editingField.id === 'entity_slug';
+            // Extract actual field ID (strip 'new-' prefix if present)
+            const actualFieldId = editingField.id?.startsWith('new-') 
+              ? editingField.id.slice(4) 
+              : editingField.id;
+            const isBuiltIn = actualFieldId === 'name' || actualFieldId === 'slug';
             return (
               <>
                 {/* Field Name */}
                 <div>
                   <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1">
                     Field Name <span class="text-red-500">*</span>
-                    {isBuiltInField && (
+                    {isBuiltIn && (
                       <span class="ml-2 text-xs text-primary-600">(Built-in field)</span>
                     )}
                   </label>
@@ -656,19 +728,78 @@ function FieldEditorModal({
                     class="input"
                     placeholder="e.g., Company Name"
                     autoFocus
-                    disabled={isBuiltInField}
+                    disabled={isBuiltIn}
                   />
-                  {isBuiltInField && (
+                  {isBuiltIn && (
                     <p class="text-xs text-surface-500 mt-1">Built-in field names cannot be changed</p>
                   )}
                 </div>
+                
+                {/* Field ID - editable for new fields only */}
+                {(() => {
+                  const isNewField = !editingField.id || editingField.id.startsWith('new-');
+                  // Extract the actual ID value (strip 'new-' prefix if present for display)
+                  const displayId = editingField.id?.startsWith('new-') 
+                    ? editingField.id.slice(4) // Remove 'new-' prefix
+                    : editingField.id || '';
+                  // Check if the field ID is valid (not empty after stripping prefix)
+                  const isValidId = displayId.length > 0;
+                  // Check if the field ID is unique (using the modal's isFieldIdUnique function)
+                  const isUnique = isFieldIdUnique();
+                  // Determine if there's an error to show
+                  const hasError = isNewField && !isBuiltIn && (!isValidId || !isUnique);
+                    
+                  return (
+                    <div>
+                      <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1">
+                        Field ID <span class="text-red-500">*</span>
+                        {isNewField && !isBuiltIn && (
+                          <span class="ml-2 text-xs text-surface-500">(auto-generated from name)</span>
+                        )}
+                      </label>
+                      <input
+                        type="text"
+                        value={displayId}
+                        onInput={(e) => {
+                          const newValue = (e.target as HTMLInputElement).value
+                            .toLowerCase()
+                            .replace(/[^a-z0-9_]/g, '_') // Only allow lowercase letters, numbers, underscores
+                            .replace(/^_+|_+$/g, '')      // Trim leading/trailing underscores
+                            .replace(/__+/g, '_');        // Replace multiple underscores with single
+                          console.log('[FieldEditorModal] Manual field ID edit:', newValue);
+                          setFieldIdManuallySet(true);
+                          // Store with 'new-' prefix for new fields
+                          const storeId = isNewField ? `new-${newValue}` : newValue;
+                          setEditingField({ ...editingField, id: storeId });
+                        }}
+                        class={`input font-mono text-sm ${hasError ? 'border-red-300 dark:border-red-700' : ''}`}
+                        placeholder="e.g., company_name"
+                        disabled={!isNewField || isBuiltIn}
+                        required
+                      />
+                      <p class="text-xs text-surface-500 mt-1">
+                        {isNewField && !isBuiltIn 
+                          ? 'Unique identifier for this field. Use snake_case (lowercase with underscores).'
+                          : isBuiltIn
+                          ? 'Built-in field IDs cannot be changed.'
+                          : 'Field IDs cannot be changed after creation.'}
+                      </p>
+                      {!isValidId && isNewField && !isBuiltIn && (
+                        <p class="text-xs text-red-500 mt-1">Field ID is required</p>
+                      )}
+                      {isValidId && !isUnique && isNewField && !isBuiltIn && (
+                        <p class="text-xs text-red-500 mt-1">This Field ID is already in use. Please choose a unique ID.</p>
+                      )}
+                    </div>
+                  );
+                })()}
                 
                 {/* Field Type - disabled for built-in fields */}
                 <div>
                   <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
                     Field Type <span class="text-red-500">*</span>
                   </label>
-                  {isBuiltInField ? (
+                  {isBuiltIn ? (
                     <div class="p-3 bg-surface-100 dark:bg-surface-800 rounded-lg border border-surface-200 dark:border-surface-700">
                       <span class="text-surface-600 dark:text-surface-400">
                         {FIELD_TYPE_META[editingField.type || 'string'].label} (cannot be changed for built-in fields)
@@ -763,7 +894,13 @@ function FieldEditorModal({
             type="button" 
             onClick={handleSave} 
             class="btn-primary"
-            disabled={!editingField.name || !editingField.type}
+            disabled={
+              !editingField.name || 
+              !editingField.type || 
+              !getFieldIdForValidation() ||
+              getActualFieldId() === 'name' || 
+              getActualFieldId() === 'slug'
+            }
           >
             <span class={`mr-2 ${field?.id ? 'i-lucide-check' : 'i-lucide-plus'}`}></span>
             {field?.id ? 'Update Field' : 'Add Field'}
@@ -885,12 +1022,22 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
     }
   ];
   
+  /**
+   * Check if a field is a built-in fixed field (name or slug)
+   * These fields cannot be edited, removed, or have their IDs changed
+   */
+  const isBuiltInField = (fieldId: string | undefined): boolean => {
+    return fieldId === 'name' || fieldId === 'slug';
+  };
+  
   // Form state
   const [name, setName] = useState('');
   const [pluralName, setPluralName] = useState('');
   const [slug, setSlug] = useState('');
   const [description, setDescription] = useState('');
-  const [defaultVisibility, setDefaultVisibility] = useState<'public' | 'authenticated' | 'members'>('authenticated');
+  const [visibleTo, setVisibleTo] = useState<string[]>(['public']); // Default to public key (always available)
+  const [fieldVisibility, setFieldVisibility] = useState<Record<string, string[]>>({});
+  const [membershipKeys, setMembershipKeys] = useState<Array<{ id: string; name: string; description?: string }>>([]);
   const [sections, setSections] = useState<FieldSection[]>([
     { id: 'main', name: 'Main Information', displayOrder: 0 }
   ]);
@@ -902,6 +1049,13 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  
+  // Hard delete state
+  const [showHardDeleteModal, setShowHardDeleteModal] = useState(false);
+  const [hardDeleteConfirmText, setHardDeleteConfirmText] = useState('');
+  const [hardDeleting, setHardDeleting] = useState(false);
+  const [deleteEntities, setDeleteEntities] = useState(false);
+  const [entityCount, setEntityCount] = useState<number | null>(null);
   
   // Modal state
   const [editingField, setEditingField] = useState<Partial<FieldDefinition> | null>(null);
@@ -948,6 +1102,13 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
     }
   }, [isSuperadmin.value]);
   
+  // Load membership keys for visibility configuration
+  useEffect(() => {
+    if (isSuperadmin.value) {
+      loadMembershipKeys();
+    }
+  }, [isSuperadmin.value]);
+  
   // Auto-generate slug from name
   useEffect(() => {
     if (isNew && name && !slugManuallyEdited) {
@@ -979,6 +1140,37 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
     }
   }
   
+  // Load membership keys for visibility configuration
+  async function loadMembershipKeys() {
+    console.log('[TypeBuilder] Loading membership keys');
+    try {
+      const response = await api.get('/api/super/config/membership-keys') as {
+        success: boolean;
+        data?: { keys: Array<{ id: string; name: string; description?: string }> };
+      };
+      
+      if (response.success && response.data) {
+        setMembershipKeys(response.data.keys);
+        console.log('[TypeBuilder] Loaded membership keys:', response.data.keys.length);
+        
+        // Filter out invalid keys from visibleTo now that we know valid keys
+        const validKeyIds = response.data.keys.map(k => k.id);
+        setVisibleTo(prev => {
+          const filtered = prev.filter(keyId => validKeyIds.includes(keyId));
+          if (filtered.length !== prev.length) {
+            const invalidKeys = prev.filter(keyId => !validKeyIds.includes(keyId));
+            console.warn('[TypeBuilder] Filtered out invalid visibleTo keys:', invalidKeys, 'Valid keys:', validKeyIds);
+          }
+          // Ensure at least 'public' if all keys were invalid
+          return filtered.length > 0 ? filtered : ['public'];
+        });
+      }
+    } catch (err) {
+      console.error('[TypeBuilder] Error loading membership keys:', err);
+      // Don't fail the whole page if keys can't load
+    }
+  }
+  
   // Load existing type data
   async function loadType(typeId: string) {
     setLoading(true);
@@ -995,7 +1187,13 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
       setSlug(type.slug);
       setSlugManuallyEdited(true); // Don't auto-update slug when editing
       setDescription(type.description || '');
-      setDefaultVisibility(type.defaultVisibility as 'public' | 'authenticated' | 'members');
+      // Load visibleTo, filtering out any invalid keys that don't exist in current config
+      // This handles migration from old key names (platform, member) to new ones (members, collaborators)
+      const loadedVisibleTo = type.visibleTo || ['public'];
+      // We'll filter invalid keys after membership keys are loaded
+      // For now, just set what we have - invalid keys will be shown as warnings in UI
+      setVisibleTo(loadedVisibleTo);
+      setFieldVisibility(type.fieldVisibility || {});
       setSections(type.sections);
       // Load ALL fields including built-in ones
       setFields(type.fields);
@@ -1110,15 +1308,28 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
       ));
     } else {
       // Add new field with deterministic, human-readable ID
-      // Generate from the field name (e.g., "Product Name" -> "product_name")
+      // Use the ID from modal if manually set (strip 'new-' prefix), otherwise generate from name
       console.log('[TypeBuilder] Adding new field');
       const existingFieldIds = fields.map(f => f.id);
+      
+      // Extract the manually set ID if present (after 'new-' prefix)
+      let fieldId: string;
+      if (fieldData.id && fieldData.id.startsWith('new-')) {
+        const manualId = fieldData.id.slice(4); // Remove 'new-' prefix
+        // Ensure uniqueness - if the manual ID already exists, make it unique
+        fieldId = existingFieldIds.includes(manualId) 
+          ? generateUniqueId(manualId, existingFieldIds)
+          : manualId || generateUniqueId(fieldData.name || 'field', existingFieldIds);
+      } else {
+        fieldId = generateUniqueId(fieldData.name || 'field', existingFieldIds);
+      }
+      
       const newField: FieldDefinition = {
         ...fieldData,
-        id: generateUniqueId(fieldData.name || 'field', existingFieldIds),
+        id: fieldId,
         displayOrder: fields.length
       } as FieldDefinition;
-      console.log('[TypeBuilder] Generated field ID:', newField.id);
+      console.log('[TypeBuilder] Final field ID:', newField.id);
       setFields([...fields, newField]);
     }
     
@@ -1129,7 +1340,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
   // Remove a field (built-in fields cannot be removed)
   function handleRemoveField(fieldId: string) {
     // Don't allow removing built-in fields
-    if (fieldId === 'entity_name' || fieldId === 'entity_slug') {
+    if (isBuiltInField(fieldId)) {
       console.warn('[TypeBuilder] Cannot remove built-in field:', fieldId);
       return;
     }
@@ -1197,7 +1408,8 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
       pluralName,
       slug,
       description: description || undefined,
-      defaultVisibility,
+      visibleTo: visibleTo.length > 0 ? visibleTo : ['public'], // Ensure at least one key (public is always available)
+      fieldVisibility: Object.keys(fieldVisibility).length > 0 ? fieldVisibility : undefined,
       sections: isNew 
         ? sections.map(({ id, ...s }) => s)
         : sections,
@@ -1208,24 +1420,115 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
     
     console.log('[TypeBuilder] Submitting payload:', payload);
     
-    const response = isNew
-      ? await api.post('/api/entity-types', payload)
-      : await api.patch(`/api/entity-types/${id}`, payload);
-    
-    if (response.success) {
-      console.log('[TypeBuilder] Save successful');
-      setSuccessMessage(isNew ? 'Entity type created successfully!' : 'Entity type updated successfully!');
+    try {
+      const response = isNew
+        ? await api.post('/api/entity-types', payload)
+        : await api.patch(`/api/entity-types/${id}`, payload);
       
-      // Redirect after short delay to show success message
-      setTimeout(() => {
-        route('/super/types');
-      }, 1000);
-    } else {
-      console.error('[TypeBuilder] Save failed:', response.error);
-      setError(response.error?.message || 'Failed to save entity type');
+      console.log('[TypeBuilder] Save response:', response);
+      
+      if (response.success) {
+        console.log('[TypeBuilder] Save successful');
+        setSuccessMessage(isNew ? 'Entity type created successfully!' : 'Entity type updated successfully!');
+        
+        // Redirect after short delay to show success message
+        setTimeout(() => {
+          route('/super/types');
+        }, 1000);
+      } else {
+        console.error('[TypeBuilder] Save failed:', response.error);
+        setError(response.error?.message || 'Failed to save entity type');
+      }
+    } catch (err) {
+      console.error('[TypeBuilder] Save exception:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save entity type');
+    } finally {
+      setSaving(false);
+    }
+  }
+  
+  /**
+   * Load entity count for the current type
+   */
+  async function loadEntityCount() {
+    if (!id) return;
+    
+    try {
+      // Get entity type from listing to get count
+      const response = await api.get('/api/entity-types?includeInactive=true') as {
+        success: boolean;
+        data?: { items: Array<{ id: string; entityCount?: number }> };
+      };
+      
+      if (response.success && response.data) {
+        const type = response.data.items.find(t => t.id === id);
+        if (type) {
+          setEntityCount(type.entityCount || 0);
+          console.log('[TypeBuilder] Entity count for type:', type.entityCount || 0);
+        }
+      }
+    } catch (err) {
+      console.error('[TypeBuilder] Error loading entity count:', err);
+    }
+  }
+  
+  /**
+   * Handle hard delete (permanent) of entity type
+   * This is a destructive operation that cannot be undone!
+   * Requires typing the entity type name to confirm
+   */
+  async function handleHardDelete() {
+    if (!id || !name) return;
+    
+    // Require exact match of entity type name
+    if (hardDeleteConfirmText !== name) {
+      console.log('[TypeBuilder] Hard delete confirmation text does not match');
+      return;
     }
     
-    setSaving(false);
+    console.log('[TypeBuilder] HARD DELETE - Starting permanent deletion of entity type:', id, name, 'deleteEntities:', deleteEntities);
+    setHardDeleting(true);
+    setError(null);
+    
+    try {
+      // Build URL with query parameter if deleteEntities is true
+      const url = deleteEntities 
+        ? `/api/entity-types/${id}/hard?deleteEntities=true`
+        : `/api/entity-types/${id}/hard`;
+      
+      const response = await api.delete(url) as {
+        success: boolean;
+        data?: { message: string };
+        error?: { code: string; message: string };
+      };
+      
+      if (response.success) {
+        console.log('[TypeBuilder] HARD DELETE - Success:', response.data?.message);
+        setSuccessMessage(`Entity type "${name}" has been permanently deleted${deleteEntities ? ' along with all its entities' : ''}.`);
+        setShowHardDeleteModal(false);
+        setHardDeleteConfirmText('');
+        setDeleteEntities(false);
+        
+        // Redirect to types list after short delay
+        setTimeout(() => {
+          route('/super/types');
+        }, 1500);
+      } else {
+        console.error('[TypeBuilder] HARD DELETE - Failed:', response.error);
+        setError(response.error?.message || 'Failed to permanently delete entity type');
+        setShowHardDeleteModal(false);
+        setHardDeleteConfirmText('');
+        setDeleteEntities(false);
+      }
+    } catch (err) {
+      console.error('[TypeBuilder] HARD DELETE - Exception:', err);
+      setError(err instanceof Error ? err.message : 'Failed to permanently delete entity type');
+      setShowHardDeleteModal(false);
+      setHardDeleteConfirmText('');
+      setDeleteEntities(false);
+    } finally {
+      setHardDeleting(false);
+    }
   }
   
   // All fields for display (sorted)
@@ -1384,31 +1687,60 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
             </div>
           </div>
           
-          {/* Visibility Settings Card */}
+          {/* Membership Key Visibility Card */}
           <div class="card p-6">
             <h2 class="heading-4 mb-4 flex items-center gap-2">
               <span class="i-lucide-eye text-primary-500"></span>
-              Default Visibility
+              Membership Key Visibility
             </h2>
             
             <div class="space-y-4">
               <div>
-                <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1">
-                  Visibility for new entities
+                <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                  Which membership keys can see entities of this type?
                 </label>
-                <select
-                  value={defaultVisibility}
-                  onChange={(e) => setDefaultVisibility((e.target as HTMLSelectElement).value as 'public' | 'authenticated' | 'members')}
-                  class="input"
-                >
-                  <option value="public">🌍 Public — Everyone (SEO indexable)</option>
-                  <option value="authenticated">👥 Authenticated — All logged-in users</option>
-                  <option value="members">🔒 Members — Organization members only</option>
-                </select>
-                <p class="text-xs text-surface-500 mt-1">
-                  This sets the default visibility when creating new entities of this type. 
-                  Users can change visibility per entity.
+                <div class="space-y-2 border border-surface-200 dark:border-surface-700 rounded-lg p-4">
+                  {membershipKeys.length > 0 ? (
+                    membershipKeys.map(key => (
+                      <label key={key.id} class="flex items-start gap-3 cursor-pointer p-2 rounded hover:bg-surface-50 dark:hover:bg-surface-800">
+                        <input
+                          type="checkbox"
+                          checked={visibleTo.includes(key.id)}
+                          onChange={(e) => {
+                            if ((e.target as HTMLInputElement).checked) {
+                              setVisibleTo([...visibleTo, key.id]);
+                            } else {
+                              const newVisibleTo = visibleTo.filter(k => k !== key.id);
+                              // Ensure at least one key is selected
+                              if (newVisibleTo.length > 0) {
+                                setVisibleTo(newVisibleTo);
+                              }
+                            }
+                          }}
+                          class="checkbox mt-1"
+                        />
+                        <div class="flex-1">
+                          <div class="font-medium text-surface-900 dark:text-surface-100">{key.name}</div>
+                          {key.description && (
+                            <div class="text-xs text-surface-500 mt-0.5">{key.description}</div>
+                          )}
+                        </div>
+                      </label>
+                    ))
+                  ) : (
+                    <div class="text-sm text-surface-500">Loading membership keys...</div>
+                  )}
+                </div>
+                <p class="text-xs text-surface-500 mt-2">
+                  Select which membership keys can access entities of this type. 
+                  Users with higher-tier keys will see more fields (if field visibility is configured).
                 </p>
+                {visibleTo.length === 0 && (
+                  <p class="text-xs text-warning-600 mt-1 flex items-center gap-1">
+                    <span class="i-lucide-alert-triangle"></span>
+                    At least one membership key must be selected.
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -1526,7 +1858,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                       <div class="space-y-2">
                         {sectionFields.map((field, fieldIndex) => {
                           // Check if this is a built-in/default field
-                          const isBuiltIn = field.id === 'entity_name' || field.id === 'entity_slug';
+                          const isBuiltIn = isBuiltInField(field.id);
                           
                           // #region agent log
                           if (!isBuiltIn) {
@@ -1539,7 +1871,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                               key={field.id}
                               class={`flex items-center gap-3 p-3 rounded-lg border transition-colors group ${
                                 isBuiltIn 
-                                  ? 'bg-primary-50 dark:bg-primary-900/10 border-primary-200 dark:border-primary-800'
+                                  ? 'bg-primary-50 dark:bg-primary-900/10 border-primary-200 dark:border-primary-800 cursor-default'
                                   : 'bg-surface-50 dark:bg-surface-900 border-surface-200 dark:border-surface-700 hover:border-primary-300 dark:hover:border-primary-700 cursor-pointer'
                               }`}
                               onClick={(e) => {
@@ -1560,15 +1892,15 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                                 }
                               }}
                             >
-                              {/* Reorder buttons - hidden for built-in fields */}
-                              <div class={`flex flex-col gap-0.5 transition-opacity ${isBuiltIn ? 'opacity-0' : 'opacity-0 group-hover:opacity-100'}`}>
+                              {/* Reorder buttons - allow reordering for all fields including built-in */}
+                              <div class="flex flex-col gap-0.5 transition-opacity opacity-0 group-hover:opacity-100">
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleMoveField(field.id, 'up');
                                   }}
-                                  disabled={fieldIndex === 0 || isBuiltIn}
+                                  disabled={fieldIndex === 0}
                                   class="p-0.5 text-surface-400 hover:text-surface-600 disabled:opacity-30 disabled:cursor-not-allowed"
                                 >
                                   <span class="i-lucide-chevron-up text-xs"></span>
@@ -1579,7 +1911,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                                     e.stopPropagation();
                                     handleMoveField(field.id, 'down');
                                   }}
-                                  disabled={fieldIndex === sectionFields.length - 1 || isBuiltIn}
+                                  disabled={fieldIndex === sectionFields.length - 1}
                                   class="p-0.5 text-surface-400 hover:text-surface-600 disabled:opacity-30 disabled:cursor-not-allowed"
                                 >
                                   <span class="i-lucide-chevron-down text-xs"></span>
@@ -1597,6 +1929,9 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                                   <span class="font-medium text-surface-900 dark:text-surface-100">
                                     {field.name}
                                   </span>
+                                  <code class="px-1.5 py-0.5 text-xs font-mono bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-400 rounded">
+                                    {field.id}
+                                  </code>
                                   {isBuiltIn && (
                                     <span class="px-1.5 py-0.5 text-xs font-medium bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400 rounded flex items-center gap-1">
                                       <span class="i-lucide-lock text-xs"></span>
@@ -1624,7 +1959,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                                 </div>
                               </div>
                               
-                              {/* Actions - edit button for all fields, delete only for custom fields */}
+                              {/* Actions - edit button disabled for built-in fields, delete only for custom fields */}
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -1632,10 +1967,17 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                                   fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1520',message:'Edit button clicked',data:{fieldId:field.id,fieldName:field.name,isBuiltIn,eventType:e.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
                                   // #endregion
                                   e.stopPropagation();
-                                  handleEditField(field);
+                                  if (!isBuiltIn) {
+                                    handleEditField(field);
+                                  }
                                 }}
-                                class="p-2 text-surface-500 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded transition-colors"
-                                title="Edit field"
+                                disabled={isBuiltIn}
+                                class={`p-2 rounded transition-colors ${
+                                  isBuiltIn 
+                                    ? 'text-surface-300 dark:text-surface-600 cursor-not-allowed opacity-50' 
+                                    : 'text-surface-500 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20'
+                                }`}
+                                title={isBuiltIn ? 'Built-in fields cannot be edited' : 'Edit field'}
                               >
                                 <span class="i-lucide-pencil"></span>
                               </button>
@@ -1693,10 +2035,33 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
           
           {/* Actions */}
           <div class="flex items-center justify-between pt-4 border-t border-surface-200 dark:border-surface-700">
-            <a href="/super/types" class="btn-ghost">
-              <span class="i-lucide-arrow-left mr-2"></span>
-              Cancel
-            </a>
+            <div class="flex items-center gap-3">
+              <a href="/super/types" class="btn-ghost">
+                <span class="i-lucide-arrow-left mr-2"></span>
+                Cancel
+              </a>
+              
+              {/* Hard Delete button - only shown when editing existing type */}
+              {!isNew && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    console.log('[TypeBuilder] Opening hard delete modal');
+                    setShowHardDeleteModal(true);
+                    setDeleteEntities(false);
+                    setHardDeleteConfirmText('');
+                    // Load entity count when opening modal
+                    await loadEntityCount();
+                  }}
+                  disabled={saving || hardDeleting}
+                  class="btn-ghost text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 border border-red-200 dark:border-red-800"
+                  title="Permanently delete this entity type. This cannot be undone!"
+                >
+                  <span class="i-lucide-skull mr-2"></span>
+                  Hard Delete
+                </button>
+              )}
+            </div>
             
             <div class="flex items-center gap-3">
               {/* Validation summary */}
@@ -1747,6 +2112,7 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
           field={editingField}
           sections={sections}
           entityTypes={entityTypes}
+          existingFieldIds={fields.map(f => f.id)}
           onSave={handleSaveField}
           onClose={() => {
             // #region agent log
@@ -1757,6 +2123,152 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
             setEditingField(null);
           }}
         />
+      )}
+      
+      {/* Hard Delete Confirmation Modal */}
+      {showHardDeleteModal && (
+        <div 
+          class="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in"
+          onClick={() => {
+            setShowHardDeleteModal(false);
+            setHardDeleteConfirmText('');
+          }}
+        >
+          <div 
+            class="bg-white dark:bg-surface-800 rounded-xl shadow-2xl w-full max-w-md border-2 border-red-500 animate-slide-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div class="p-6 border-b border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 rounded-t-xl">
+              <div class="flex items-center gap-3">
+                <div class="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
+                  <span class="i-lucide-skull text-2xl text-red-600"></span>
+                </div>
+                <div>
+                  <h2 class="text-xl font-bold text-red-700 dark:text-red-400">
+                    Permanently Delete Entity Type
+                  </h2>
+                  <p class="text-sm text-red-600 dark:text-red-400">
+                    This action cannot be undone!
+                  </p>
+                </div>
+              </div>
+            </div>
+            
+            {/* Content */}
+            <div class="p-6 space-y-4">
+              <p class="text-surface-700 dark:text-surface-300">
+                You are about to <strong class="text-red-600">permanently delete</strong> the entity type 
+                <span class="font-bold text-surface-900 dark:text-surface-100"> "{name}"</span>.
+              </p>
+              
+              <div class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
+                <div class="flex items-start gap-2">
+                  <span class="i-lucide-alert-triangle text-amber-600 mt-0.5"></span>
+                  <div class="text-sm text-amber-700 dark:text-amber-400">
+                    <p class="font-medium">This will:</p>
+                    <ul class="list-disc list-inside mt-1 space-y-0.5">
+                      <li>Remove the entity type definition permanently</li>
+                      <li>Remove this type from all organization permissions</li>
+                      <li>This type will no longer appear in any manifests</li>
+                      {deleteEntities && entityCount !== null && entityCount > 0 && (
+                        <li class="text-red-600 font-semibold">
+                          Delete all {entityCount} {entityCount === 1 ? 'entity' : 'entities'} of this type
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Show entity count and option to delete entities */}
+              {entityCount !== null && entityCount > 0 && (
+                <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                  <div class="flex items-start gap-3">
+                    <label class="flex items-start gap-3 cursor-pointer flex-1">
+                      <input
+                        type="checkbox"
+                        checked={deleteEntities}
+                        onChange={(e) => setDeleteEntities((e.target as HTMLInputElement).checked)}
+                        disabled={hardDeleting}
+                        class="checkbox mt-0.5 border-red-300 text-red-600 focus:ring-red-500"
+                      />
+                      <div class="flex-1">
+                        <div class="font-medium text-red-700 dark:text-red-400 mb-1">
+                          Also delete all {entityCount} {entityCount === 1 ? 'entity' : 'entities'} of this type
+                        </div>
+                        <div class="text-sm text-red-600 dark:text-red-400">
+                          This will permanently delete all entities of this type before deleting the type itself. This cannot be undone!
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+              )}
+              
+              {entityCount !== null && entityCount === 0 && (
+                <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3">
+                  <div class="flex items-center gap-2">
+                    <span class="i-lucide-check-circle text-green-600"></span>
+                    <div class="text-sm text-green-700 dark:text-green-400">
+                      <p class="font-medium">No entities found</p>
+                      <p class="mt-0.5">This type has no entities, so it can be safely deleted.</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              <div>
+                <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                  Type <span class="font-bold text-red-600">"{name}"</span> to confirm:
+                </label>
+                <input
+                  type="text"
+                  value={hardDeleteConfirmText}
+                  onInput={(e) => setHardDeleteConfirmText((e.target as HTMLInputElement).value)}
+                  placeholder={name}
+                  class="input w-full border-red-300 dark:border-red-700 focus:ring-red-500 focus:border-red-500"
+                  autoComplete="off"
+                />
+              </div>
+            </div>
+            
+            {/* Footer */}
+            <div class="p-6 border-t border-surface-200 dark:border-surface-700 flex justify-end gap-3 bg-surface-50 dark:bg-surface-900 rounded-b-xl">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowHardDeleteModal(false);
+                  setHardDeleteConfirmText('');
+                  setDeleteEntities(false);
+                  setEntityCount(null);
+                }}
+                class="btn-secondary"
+                disabled={hardDeleting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleHardDelete}
+                disabled={hardDeleting || hardDeleteConfirmText !== name}
+                class="bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors disabled:cursor-not-allowed"
+              >
+                {hardDeleting ? (
+                  <>
+                    <span class="i-lucide-loader-2 animate-spin"></span>
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <span class="i-lucide-trash-2"></span>
+                    Permanently Delete
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

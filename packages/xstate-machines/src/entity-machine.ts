@@ -210,6 +210,10 @@ export const entityMachine = setup({
 
 /**
  * Get allowed transitions for a given status
+ * 
+ * Note: 'superDelete' is a superadmin-only action that bypasses this validation.
+ * It can be called from ANY status and permanently removes the entity.
+ * The superDelete action is handled specially in the super/entities.ts route.
  */
 export function getAllowedTransitions(status: EntityStatus): string[] {
   const transitions: Record<EntityStatus, string[]> = {

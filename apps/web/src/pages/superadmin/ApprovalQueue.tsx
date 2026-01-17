@@ -148,7 +148,7 @@ export function ApprovalQueue() {
                 <div class="flex items-start justify-between gap-4">
                   <div class="flex-1">
                     <h3 class="font-semibold text-lg text-surface-900 dark:text-surface-100 mb-1">
-                      {(entity.data.name as string) || `Entity ${entity.id}`}
+                      {entity.name || `Entity ${entity.id}`}
                     </h3>
                     
                     {entity.data.description && (

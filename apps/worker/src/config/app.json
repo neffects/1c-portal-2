@@ -23,5 +23,42 @@
   "auth": {
     "magicLinkExpiry": 600,
     "sessionDuration": 604800
+  },
+  "membershipKeys": {
+    "keys": [
+      {
+        "id": "public",
+        "name": "Public",
+        "description": "Accessible to everyone without authentication",
+        "requiresAuth": false,
+        "order": 0
+      },
+      {
+        "id": "platform",
+        "name": "Platform",
+        "description": "All authenticated platform users",
+        "requiresAuth": true,
+        "order": 1
+      },
+      {
+        "id": "member",
+        "name": "Member",
+        "description": "Full member organization users",
+        "requiresAuth": true,
+        "order": 2
+      }
+    ],
+    "organizationTiers": [
+      {
+        "id": "platform",
+        "name": "Platform Tier",
+        "grantedKeys": ["public", "platform"]
+      },
+      {
+        "id": "full_member",
+        "name": "Full Member",
+        "grantedKeys": ["public", "platform", "member"]
+      }
+    ]
   }
 }

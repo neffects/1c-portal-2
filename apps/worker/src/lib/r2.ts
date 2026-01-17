@@ -148,65 +148,42 @@ export async function listFilesPaginated(
 // Path builders for different storage locations
 
 /**
- * Visibility scope type (user-facing values)
- * Maps to R2 storage prefixes:
- * - 'public' -> R2_PATHS.PUBLIC (public/)
- * - 'authenticated' -> R2_PATHS.PLATFORM (platform/)
- * - 'members' -> R2_PATHS.PRIVATE (private/)
+ * Membership key ID (references config membershipKeys.keys[].id)
+ * Used for bundle and manifest paths
  */
-type VisibilityScope = 'public' | 'authenticated' | 'members';
-
-/**
- * Get R2 path prefix for a visibility scope
- */
-function getVisibilityPrefix(visibility: VisibilityScope): string {
-  switch (visibility) {
-    case 'public':
-      return R2_PATHS.PUBLIC;
-    case 'authenticated':
-      return R2_PATHS.PLATFORM;
-    case 'members':
-      return R2_PATHS.PRIVATE;
-    default:
-      return R2_PATHS.PLATFORM;
-  }
-}
-
-/**
- * Check if visibility scope is organization-specific (members only)
- */
-function isOrgSpecificVisibility(visibility: VisibilityScope): boolean {
-  return visibility === 'members';
-}
+export type MembershipKeyId = string;
 
 /**
  * Get path for entity version file
+ * Legacy function - still uses old visibility scopes for entity storage
+ * Entities are stored in public/, platform/, or private/orgs/{orgId}/ based on visibility
  */
 export function getEntityVersionPath(
-  visibility: VisibilityScope,
+  visibility: 'public' | 'authenticated' | 'members',
   entityId: string,
   version: number,
   orgId?: string
 ): string {
-  if (isOrgSpecificVisibility(visibility) && orgId) {
+  if (visibility === 'members' && orgId) {
     return `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/${entityId}/v${version}.json`;
   }
-  const prefix = getVisibilityPrefix(visibility);
+  const prefix = visibility === 'public' ? R2_PATHS.PUBLIC : R2_PATHS.PLATFORM;
   return `${prefix}entities/${entityId}/v${version}.json`;
 }
 
 /**
  * Get path for entity latest pointer
+ * Legacy function - still uses old visibility scopes for entity storage
  */
 export function getEntityLatestPath(
-  visibility: VisibilityScope,
+  visibility: 'public' | 'authenticated' | 'members',
   entityId: string,
   orgId?: string
 ): string {
-  if (isOrgSpecificVisibility(visibility) && orgId) {
+  if (visibility === 'members' && orgId) {
     return `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/${entityId}/latest.json`;
   }
-  const prefix = getVisibilityPrefix(visibility);
+  const prefix = visibility === 'public' ? R2_PATHS.PUBLIC : R2_PATHS.PLATFORM;
   return `${prefix}entities/${entityId}/latest.json`;
 }
 
@@ -246,32 +223,51 @@ export function getUserMembershipPath(orgId: string, userId: string): string {
 }
 
 /**
- * Get path for site manifest
+ * Get path for global site manifest (by membership key)
+ * Path: bundles/{keyId}/site.json
  */
-export function getManifestPath(
-  visibility: VisibilityScope,
-  orgId?: string
-): string {
-  if (isOrgSpecificVisibility(visibility) && orgId) {
-    return `${R2_PATHS.PRIVATE}orgs/${orgId}/manifests/site.json`;
-  }
-  const prefix = getVisibilityPrefix(visibility);
-  return `${prefix}manifests/site.json`;
+export function getManifestPath(keyId: MembershipKeyId): string {
+  return `bundles/${keyId}/site.json`;
 }
 
 /**
- * Get path for entity bundle
+ * Get path for org member manifest
+ * Path: bundles/org/{orgId}/member/site.json
  */
-export function getBundlePath(
-  visibility: VisibilityScope,
-  typeId: string,
-  orgId?: string
-): string {
-  if (isOrgSpecificVisibility(visibility) && orgId) {
-    return `${R2_PATHS.PRIVATE}orgs/${orgId}/bundles/${typeId}.json`;
-  }
-  const prefix = getVisibilityPrefix(visibility);
-  return `${prefix}bundles/${typeId}.json`;
+export function getOrgMemberManifestPath(orgId: string): string {
+  return `bundles/org/${orgId}/member/site.json`;
+}
+
+/**
+ * Get path for org admin manifest
+ * Path: bundles/org/{orgId}/admin/site.json
+ */
+export function getOrgAdminManifestPath(orgId: string): string {
+  return `bundles/org/${orgId}/admin/site.json`;
+}
+
+/**
+ * Get path for global entity bundle (by membership key)
+ * Path: bundles/{keyId}/{typeId}.json
+ */
+export function getBundlePath(keyId: MembershipKeyId, typeId: string): string {
+  return `bundles/${keyId}/${typeId}.json`;
+}
+
+/**
+ * Get path for org member bundle
+ * Path: bundles/org/{orgId}/member/{typeId}.json
+ */
+export function getOrgMemberBundlePath(orgId: string, typeId: string): string {
+  return `bundles/org/${orgId}/member/${typeId}.json`;
+}
+
+/**
+ * Get path for org admin bundle
+ * Path: bundles/org/{orgId}/admin/{typeId}.json
+ */
+export function getOrgAdminBundlePath(orgId: string, typeId: string): string {
+  return `bundles/org/${orgId}/admin/${typeId}.json`;
 }
 
 /**

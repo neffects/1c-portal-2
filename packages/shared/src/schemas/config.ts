@@ -49,3 +49,31 @@ export const updateBrandingRequestSchema = brandingConfigSchema.partial().requir
   siteName: true,
   logoUrl: true
 });
+
+/**
+ * Membership key definition schema
+ */
+export const membershipKeyDefinitionSchema = z.object({
+  id: z.string().min(1).max(50).regex(/^[a-z0-9_]+$/, 'Key ID must be lowercase with underscores'),
+  name: z.string().min(1).max(100),
+  description: z.string().max(500).optional(),
+  requiresAuth: z.boolean(),
+  order: z.number().int().nonnegative()
+});
+
+/**
+ * Organization tier definition schema
+ */
+export const organizationTierDefinitionSchema = z.object({
+  id: z.string().min(1).max(50).regex(/^[a-z0-9_]+$/, 'Tier ID must be lowercase with underscores'),
+  name: z.string().min(1).max(100),
+  grantedKeys: z.array(z.string().min(1)).min(1)
+});
+
+/**
+ * Membership configuration schema
+ */
+export const membershipConfigSchema = z.object({
+  keys: z.array(membershipKeyDefinitionSchema).min(1),
+  organizationTiers: z.array(organizationTierDefinitionSchema).min(1)
+});

@@ -8,7 +8,9 @@
  * - POST /entities/bulk-import - Atomic bulk import with versioning
  * - POST /entities - Create entity (global or any org)
  * - GET /entities - List entities
- * - GET /entities/:id - Get entity by ID
+ * - GET /entities/:id - Get entity by ID (global or org-scoped)
+ * - PATCH /entities/:id - Update entity by ID (global or org-scoped)
+ * - POST /entities/:id/transition - Status transition (delete, archive, etc.)
  */
 
 import { Hono } from 'hono';
@@ -19,23 +21,26 @@ import {
   updateEntityRequestSchema, 
   entityQueryParamsSchema,
   exportQuerySchema,
-  bulkImportRequestSchema
+  bulkImportRequestSchema,
+  entityTransitionRequestSchema
 } from '@1cc/shared';
+import { isValidTransition, getAllowedTransitions } from '@1cc/xstate-machines';
 import type { BulkImportError } from '@1cc/shared';
 import { 
-  readJSON, writeJSON, listFiles, 
+  readJSON, writeJSON, listFiles, deleteFile,
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath, 
-  getEntityTypePath, getOrgPermissionsPath 
+  getEntityTypePath, getOrgPermissionsPath, getBundlePath,
+  getOrgMemberBundlePath, getOrgAdminBundlePath
 } from '../../lib/r2';
-import { regenerateEntityBundles } from '../../lib/bundle-invalidation';
+import { regenerateEntityBundles, loadAppConfig } from '../../lib/bundle-invalidation';
 import { upsertSlugIndex, deleteSlugIndex } from '../../lib/slug-index';
 import { R2_PATHS } from '@1cc/shared';
-import { createEntityId, createSlug } from '../../lib/id';
-import { NotFoundError, ForbiddenError, ValidationError } from '../../middleware/error';
-import { validateEntityData, validateEntityFields } from '../../lib/entity-validation';
+import { createEntityId } from '../../lib/id';
+import { NotFoundError, ForbiddenError, ValidationError, AppError } from '../../middleware/error';
+import { validateEntityData, validateEntityFields, checkSlugUniqueness } from '../../lib/entity-validation';
 import type { 
-  Entity, EntityStub, EntityLatestPointer, EntityType, 
-  EntityTypePermissions, VisibilityScope 
+  Entity, EntityStub, EntityLatestPointer, EntityType, EntityListItem,
+  EntityTypePermissions, VisibilityScope, EntityStatus, EntityBundle, BundleEntity
 } from '@1cc/shared';
 
 export const superEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -44,6 +49,7 @@ export const superEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables 
  * GET /entities/export
  * Export entities for a type (superadmin only)
  * Returns entities with the entity type schema for CSV template generation
+ * Uses bundles to aggregate entities (same approach as listing endpoint)
  */
 superEntityRoutes.get('/entities/export',
   zValidator('query', exportQuerySchema),
@@ -63,54 +69,152 @@ superEntityRoutes.get('/entities/export',
     throw new NotFoundError('Entity Type', query.typeId);
   }
   
-  // Collect all entities for this type
+  // Collect bundle entities (same approach as listing endpoint)
+  const bundleEntityMap = new Map<string, { bundleEntity: BundleEntity; organizationId: string | null; visibility: VisibilityScope }>();
+  
+  // 1. Load global bundles (public and platform)
+  console.log('[SuperEntities] Loading global bundles for export - type:', query.typeId);
+  
+  const publicBundlePath = getBundlePath('public', query.typeId);
+  const publicBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicBundlePath);
+  if (publicBundle) {
+    console.log('[SuperEntities] Loaded public bundle with', publicBundle.entities.length, 'entities');
+    for (const bundleEntity of publicBundle.entities) {
+      if (!bundleEntityMap.has(bundleEntity.id)) {
+        bundleEntityMap.set(bundleEntity.id, {
+          bundleEntity,
+          organizationId: null,
+          visibility: 'public'
+        });
+      }
+    }
+  }
+  
+  const platformBundlePath = getBundlePath('platform', query.typeId);
+  const platformBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformBundlePath);
+  if (platformBundle) {
+    console.log('[SuperEntities] Loaded platform bundle with', platformBundle.entities.length, 'entities');
+    for (const bundleEntity of platformBundle.entities) {
+      if (!bundleEntityMap.has(bundleEntity.id)) {
+        bundleEntityMap.set(bundleEntity.id, {
+          bundleEntity,
+          organizationId: null,
+          visibility: 'authenticated'
+        });
+      }
+    }
+  }
+  
+  // 2. Load all organization bundles
+  console.log('[SuperEntities] Loading organization bundles for export - type:', query.typeId);
+  
+  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+  const orgIds = new Set<string>();
+  
+  // Extract organization IDs from file paths
+  for (const file of orgFiles) {
+    const match = file.match(/orgs\/([^\/]+)\//);
+    if (match) {
+      orgIds.add(match[1]);
+    }
+  }
+  
+  console.log('[SuperEntities] Found', orgIds.size, 'organizations');
+  
+  // Load all organization bundles first (don't filter inside the loop)
+  for (const orgId of orgIds) {
+    // Load member bundle (published entities)
+    const memberBundlePath = getOrgMemberBundlePath(orgId, query.typeId);
+    const memberBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, memberBundlePath);
+    if (memberBundle) {
+      console.log('[SuperEntities] Loaded member bundle for org', orgId, 'with', memberBundle.entities.length, 'entities');
+      for (const bundleEntity of memberBundle.entities) {
+        if (!bundleEntityMap.has(bundleEntity.id)) {
+          bundleEntityMap.set(bundleEntity.id, {
+            bundleEntity,
+            organizationId: orgId,
+            visibility: 'members'
+          });
+        }
+      }
+    }
+    
+    // Load admin bundle (draft + deleted entities) - superadmins can see these
+    const adminBundlePath = getOrgAdminBundlePath(orgId, query.typeId);
+    const adminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, adminBundlePath);
+    if (adminBundle) {
+      console.log('[SuperEntities] Loaded admin bundle for org', orgId, 'with', adminBundle.entities.length, 'entities');
+      for (const bundleEntity of adminBundle.entities) {
+        if (!bundleEntityMap.has(bundleEntity.id)) {
+          bundleEntityMap.set(bundleEntity.id, {
+            bundleEntity,
+            organizationId: orgId,
+            visibility: 'members'
+          });
+        }
+      }
+    }
+  }
+  
+  // 3. Filter bundle entities AFTER collecting all entities (same approach as listing endpoint)
+  let filteredBundleEntities = Array.from(bundleEntityMap.values());
+  
+  // Filter by organization if specified
+  if (query.organizationId !== undefined) {
+    filteredBundleEntities = filteredBundleEntities.filter(item => {
+      if (query.organizationId === null) {
+        return item.organizationId === null;
+      }
+      return item.organizationId === query.organizationId;
+    });
+  }
+  
+  // Filter by status if specified
+  if (query.status) {
+    filteredBundleEntities = filteredBundleEntities.filter(item => item.bundleEntity.status === query.status);
+  }
+  
+  console.log('[SuperEntities] Aggregated', bundleEntityMap.size, 'entities from bundles,', filteredBundleEntities.length, 'after filters');
+  
+  // 4. Load full Entity objects from R2
+  // Use latest pointer approach to get current version (bundles might have stale version)
   const entities: Entity[] = [];
   
-  // Get all entity stubs to find entities
-  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
-  
-  for (const stubFile of stubFiles) {
-    if (!stubFile.endsWith('.json')) continue;
-    
-    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile);
-    if (!stub || stub.entityTypeId !== query.typeId) continue;
-    
-    // Filter by organization if specified
-    if (query.organizationId !== undefined) {
-      if (query.organizationId === null && stub.organizationId !== null) continue;
-      if (query.organizationId !== null && stub.organizationId !== query.organizationId) continue;
-    }
-    
-    // Get latest pointer
+  for (const { bundleEntity, organizationId, visibility } of filteredBundleEntities) {
+    let entity: Entity | null = null;
     let latestPointer: EntityLatestPointer | null = null;
     
-    if (stub.organizationId === null) {
-      // Global entity - try public and authenticated paths
-      for (const visibility of ['public', 'authenticated'] as const) {
-        const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
+    // Get latest pointer to get current version
+    if (organizationId === null) {
+      // Global entity - try both public and authenticated paths (bundle might have wrong visibility)
+      for (const checkVisibility of ['public', 'authenticated'] as const) {
+        const latestPath = getEntityLatestPath(checkVisibility, bundleEntity.id, undefined);
         latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
-        if (latestPointer) break;
+        
+        if (latestPointer) {
+          const versionPath = getEntityVersionPath(checkVisibility, bundleEntity.id, latestPointer.version, undefined);
+          console.log('[SuperEntities] Loading global entity:', bundleEntity.id, 'visibility:', checkVisibility, 'version:', latestPointer.version, 'path:', versionPath);
+          entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+          if (entity) break; // Found entity, stop searching
+        }
       }
     } else {
-      // Org entity - use members path
-      const latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
+      // Org entity - always use members path
+      const latestPath = getEntityLatestPath('members', bundleEntity.id, organizationId);
       latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      
+      if (latestPointer) {
+        const versionPath = getEntityVersionPath('members', bundleEntity.id, latestPointer.version, organizationId);
+        console.log('[SuperEntities] Loading org entity:', bundleEntity.id, 'org:', organizationId, 'version:', latestPointer.version, 'path:', versionPath);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      }
     }
-    
-    if (!latestPointer) continue;
-    
-    // Filter by status if specified
-    if (query.status && latestPointer.status !== query.status) continue;
-    
-    // Get full entity
-    const storageVisibility: VisibilityScope = stub.organizationId === null 
-      ? latestPointer.visibility 
-      : 'members';
-    const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
-    const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
     
     if (entity) {
       entities.push(entity);
+    } else {
+      const versionInfo = latestPointer ? `latest version ${latestPointer.version}` : 'no latest pointer';
+      console.warn('[SuperEntities] Entity file not found for bundle entity:', bundleEntity.id, 'org:', organizationId, versionInfo);
     }
   }
   
@@ -118,6 +222,12 @@ superEntityRoutes.get('/entities/export',
   entities.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   
   console.log('[SuperEntities] Exporting', entities.length, 'entities for type:', query.typeId);
+  if (entities.length > 0) {
+    console.log('[SuperEntities] Entity IDs being exported:', entities.map(e => e.id));
+    console.log('[SuperEntities] Entity names being exported:', entities.map(e => e.name));
+  } else {
+    console.log('[SuperEntities] WARNING: No entities found for type:', query.typeId);
+  }
   
   return c.json({
     success: true,
@@ -188,7 +298,8 @@ superEntityRoutes.post('/entities/bulk-import',
   // Categorize entities: create new, update existing, or create with specific ID
   type ValidatedEntity = {
     rowIndex: number;
-    data: Record<string, unknown>;
+    data: Record<string, unknown>; // Dynamic fields only (name and slug removed)
+    name: string;
     visibility: VisibilityScope;
     slug: string;
     organizationId: string | null;
@@ -231,7 +342,9 @@ superEntityRoutes.post('/entities/bulk-import',
       const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
       const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
       if (entity) {
-        const slugKey = `${stub.organizationId || 'global'}|${entity.slug}`;
+        // Slug is stored at top-level
+        const entitySlug = entity.slug || '';
+        const slugKey = `${stub.organizationId || 'global'}|${entitySlug}`;
         existingSlugs.set(slugKey, entity.id);
       }
     }
@@ -328,24 +441,77 @@ superEntityRoutes.post('/entities/bulk-import',
         finalVisibility = 'authenticated';
       }
       
-      // Handle slug: use provided slug, or from data, or auto-generate from name
-      const entityName = (validatedData.name as string) || `Entity ${i + 1}`;
-      let slug: string;
+      // Extract name and slug from validatedData (common properties, stored at top-level)
+      // Name and slug can be provided at entity level or in data field
+      let entityName: string;
       
+      // Check validatedData.name first (from data.name)
+      if (validatedData.name !== undefined && validatedData.name !== null) {
+        const nameStr = String(validatedData.name).trim();
+        if (nameStr === '') {
+          // Name exists but is empty
+          validationErrors.push({
+            rowIndex: i,
+            field: 'name',
+            message: 'Name cannot be empty'
+          });
+          continue;
+        }
+        entityName = nameStr;
+      } else if (mode === 'update' && existingEntity) {
+        // For updates without name in data, keep existing name from top-level
+        entityName = existingEntity.name || '';
+        if (!entityName || entityName.trim() === '') {
+          validationErrors.push({
+            rowIndex: i,
+            field: 'name',
+            message: 'Name cannot be empty (existing entity has no name)'
+          });
+          continue;
+        }
+      } else {
+        // Name is missing entirely
+        validationErrors.push({
+          rowIndex: i,
+          field: 'name',
+          message: 'Name is required and must be provided'
+        });
+        continue;
+      }
+      
+      let slug: string;
       if (importEntity.slug) {
         // Slug provided at entity level (already validated by Zod schema)
-        slug = importEntity.slug;
+        slug = importEntity.slug.trim();
       } else if (validatedData.slug && typeof validatedData.slug === 'string') {
         // Slug in data field
-        slug = validatedData.slug;
-        delete validatedData.slug;
+        slug = validatedData.slug.trim();
       } else if (mode === 'update' && existingEntity) {
-        // For updates without slug, keep existing slug
-        slug = existingEntity.slug;
+        // For updates without slug, keep existing slug from top-level
+        slug = existingEntity.slug || '';
       } else {
-        // Auto-generate from name
-        slug = createSlug(entityName);
+        // Slug is required for new entities
+        validationErrors.push({
+          rowIndex: i,
+          field: 'slug',
+          message: 'Slug is required for new entities'
+        });
+        continue;
       }
+      
+      // Validate slug is not empty
+      if (!slug || slug.trim() === '') {
+        validationErrors.push({
+          rowIndex: i,
+          field: 'slug',
+          message: 'Slug cannot be empty'
+        });
+        continue;
+      }
+      
+      // Remove name and slug from validatedData before storing in data
+      // They are stored at top-level, not in the dynamic data object
+      const { name: _, slug: __, ...entityData } = validatedData;
       
       // Validate slug uniqueness for new entities (create or create-with-id)
       if (mode !== 'update') {
@@ -379,9 +545,10 @@ superEntityRoutes.post('/entities/bulk-import',
       
       validatedEntities.push({
         rowIndex: i,
-        data: validatedData,
+        data: entityData, // Dynamic fields only (name and slug removed)
+        name: entityName.trim(),
         visibility: finalVisibility,
-        slug,
+        slug: slug.trim(),
         organizationId: entityOrgId,
         mode,
         entityId: providedId,
@@ -437,8 +604,9 @@ superEntityRoutes.post('/entities/bulk-import',
         ...validated.existingEntity,
         version: newVersion,
         visibility: validated.visibility,
+        name: validated.name,
         slug: validated.slug,
-        data: validated.data,
+        data: validated.data, // Dynamic fields only (name and slug removed)
         updatedAt: now,
         updatedBy: userId
       };
@@ -471,8 +639,9 @@ superEntityRoutes.post('/entities/bulk-import',
         version: 1,
         status: 'draft',
         visibility: validated.visibility,
+        name: validated.name,
         slug: validated.slug,
-        data: validated.data,
+        data: validated.data, // Dynamic fields only (name and slug removed)
         createdAt: now,
         updatedAt: now,
         createdBy: userId,
@@ -522,11 +691,12 @@ superEntityRoutes.post('/entities/bulk-import',
     orgVisibilityCombos.get(key)!.add(validated.visibility);
   }
   
+  const config = await loadAppConfig(c.env.R2_BUCKET);
   for (const [orgKey, visibilities] of orgVisibilityCombos) {
     const orgId = orgKey === 'global' ? null : orgKey;
     for (const visibility of visibilities) {
       console.log('[SuperEntities] Regenerating bundles for bulk import - org:', orgKey, 'visibility:', visibility);
-      await regenerateEntityBundles(c.env.R2_BUCKET, entityTypeId, orgId, visibility);
+      await regenerateEntityBundles(c.env.R2_BUCKET, entityTypeId, orgId, config);
     }
   }
   
@@ -543,14 +713,22 @@ superEntityRoutes.post('/entities/bulk-import',
 /**
  * POST /entities
  * Create entity (supports global entities with organizationId: null)
+ * 
+ * Request body:
+ * - name: string (required) - entity name, stored at entity.name
+ * - slug: string (required) - entity slug, stored at entity.slug
+ * - entityTypeId: string (required) - the entity type ID
+ * - data: object (optional) - dynamic fields only, stored at entity.data
+ * - visibility: string (optional) - visibility scope
+ * - organizationId: string | null (optional) - null for global entities
  */
 superEntityRoutes.post('/entities',
   zValidator('json', createEntityRequestSchema),
   async (c) => {
-  const { entityTypeId, data, visibility, organizationId: requestedOrgId } = c.req.valid('json');
+  const { entityTypeId, name, slug, data, visibility, organizationId: requestedOrgId } = c.req.valid('json');
   const userId = c.get('userId')!;
   
-  console.log('[SuperEntities] Creating entity, orgId:', requestedOrgId);
+  console.log('[SuperEntities] Creating entity:', { name, slug, entityTypeId, orgId: requestedOrgId });
   
   // Superadmins can create global entities (null orgId) or entities in any org
   const targetOrgId: string | null = requestedOrgId ?? null;
@@ -561,9 +739,12 @@ superEntityRoutes.post('/entities',
     throw new NotFoundError('Entity Type', entityTypeId);
   }
   
-  // Validate fields
-  const validatedData = validateEntityFields(data, entityType);
-  validateEntityData(validatedData, entityType);
+  // Validate dynamic fields (name and slug are already validated by schema)
+  const entityData = data ? validateEntityFields(data, entityType) : {};
+  
+  // Remove name and slug from entityData if accidentally included
+  delete entityData.name;
+  delete entityData.slug;
   
   // Determine visibility - global entities cannot be 'members' visibility
   let finalVisibility: VisibilityScope = visibility || entityType.defaultVisibility;
@@ -573,18 +754,18 @@ superEntityRoutes.post('/entities',
   }
   
   const entityId = createEntityId();
-  const entityName = (data.name as string) || `Entity ${entityId}`;
   
-  let slug: string;
-  if (validatedData.slug && typeof validatedData.slug === 'string') {
-    slug = validatedData.slug;
-    delete validatedData.slug;
-  } else {
-    slug = createSlug(entityName);
-  }
+  // Check slug uniqueness
+  await checkSlugUniqueness(
+    c.env.R2_BUCKET,
+    entityTypeId,
+    targetOrgId,
+    slug.trim()
+  );
   
   const now = new Date().toISOString();
   
+  // Create entity with name and slug at top-level
   const entity: Entity = {
     id: entityId,
     entityTypeId,
@@ -592,8 +773,9 @@ superEntityRoutes.post('/entities',
     version: 1,
     status: 'draft',
     visibility: finalVisibility,
-    slug,
-    data: validatedData,
+    name: name.trim(),
+    slug: slug.trim(),
+    data: entityData, // Dynamic fields only
     createdAt: now,
     updatedAt: now,
     createdBy: userId,
@@ -626,7 +808,7 @@ superEntityRoutes.post('/entities',
   
   // Create slug index for public entities
   if (finalVisibility === 'public') {
-    await upsertSlugIndex(c.env.R2_BUCKET, targetOrgId, entityType.slug, slug, {
+    await upsertSlugIndex(c.env.R2_BUCKET, targetOrgId, entityType.slug, slug.trim(), {
       entityId,
       visibility: finalVisibility,
       organizationId: targetOrgId,
@@ -634,38 +816,56 @@ superEntityRoutes.post('/entities',
     });
   }
   
+  // Regenerate affected bundles synchronously
+  const config = await loadAppConfig(c.env.R2_BUCKET);
+  await regenerateEntityBundles(
+    c.env.R2_BUCKET,
+    entityTypeId,
+    targetOrgId,
+    config
+  );
+  
   return c.json({ success: true, data: entity }, 201);
 });
 
 /**
  * GET /entities/:id
  * Get any entity by ID (superadmin can access global and org-scoped entities)
+ * Falls back to searching bundles if stub lookup fails
  */
 superEntityRoutes.get('/entities/:id', async (c) => {
   const entityId = c.req.param('id');
   
-  console.log('[SuperEntities] GET /entities/:id -', entityId);
+  console.log('[SuperEntities] GET /entities/:id handler called for entity:', entityId);
+  console.log('[SuperEntities] Request path:', c.req.path);
   
   // Get entity stub to determine organization
   const stubPath = getEntityStubPath(entityId);
+  console.log('[SuperEntities] Checking stub at path:', stubPath);
   const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
   
   if (!stub) {
-    console.log('[SuperEntities] Entity stub not found:', entityId);
+    console.error('[SuperEntities] Entity stub not found at path:', stubPath, 'for entity:', entityId);
     throw new NotFoundError('Entity', entityId);
   }
   
+  console.log('[SuperEntities] Found stub:', { entityId: stub.entityId, typeId: stub.entityTypeId, orgId: stub.organizationId });
+  
   let entity: Entity | null = null;
+  let latestPointer: EntityLatestPointer | null = null;
   const orgId = stub.organizationId;
   
   if (orgId === null) {
     // Global entity - try authenticated (platform/) path first, then public/
+    console.log('[SuperEntities] Checking global entity paths for:', entityId);
     for (const visibility of ['authenticated', 'public'] as const) {
       const latestPath = getEntityLatestPath(visibility, entityId, undefined);
-      const latestPointer = await readJSON<{ version: number }>(c.env.R2_BUCKET, latestPath);
+      console.log('[SuperEntities] Checking global path:', latestPath);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
       
       if (latestPointer) {
         const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
+        console.log('[SuperEntities] Loading entity from version path:', versionPath);
         entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
         
         if (entity) {
@@ -676,22 +876,35 @@ superEntityRoutes.get('/entities/:id', async (c) => {
     }
   } else {
     // Org-scoped entity - try members path (most common for org entities)
-    const latestPath = getEntityLatestPath('members', entityId, orgId);
-    const latestPointer = await readJSON<{ version: number }>(c.env.R2_BUCKET, latestPath);
+    const latestPath = getEntityLatestPath('members', entityId, orgId!);
+    console.log('[SuperEntities] Checking org entity path:', latestPath, 'for org:', orgId);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
     
     if (latestPointer) {
       const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
+      console.log('[SuperEntities] Loading org entity from version path:', versionPath);
       entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
-      console.log('[SuperEntities] Org entity found for org:', orgId);
+      if (entity) {
+        console.log('[SuperEntities] Org entity found for org:', orgId);
+      } else {
+        console.error('[SuperEntities] Org entity file not found at path:', versionPath);
+      }
+    } else {
+      console.error('[SuperEntities] No latest pointer found for org entity at path:', latestPath);
     }
   }
   
   if (!entity) {
-    console.log('[SuperEntities] Entity data not found:', entityId);
+    console.error('[SuperEntities] Entity file not found - checked paths:', {
+      orgId,
+      entityId,
+      hasLatestPointer: !!latestPointer,
+      latestPointerVersion: latestPointer?.version
+    });
     throw new NotFoundError('Entity', entityId);
   }
   
-  console.log('[SuperEntities] Returning entity:', entityId, 'orgId:', entity.organizationId, 'status:', entity.status);
+  console.log('[SuperEntities] Successfully loaded entity:', entityId, 'name:', entity.name, 'orgId:', entity.organizationId, 'status:', entity.status);
   
   return c.json({
     success: true,
@@ -700,19 +913,572 @@ superEntityRoutes.get('/entities/:id', async (c) => {
 });
 
 /**
+ * PATCH /entities/:id
+ * Update any entity by ID (superadmin can update global and org-scoped entities)
+ */
+superEntityRoutes.patch('/entities/:id',
+  zValidator('json', updateEntityRequestSchema),
+  async (c) => {
+  const entityId = c.req.param('id');
+  const updates = c.req.valid('json');
+  const userId = c.get('userId')!;
+  
+  console.log('[SuperEntities] PATCH /entities/:id -', entityId);
+  
+  // Get entity stub to determine organization
+  const stubPath = getEntityStubPath(entityId);
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
+  
+  if (!stub) {
+    console.log('[SuperEntities] Entity stub not found:', entityId);
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  const orgId = stub.organizationId;
+  let entity: Entity | null = null;
+  let latestPointer: EntityLatestPointer | null = null;
+  let storageVisibility: VisibilityScope = 'members';
+  let latestPath: string;
+  
+  if (orgId === null) {
+    // Global entity - try authenticated (platform/) path first, then public/
+    for (const visibility of ['authenticated', 'public'] as const) {
+      latestPath = getEntityLatestPath(visibility, entityId, undefined);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      
+      if (latestPointer) {
+        const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+        
+        if (entity) {
+          storageVisibility = visibility;
+          console.log('[SuperEntities] Global entity found in', visibility, 'path');
+          break;
+        }
+      }
+    }
+    // Re-set latestPath for global entity updates
+    latestPath = getEntityLatestPath(storageVisibility, entityId, undefined);
+  } else {
+    // Org-scoped entity - try members path
+    latestPath = getEntityLatestPath('members', entityId, orgId);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    
+    if (latestPointer) {
+      const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
+      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      storageVisibility = 'members';
+      console.log('[SuperEntities] Org entity found for org:', orgId);
+    }
+  }
+  
+  if (!entity || !latestPointer) {
+    console.log('[SuperEntities] Entity data not found:', entityId);
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  // Only draft entities can be edited (superadmins can edit drafts)
+  if (entity.status !== 'draft') {
+    throw new AppError('INVALID_STATUS', 'Only draft entities can be edited', 400);
+  }
+  
+  // Get entity type for validation
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entity.entityTypeId));
+  
+  if (!entityType) {
+    throw new NotFoundError('Entity Type', entity.entityTypeId);
+  }
+  
+  // Get name and slug from top-level request (or keep existing values)
+  const entityName = updates.name !== undefined ? updates.name : entity.name;
+  const entitySlug = updates.slug !== undefined ? updates.slug : entity.slug;
+  
+  // Validate dynamic fields (name and slug are handled above)
+  let entityData = entity.data;
+  if (updates.data) {
+    const validatedUpdates = validateEntityFields(updates.data, entityType);
+    // Remove name and slug from validated updates if accidentally included
+    delete validatedUpdates.name;
+    delete validatedUpdates.slug;
+    entityData = { ...entity.data, ...validatedUpdates };
+    validateEntityData(entityData, entityType);
+  }
+  
+  const newVersion = entity.version + 1;
+  const now = new Date().toISOString();
+  const newVisibility = updates.visibility || entity.visibility;
+  
+  // Create updated entity with name and slug at top-level
+  const updatedEntity: Entity = {
+    ...entity,
+    version: newVersion,
+    visibility: newVisibility,
+    name: entityName.trim(),
+    slug: entitySlug.trim(),
+    data: entityData, // Dynamic fields only
+    updatedAt: now,
+    updatedBy: userId
+  };
+  
+  // Write new version
+  const newVersionPath = getEntityVersionPath(storageVisibility, entityId, newVersion, orgId || undefined);
+  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
+  
+  // Update latest pointer
+  const newPointer: EntityLatestPointer = {
+    version: newVersion,
+    status: updatedEntity.status,
+    visibility: newVisibility,
+    updatedAt: now
+  };
+  
+  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  
+  // Update slug index if visibility is public and slug changed
+  const currentSlug = entity.slug;
+  const newSlug = entitySlug.trim();
+  if (newVisibility === 'public' && orgId !== null) {
+    if (currentSlug !== newSlug && entity.visibility === 'public') {
+      await deleteSlugIndex(c.env.R2_BUCKET, orgId, entityType.slug, currentSlug);
+    }
+    await upsertSlugIndex(c.env.R2_BUCKET, orgId, entityType.slug, newSlug, {
+      entityId,
+      visibility: newVisibility,
+      organizationId: orgId,
+      entityTypeId: entity.entityTypeId
+    });
+  } else if (entity.visibility === 'public' && newVisibility !== 'public' && orgId !== null) {
+    await deleteSlugIndex(c.env.R2_BUCKET, orgId, entityType.slug, currentSlug);
+  }
+  
+  console.log('[SuperEntities] Updated entity:', entityId, 'to v' + newVersion, 'orgId:', orgId);
+  
+  // Regenerate affected bundles synchronously
+  const config = await loadAppConfig(c.env.R2_BUCKET);
+  await regenerateEntityBundles(
+    c.env.R2_BUCKET,
+    entity.entityTypeId,
+    orgId,
+    config
+  );
+  
+  return c.json({
+    success: true,
+    data: updatedEntity
+  });
+});
+
+/**
+ * POST /entities/:id/transition
+ * Handle status transitions for any entity (superadmin can transition global and org-scoped entities)
+ * 
+ * Standard Actions:
+ * - submitForApproval: draft -> pending
+ * - approve: pending -> published
+ * - reject: pending -> draft
+ * - archive: published -> archived
+ * - restore: archived -> draft
+ * - delete: draft -> deleted (soft delete)
+ * 
+ * Superadmin-only Actions:
+ * - superDelete: Any status -> permanently removed (hard delete)
+ *   Removes ALL entity files from R2: stub, latest pointer, all versions, slug index
+ */
+superEntityRoutes.post('/entities/:id/transition',
+  zValidator('json', entityTransitionRequestSchema),
+  async (c) => {
+  const entityId = c.req.param('id');
+  const { action, feedback } = c.req.valid('json');
+  const userId = c.get('userId')!;
+  
+  console.log('[SuperEntities] POST /entities/:id/transition -', entityId, 'action:', action);
+  
+  // Get entity stub to determine organization
+  const stubPath = getEntityStubPath(entityId);
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
+  
+  if (!stub) {
+    console.log('[SuperEntities] Entity stub not found:', entityId);
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  const orgId = stub.organizationId;
+  let entity: Entity | null = null;
+  let latestPointer: EntityLatestPointer | null = null;
+  let storageVisibility: VisibilityScope = 'members';
+  let latestPath: string;
+  
+  if (orgId === null) {
+    // Global entity - try authenticated (platform/) path first, then public/
+    for (const visibility of ['authenticated', 'public'] as const) {
+      latestPath = getEntityLatestPath(visibility, entityId, undefined);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      
+      if (latestPointer) {
+        const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+        
+        if (entity) {
+          storageVisibility = visibility;
+          console.log('[SuperEntities] Global entity found in', visibility, 'path');
+          break;
+        }
+      }
+    }
+    // Re-set latestPath for global entity updates
+    latestPath = getEntityLatestPath(storageVisibility, entityId, undefined);
+  } else {
+    // Org-scoped entity - try members path
+    latestPath = getEntityLatestPath('members', entityId, orgId);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    
+    if (latestPointer) {
+      const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
+      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      storageVisibility = 'members';
+      console.log('[SuperEntities] Org entity found for org:', orgId);
+    }
+  }
+  
+  if (!entity || !latestPointer) {
+    console.log('[SuperEntities] Entity data not found:', entityId);
+    throw new NotFoundError('Entity', entityId);
+  }
+  
+  const currentStatus = latestPointer.status;
+  
+  // Handle superDelete action (hard delete - superadmin only)
+  // This bypasses the normal state machine since it can be done from any state
+  if (action === 'superDelete') {
+    console.log('[SuperEntities] SUPER DELETE - Hard deleting entity:', entityId);
+    
+    // Get entity type for slug index deletion
+    const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(stub.entityTypeId));
+    
+    // 1. Delete all version files
+    // List all files in the entity directory
+    const entityDir = orgId === null
+      ? `${storageVisibility === 'public' ? 'public/' : 'platform/'}entities/${entityId}/`
+      : `private/orgs/${orgId}/entities/${entityId}/`;
+    
+    console.log('[SuperEntities] Listing entity files in:', entityDir);
+    const entityFiles = await listFiles(c.env.R2_BUCKET, entityDir);
+    
+    for (const filePath of entityFiles) {
+      console.log('[SuperEntities] Deleting version file:', filePath);
+      await deleteFile(c.env.R2_BUCKET, filePath);
+    }
+    
+    // 2. Delete the entity stub
+    console.log('[SuperEntities] Deleting entity stub:', stubPath);
+    await deleteFile(c.env.R2_BUCKET, stubPath);
+    
+    // 3. Delete slug index if entity was public
+    if (entity.visibility === 'public' && entityType) {
+      const entitySlug = entity.slug;
+      if (entitySlug) {
+        console.log('[SuperEntities] Deleting slug index for:', entitySlug);
+        await deleteSlugIndex(c.env.R2_BUCKET, orgId, entityType.slug, entitySlug);
+      }
+    }
+    
+    // 4. Regenerate bundles to remove the entity from all bundles
+    console.log('[SuperEntities] Regenerating bundles after hard delete');
+    const config = await loadAppConfig(c.env.R2_BUCKET);
+    await regenerateEntityBundles(
+      c.env.R2_BUCKET,
+      stub.entityTypeId,
+      orgId,
+      config
+    );
+    
+    console.log('[SuperEntities] SUPER DELETE complete for entity:', entityId);
+    
+    return c.json({
+      success: true,
+      data: {
+        deleted: true,
+        entityId,
+        action: 'superDelete',
+        message: `Entity ${entityId} has been permanently deleted`
+      }
+    });
+  }
+  
+  // Standard transition validation for non-superDelete actions
+  if (!isValidTransition(currentStatus, action)) {
+    throw new AppError(
+      'INVALID_TRANSITION',
+      `Cannot ${action} an entity with status '${currentStatus}'. Allowed actions: ${getAllowedTransitions(currentStatus).join(', ')}`,
+      400
+    );
+  }
+  
+  // Determine new status
+  const statusMap: Record<string, EntityStatus> = {
+    submitForApproval: 'pending',
+    approve: 'published',
+    reject: 'draft',
+    archive: 'archived',
+    restore: 'draft',
+    delete: 'deleted'
+  };
+  
+  const newStatus = statusMap[action];
+  const newVersion = entity.version + 1;
+  const now = new Date().toISOString();
+  
+  // Create new version with updated status
+  const updatedEntity: Entity = {
+    ...entity,
+    version: newVersion,
+    status: newStatus,
+    updatedAt: now,
+    updatedBy: userId,
+    ...((['approve', 'reject'].includes(action)) && {
+      approvalFeedback: feedback || undefined,
+      approvalActionAt: now,
+      approvalActionBy: userId
+    })
+  };
+  
+  // Write new version
+  const newVersionPath = getEntityVersionPath(storageVisibility, entityId, newVersion, orgId || undefined);
+  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
+  
+  // Update latest pointer
+  const newPointer: EntityLatestPointer = {
+    version: newVersion,
+    status: newStatus,
+    visibility: entity.visibility,
+    updatedAt: now
+  };
+  
+  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  
+  console.log('[SuperEntities] Transitioned entity:', entityId, currentStatus, '->', newStatus);
+  
+  // Regenerate affected bundles synchronously when publish status changes
+  if (newStatus === 'published' || currentStatus === 'published') {
+    console.log('[SuperEntities] Triggering bundle regeneration for type:', stub.entityTypeId);
+    const config = await loadAppConfig(c.env.R2_BUCKET);
+    await regenerateEntityBundles(
+      c.env.R2_BUCKET,
+      stub.entityTypeId,
+      orgId,
+      config
+    );
+  }
+  
+  return c.json({
+    success: true,
+    data: {
+      entity: updatedEntity,
+      transition: {
+        from: currentStatus,
+        to: newStatus,
+        action,
+        feedback
+      }
+    }
+  });
+});
+
+/**
  * GET /entities
- * List entities (supports filtering by organizationId, including null for global entities)
+ * List entities (superadmin only - sees ALL entities from ALL organizations)
+ * Aggregates entities from published bundles (public/platform) and organization bundles
+ * Supports filtering by organizationId, typeId, status, visibility, search
  */
 superEntityRoutes.get('/entities',
   zValidator('query', entityQueryParamsSchema),
   async (c) => {
   const query = c.req.valid('query');
   
-  // Implementation similar to existing entity listing
-  // TODO: Implement full listing logic for superadmin view
+  console.log('[SuperEntities] Listing entities from bundles - filters:', query);
+  
+  if (!query.typeId) {
+    return c.json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'typeId is required' }
+    }, 400);
+  }
+  
+  const items: EntityListItem[] = [];
+  const seenEntityIds = new Set<string>(); // Track entities to avoid duplicates
+  
+  // Helper to convert BundleEntity to EntityListItem
+  // Note: Only entities have versions, not bundles - EntityListItem doesn't include version
+  function bundleEntityToListItem(bundleEntity: BundleEntity, organizationId: string | null): EntityListItem {
+    // Extract description from dynamic data
+    const descriptionValue = bundleEntity.data?.description as string | undefined;
+    
+    return {
+      id: bundleEntity.id,
+      entityTypeId: query.typeId!,
+      organizationId: organizationId,
+      slug: bundleEntity.slug,
+      name: bundleEntity.name,
+      status: bundleEntity.status,
+      visibility: 'members', // Will be set correctly from entity if needed
+      data: {
+        ...(descriptionValue && { description: descriptionValue })
+      },
+      updatedAt: bundleEntity.updatedAt
+    };
+  }
+  
+  // 1. Load global bundles (public and platform)
+  console.log('[SuperEntities] Loading global bundles for type:', query.typeId);
+  
+  const publicBundlePath = getBundlePath('public', query.typeId);
+  const publicBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicBundlePath);
+  if (publicBundle) {
+    console.log('[SuperEntities] Loaded public bundle with', publicBundle.entities.length, 'entities');
+    for (const entity of publicBundle.entities) {
+      if (!seenEntityIds.has(entity.id)) {
+        seenEntityIds.add(entity.id);
+        const listItem = bundleEntityToListItem(entity, null);
+        listItem.visibility = 'public';
+        items.push(listItem);
+      }
+    }
+  }
+  
+  const platformBundlePath = getBundlePath('platform', query.typeId);
+  const platformBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformBundlePath);
+  if (platformBundle) {
+    console.log('[SuperEntities] Loaded platform bundle with', platformBundle.entities.length, 'entities');
+    for (const entity of platformBundle.entities) {
+      if (!seenEntityIds.has(entity.id)) {
+        seenEntityIds.add(entity.id);
+        const listItem = bundleEntityToListItem(entity, null);
+        listItem.visibility = 'authenticated';
+        items.push(listItem);
+      }
+    }
+  }
+  
+  // 2. Load all organization bundles
+  console.log('[SuperEntities] Loading organization bundles for type:', query.typeId);
+  
+  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+  const orgIds = new Set<string>();
+  
+  // Extract organization IDs from file paths
+  for (const file of orgFiles) {
+    const match = file.match(/orgs\/([^\/]+)\//);
+    if (match) {
+      orgIds.add(match[1]);
+    }
+  }
+  
+  console.log('[SuperEntities] Found', orgIds.size, 'organizations');
+  
+  for (const orgId of orgIds) {
+    // Filter by organization if specified
+    if (query.organizationId !== undefined) {
+      if (query.organizationId === null) continue; // Skip orgs if looking for global only
+      if (query.organizationId !== orgId) continue; // Skip if not matching org
+    }
+    
+    // Load member bundle (published entities)
+    const memberBundlePath = getOrgMemberBundlePath(orgId, query.typeId);
+    const memberBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, memberBundlePath);
+    if (memberBundle) {
+      console.log('[SuperEntities] Loaded member bundle for org', orgId, 'with', memberBundle.entities.length, 'entities');
+      for (const entity of memberBundle.entities) {
+        if (!seenEntityIds.has(entity.id)) {
+          seenEntityIds.add(entity.id);
+          const listItem = bundleEntityToListItem(entity, orgId);
+          listItem.visibility = 'members'; // Org entities are members visibility
+          items.push(listItem);
+        }
+      }
+    }
+    
+    // Load admin bundle (draft + deleted entities) - superadmins can see these
+    const adminBundlePath = getOrgAdminBundlePath(orgId, query.typeId);
+    const adminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, adminBundlePath);
+    if (adminBundle) {
+      console.log('[SuperEntities] Loaded admin bundle for org', orgId, 'with', adminBundle.entities.length, 'entities');
+      for (const entity of adminBundle.entities) {
+        if (!seenEntityIds.has(entity.id)) {
+          seenEntityIds.add(entity.id);
+          const listItem = bundleEntityToListItem(entity, orgId);
+          listItem.visibility = 'members'; // Org entities are members visibility
+          items.push(listItem);
+        }
+      }
+    }
+  }
+  
+  // 3. Apply filters
+  let filteredItems = items;
+  
+  // Filter by organization if specified
+  if (query.organizationId !== undefined) {
+    filteredItems = filteredItems.filter(item => {
+      if (query.organizationId === null) {
+        return item.organizationId === null;
+      }
+      return item.organizationId === query.organizationId;
+    });
+  }
+  
+  // Filter by status if specified
+  if (query.status) {
+    filteredItems = filteredItems.filter(item => item.status === query.status);
+  }
+  
+  // Filter by visibility if specified
+  if (query.visibility) {
+    filteredItems = filteredItems.filter(item => item.visibility === query.visibility);
+  }
+  
+  // Filter by search query
+  if (query.search) {
+    const searchLower = query.search.toLowerCase();
+    filteredItems = filteredItems.filter(item => {
+      const name = item.name.toLowerCase();
+      const description = (item.data?.description as string || '').toLowerCase();
+      return name.includes(searchLower) || description.includes(searchLower);
+    });
+  }
+  
+  console.log('[SuperEntities] Aggregated', items.length, 'entities from bundles,', filteredItems.length, 'after filters');
+  
+  let processedCount = 0;
+  let skippedCount = 0;
+  let addedCount = 0;
+  
+  processedCount = items.length;
+  addedCount = filteredItems.length;
+  skippedCount = items.length - filteredItems.length;
+  
+  // Sort by updatedAt descending
+  filteredItems.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  
+  // Pagination
+  const start = (query.page - 1) * query.pageSize;
+  const paginatedItems = filteredItems.slice(start, start + query.pageSize);
+  
+  console.log('[SuperEntities] Entity processing summary:', {
+    loadedFromBundles: processedCount,
+    afterFilters: addedCount,
+    skippedByFilters: skippedCount,
+    totalInList: filteredItems.length
+  });
+  console.log('[SuperEntities] Returning', paginatedItems.length, 'of', filteredItems.length, 'entities (page', query.page, 'of', Math.ceil(filteredItems.length / query.pageSize) + ')');
   
   return c.json({
     success: true,
-    data: { items: [], total: 0, page: query.page, pageSize: query.pageSize, hasMore: false }
+    data: {
+      items: paginatedItems,
+      total: filteredItems.length,
+      page: query.page,
+      pageSize: query.pageSize,
+      hasMore: start + query.pageSize < filteredItems.length
+    }
   });
 });

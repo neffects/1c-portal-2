@@ -9,6 +9,9 @@
   ],
   "scripts": {
     "dev": "turbo run dev",
+    "restart": "turbo run dev",
+    "restart:worker": "turbo run dev --filter=@1cc/worker",
+    "restart:web": "turbo run dev --filter=@1cc/web",
     "build": "turbo run build",
     "lint": "turbo run lint",
     "test": "turbo run test",
@@ -18,8 +21,9 @@
     "dev:web": "turbo run dev --filter=@1cc/web",
     "deploy:worker": "turbo run deploy --filter=@1cc/worker",
     "deploy:staging": "npm run build && cd apps/worker && wrangler deploy --env staging",
-    "deploy:production": "npm run build && npm run test && cd apps/worker && wrangler deploy --env production"
-  },
+    "deploy:production": "npm run build && npm run test && cd apps/worker && wrangler deploy --env production",
+    "reset:r2": "cd apps/worker && wrangler r2 object list 1cc-portal-data-dev | grep -v '^$' | tail -n +2 | awk '{print $1}' | xargs -I {} wrangler r2 object delete 1cc-portal-data-dev/{}"
+    },
   "devDependencies": {
     "turbo": "^2.0.0",
     "typescript": "^5.4.0"

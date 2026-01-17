@@ -17,6 +17,8 @@ export interface Organization {
   profile: OrganizationProfile;
   /** Organization settings */
   settings: OrganizationSettings;
+  /** Membership key (references membershipKeys.keys[].id from app config) */
+  membershipKey: string;
   /** When the organization was created (ISO 8601) */
   createdAt: string;
   /** When the organization was last updated (ISO 8601) */
@@ -101,6 +103,7 @@ export interface OrganizationListItem {
   id: string;
   name: string;
   slug: string;
+  membershipKey: string;
   memberCount: number;
   entityCount: number;
   createdAt: string;

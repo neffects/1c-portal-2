@@ -3,8 +3,8 @@
  */
 
 import { z } from 'zod';
-import { FIELD_TYPES, VISIBILITY_SCOPES } from '../constants';
-import { entityIdSchema, entitySlugSchema, visibilityScopeSchema } from './entity';
+import { FIELD_TYPES } from '../constants';
+import { entityIdSchema, entitySlugSchema } from './entity';
 
 /**
  * Field type schema
@@ -101,28 +101,30 @@ export const tableDisplayConfigSchema = z.object({
 
 /**
  * Create entity type request schema
- * Visibility options: 'public' | 'authenticated' | 'members'
+ * visibleTo: array of membership key IDs from app config
  */
 export const createEntityTypeRequestSchema = z.object({
   name: z.string().min(1).max(100),
   pluralName: z.string().min(1).max(100),
   slug: entitySlugSchema,
   description: z.string().max(500).optional(),
-  defaultVisibility: visibilityScopeSchema.default('authenticated'),
+  visibleTo: z.array(z.string().min(1)).min(1, 'At least one membership key must be specified'),
+  fieldVisibility: z.record(z.string(), z.array(z.string())).optional(),
   fields: z.array(fieldDefinitionSchema.omit({ id: true })).min(1),
   sections: z.array(fieldSectionSchema.omit({ id: true })).min(1)
 });
 
 /**
  * Update entity type request schema
- * Visibility options: 'public' | 'authenticated' | 'members'
+ * visibleTo: array of membership key IDs from app config
  */
 export const updateEntityTypeRequestSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   pluralName: z.string().min(1).max(100).optional(),
   slug: entitySlugSchema.optional(),
   description: z.string().max(500).optional(),
-  defaultVisibility: visibilityScopeSchema.optional(),
+  visibleTo: z.array(z.string().min(1)).optional(),
+  fieldVisibility: z.record(z.string(), z.array(z.string())).optional(),
   fields: z.array(fieldDefinitionSchema).optional(),
   sections: z.array(fieldSectionSchema).optional(),
   tableDisplayConfig: tableDisplayConfigSchema.optional()

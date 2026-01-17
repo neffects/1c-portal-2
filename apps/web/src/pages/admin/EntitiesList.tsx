@@ -321,7 +321,7 @@ export function EntitiesList({ orgSlug }: EntitiesListProps) {
                     >
                       <td class="px-4 py-3">
                         <span class="font-medium text-surface-900 dark:text-surface-100">
-                          {(entity.data.name as string) || entity.id}
+                          {entity.name || entity.id}
                         </span>
                       </td>
                       <td class="px-4 py-3 text-sm text-surface-500">

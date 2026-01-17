@@ -2,7 +2,7 @@
  * Entity Type definitions for schema management
  */
 
-import { FIELD_TYPES, VISIBILITY_SCOPES } from '../constants';
+import { FIELD_TYPES } from '../constants';
 
 /**
  * Field type derived from constants
@@ -24,8 +24,10 @@ export interface EntityType {
   slug: string;
   /** Description of this entity type */
   description?: string;
-  /** Default visibility for new entities: 'public' | 'authenticated' | 'members' */
-  defaultVisibility: typeof VISIBILITY_SCOPES[number];
+  /** Which membership keys can see entities of this type (references config key IDs) */
+  visibleTo: string[];
+  /** Per-field visibility (defaults to type-level if not specified) */
+  fieldVisibility?: Record<string, string[]>;
   /** Field definitions */
   fields: FieldDefinition[];
   /** Field sections for form organization */
@@ -166,8 +168,8 @@ export interface CreateEntityTypeRequest {
   pluralName: string;
   slug: string;
   description?: string;
-  /** Default visibility: 'public' | 'authenticated' | 'members' */
-  defaultVisibility: typeof VISIBILITY_SCOPES[number];
+  /** Which membership keys can see entities of this type */
+  visibleTo: string[];
   fields: Omit<FieldDefinition, 'id'>[];
   sections: Omit<FieldSection, 'id'>[];
 }
@@ -180,8 +182,10 @@ export interface UpdateEntityTypeRequest {
   pluralName?: string;
   slug?: string;
   description?: string;
-  /** Default visibility: 'public' | 'authenticated' | 'members' */
-  defaultVisibility?: typeof VISIBILITY_SCOPES[number];
+  /** Which membership keys can see entities of this type */
+  visibleTo?: string[];
+  /** Per-field visibility overrides */
+  fieldVisibility?: Record<string, string[]>;
   fields?: FieldDefinition[];
   sections?: FieldSection[];
   tableDisplayConfig?: TableDisplayConfig;
@@ -196,8 +200,8 @@ export interface EntityTypeListItem {
   pluralName: string;
   slug: string;
   description?: string;
-  /** Default visibility: 'public' | 'authenticated' | 'members' */
-  defaultVisibility: typeof VISIBILITY_SCOPES[number];
+  /** Which membership keys can see entities of this type */
+  visibleTo: string[];
   fieldCount: number;
   entityCount: number;
   isActive: boolean;

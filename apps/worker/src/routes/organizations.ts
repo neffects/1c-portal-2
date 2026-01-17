@@ -23,14 +23,14 @@ import {
   addUserToOrgRequestSchema
 } from '@1cc/shared';
 import { readJSON, writeJSON, listFiles, deleteFile, getOrgProfilePath, getOrgPermissionsPath, getInvitationPath, getUserMembershipPath } from '../lib/r2';
-import { regenerateOrgManifest, regenerateOrgBundles } from '../lib/bundle-invalidation';
+import { regenerateOrgManifest, regenerateOrgBundles, loadAppConfig, validateMembershipKeyIds, regenerateEntityBundles } from '../lib/bundle-invalidation';
 import { createOrgId, createSlug, createInvitationToken } from '../lib/id';
 import { requireSuperadmin, requireOrgAdmin, requireOrgMembership } from '../middleware/auth';
 import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
 import { sendInvitationEmail } from '../lib/email';
 import { createUserOrgStub, deleteUserOrgStub, updateUserOrgStubRole } from '../lib/user-stubs';
 import { R2_PATHS } from '@1cc/shared';
-import type { Organization, EntityTypePermissions, OrganizationListItem, UserInvitation, OrganizationMembership, UserRole } from '@1cc/shared';
+import type { Organization, EntityTypePermissions, OrganizationListItem, UserInvitation, OrganizationMembership, UserRole, EntityType } from '@1cc/shared';
 
 export const organizationRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -44,8 +44,21 @@ organizationRoutes.post('/',
   async (c) => {
   console.log('[Orgs] Creating organization');
   
-  const { name, slug, description, domainWhitelist, allowSelfSignup } = c.req.valid('json');
-  console.log('[Orgs] Creating organization with name:', name, 'slug:', slug);
+  const { name, slug, description, domainWhitelist, allowSelfSignup, membershipKey } = c.req.valid('json');
+  console.log('[Orgs] Creating organization with name:', name, 'slug:', slug, 'key:', membershipKey);
+  
+  // Load config and validate membership key if provided
+  const config = await loadAppConfig(c.env.R2_BUCKET);
+  
+  // Use provided key or default to 'platform'
+  const finalKey = membershipKey || 'platform';
+  
+  // Validate membershipKey references a valid key ID
+  const invalidKeys = validateMembershipKeyIds([finalKey], config);
+  if (invalidKeys.length > 0) {
+    const validKeys = config.membershipKeys.keys.map(k => k.id).join(', ');
+    throw new ValidationError(`Invalid membership key '${finalKey}'. Valid keys are: ${validKeys}`);
+  }
   
   // Check if slug is unique
   console.log('[Orgs] Checking slug uniqueness for:', slug);
@@ -74,6 +87,7 @@ organizationRoutes.post('/',
       domainWhitelist: domainWhitelist || [],
       allowSelfSignup: allowSelfSignup ?? false
     },
+    membershipKey: finalKey,
     createdAt: now,
     updatedAt: now,
     isActive: true
@@ -106,6 +120,30 @@ organizationRoutes.post('/',
   await writeJSON(c.env.R2_BUCKET, permissionsPath, permissions);
   
   console.log('[Orgs] Created organization:', orgId, 'at path:', profilePath);
+  
+  // Generate bundles for all entity types for this new organization (even if empty)
+  // This ensures bundles exist immediately when the organization is created
+  console.log('[Orgs] Generating bundles for all entity types for new organization:', orgId);
+  try {
+    const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`);
+    const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
+    
+    for (const file of definitionFiles) {
+      const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, file);
+      if (entityType && entityType.isActive) {
+        try {
+          await regenerateEntityBundles(c.env.R2_BUCKET, entityType.id, orgId, config);
+        } catch (error) {
+          console.error('[Orgs] Error generating bundles for type', entityType.id, ':', error);
+          // Continue with other types even if one fails
+        }
+      }
+    }
+    console.log('[Orgs] Bundle generation complete for new organization:', orgId);
+  } catch (error) {
+    console.error('[Orgs] Error generating bundles for new organization:', orgId, error);
+    // Don't fail organization creation if bundle generation fails - log and continue
+  }
   
   return c.json({
     success: true,
@@ -171,6 +209,7 @@ organizationRoutes.get('/', async (c) => {
       id: org.id,
       name: org.name,
       slug: org.slug,
+      membershipKey: org.membershipKey || 'public',
       memberCount: await countOrgMembers(c.env.R2_BUCKET, org.id),
       entityCount: await countOrgEntities(c.env.R2_BUCKET, org.id),
       createdAt: org.createdAt,
@@ -229,6 +268,7 @@ organizationRoutes.get('/', async (c) => {
       id: org.id,
       name: org.name,
       slug: org.slug,
+      membershipKey: org.membershipKey || 'public',
       memberCount: await countOrgMembers(c.env.R2_BUCKET, org.id),
       entityCount: await countOrgEntities(c.env.R2_BUCKET, org.id),
       createdAt: org.createdAt,
@@ -289,6 +329,16 @@ organizationRoutes.patch('/:id',
   
   const updates = c.req.valid('json');
   
+  // Validate membershipKey if provided
+  if (updates.membershipKey) {
+    const config = await loadAppConfig(c.env.R2_BUCKET);
+    const invalidKeys = validateMembershipKeyIds([updates.membershipKey], config);
+    if (invalidKeys.length > 0) {
+      const validKeys = config.membershipKeys.keys.map(k => k.id).join(', ');
+      throw new ValidationError(`Invalid membership key '${updates.membershipKey}'. Valid keys are: ${validKeys}`);
+    }
+  }
+  
   // Check slug uniqueness if changing
   if (updates.slug && updates.slug !== org.slug) {
     const existingOrg = await findOrgBySlug(c.env.R2_BUCKET, updates.slug);
@@ -310,6 +360,7 @@ organizationRoutes.patch('/:id',
       ...org.settings,
       ...updates.settings
     },
+    membershipKey: updates.membershipKey ?? org.membershipKey,
     updatedAt: new Date().toISOString()
   };
   
@@ -431,7 +482,8 @@ organizationRoutes.patch('/:id/permissions',
   
   // Regenerate org bundles and manifest for the new permissions
   // This ensures the org has bundles for all viewable types
-  await regenerateOrgBundles(c.env.R2_BUCKET, orgId, updatedPermissions.viewable);
+  const config = await loadAppConfig(c.env.R2_BUCKET);
+  await regenerateOrgBundles(c.env.R2_BUCKET, orgId, updatedPermissions.viewable, config);
   
   return c.json({
     success: true,
@@ -841,6 +893,7 @@ async function findAdminOrganizations(
         id: org.id,
         name: org.name,
         slug: org.slug,
+        membershipKey: org.membershipKey || 'public',
         memberCount: await countOrgMembers(bucket, org.id),
         entityCount: await countOrgEntities(bucket, org.id),
         createdAt: org.createdAt,

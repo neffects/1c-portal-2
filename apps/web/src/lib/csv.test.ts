@@ -24,7 +24,7 @@ const mockEntityType: EntityType = {
   pluralName: 'Products',
   slug: 'products',
   description: 'Test products',
-  defaultVisibility: 'public',
+  visibleTo: ['public'],
   fields: [
     { 
       id: 'name', 
@@ -118,9 +118,10 @@ const mockEntities: Entity[] = [
     version: 1,
     status: 'published',
     visibility: 'public',
-    slug: 'test-product-1',
+    name: 'Test Product 1', // Top-level property
+    slug: 'test-product-1', // Top-level property
     data: {
-      name: 'Test Product 1',
+      // Dynamic fields only (name and slug not included)
       description: 'A great product',
       price: 99.99,
       category: 'electronics',
@@ -139,9 +140,10 @@ const mockEntities: Entity[] = [
     version: 1,
     status: 'draft',
     visibility: 'authenticated',
-    slug: 'test-product-2',
+    name: 'Test Product 2', // Top-level property
+    slug: 'test-product-2', // Top-level property
     data: {
-      name: 'Test Product 2',
+      // Dynamic fields only (name and slug not included)
       description: 'Another product with, commas',
       price: 149.00,
       category: 'clothing',
@@ -162,8 +164,8 @@ describe('generateTemplateRow', () => {
     expect(template.visibility).toBe('[public|authenticated|members]');
     expect(template.organizationId).toContain('org ID');
     expect(template.slug).toContain('lowercase');
-    expect(template.name).toContain('[string]');
-    expect(template.name).toContain('REQUIRED');
+    // Name is a system field, not from entity type fields
+    expect(template.name).toBe('[entity name - required]');
     expect(template.price).toContain('[number]');
     expect(template.price).toContain('REQUIRED');
     expect(template.category).toContain('Options:');
@@ -186,30 +188,33 @@ describe('generateCSV', () => {
     // Row 1: Headers with friendly names (format: "Name|field_id")
     expect(lines[0]).toContain('Id|id');
     expect(lines[0]).toContain('Organization|organizationId');
-    expect(lines[0]).toContain('Slug|slug');
+    expect(lines[0]).toContain('Name|name'); // System field
+    expect(lines[0]).toContain('Slug|slug'); // System field
     expect(lines[0]).toContain('Visibility|visibility');
-    expect(lines[0]).toContain('Name|name');
     expect(lines[0]).toContain('Price|price');
     
     // Row 2: Template
-    expect(lines[1]).toContain('[string]');
+    expect(lines[1]).toContain('[entity name - required]'); // System field name
     expect(lines[1]).toContain('[number]');
     expect(lines[1]).toContain('7-char'); // ID template hint
     
-    // Row 3+: Data - should include id, slug from entity top-level
+    // Row 3+: Data - should include id, name, slug from entity top-level
     expect(lines[2]).toContain('ent1234'); // entity.id
     expect(lines[2]).toContain('public');
-    expect(lines[2]).toContain('test-product-1'); // entity.slug
-    expect(lines[2]).toContain('Test Product 1');
+    expect(lines[2]).toContain('Test Product 1'); // entity.name (top-level)
+    expect(lines[2]).toContain('test-product-1'); // entity.slug (top-level)
   });
   
-  it('should export id, organizationId and slug from entity top-level', () => {
+  it('should export id, organizationId, name and slug from entity top-level', () => {
     const csv = generateCSV(mockEntities, mockEntityType);
     
     // Entity IDs
     expect(csv).toContain('ent1234');
     expect(csv).toContain('ent5678');
-    // Slugs
+    // Names (top-level)
+    expect(csv).toContain('Test Product 1');
+    expect(csv).toContain('Test Product 2');
+    // Slugs (top-level)
     expect(csv).toContain('test-product-1');
     expect(csv).toContain('test-product-2');
   });
@@ -339,7 +344,7 @@ abc1234,org5678,test-product,public,Test Product`;
     
     expect(result.success).toBe(true);
     expect(result.data).toHaveLength(1);
-    expect(result.data[0].id).toBeUndefined(); // Empty values are not included
+    expect(result.data[0].id).toBe(''); // Empty values are now preserved as empty strings
     expect(result.data[0].name).toBe('Test Product');
   });
 });
@@ -588,15 +593,18 @@ describe('convertToImportData', () => {
 });
 
 describe('validateImportData', () => {
-  it('should validate required fields', () => {
+  it('should validate required fields (excluding Name/Slug which are system fields)', () => {
     const entities = [
-      { data: { description: 'No name or price' } }
+      { data: { description: 'No price or category' } }
     ];
     
     const errors = validateImportData(entities, mockEntityType);
     
-    expect(errors.some(e => e.field === 'name')).toBe(true);
+    // Name is a system field, validated separately in convertToImportData
+    expect(errors.some(e => e.field === 'name')).toBe(false);
+    // Price and category are required dynamic fields
     expect(errors.some(e => e.field === 'price')).toBe(true);
+    expect(errors.some(e => e.field === 'category')).toBe(true);
   });
   
   it('should validate number constraints', () => {

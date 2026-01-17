@@ -14,12 +14,12 @@ The 1C Portal API is a RESTful API built on Cloudflare Workers using the Hono fr
 
 | Route Prefix | Auth Level | R2 Path | Purpose |
 |-------------|------------|---------|---------|
-| `/public/*` | None | `public/` | SEO-indexable public content |
-| `/api/*` | JWT required | `platform/` | Authenticated platform content |
+| `/public/*` | None | `bundles/public/`, `manifests/public/` | SEO-indexable public content (public membership key) |
+| `/api/*` | JWT required | `bundles/{keyId}/`, `manifests/{keyId}/` | Authenticated platform content (user's highest membership key) |
 | `/api/user/*` | JWT required | `private/users/:userId/` | User-specific data |
-| `/api/orgs/:orgId/*` | JWT + Org membership | `private/orgs/:orgId/` | Org-scoped content |
+| `/api/orgs/:orgId/*` | JWT + Org membership | `bundles/org/:orgId/`, `manifests/org/:orgId/` | Org-scoped content (member or admin bundles) |
 | `/api/super/*` | JWT + Superadmin | `private/`, `config/`, `secret/` | Platform administration |
-| `/files/*` | JWT for upload/delete, public for GET | `uploads/` | File upload and serving |
+| `/files/*` | JWT for upload/delete, public for GET | `uploads/` | File upload and serving (restricted to uploads/ prefix) |
 
 ### Authentication
 
@@ -30,6 +30,30 @@ Authorization: Bearer <jwt_token>
 ```
 
 JWT tokens are obtained through the magic link authentication flow (see Authentication section below).
+
+### Membership Keys System
+
+The API uses a **config-driven membership keys** system for access control. Membership keys are defined in `app.json` and determine which content users can access:
+
+- **Membership Keys**: Defined in app config (e.g., `public`, `platform`, `member`)
+  - Each key has an `id`, `name`, `description`, `requiresAuth` flag, and `order` (hierarchical)
+  - Keys are hierarchical: higher order = more access
+  - **The `public` key is always present by default** - it cannot be deleted and will be automatically added if missing from config
+  
+- **Organization Tiers**: Organizations have a `membershipTier` that grants specific keys
+  - `platform` tier: grants `public` + `platform` keys
+  - `full_member` tier: grants `public` + `platform` + `member` keys
+  
+- **Entity Type Visibility**: Entity types define `visibleTo` array (membership key IDs)
+  - Controls which keys can see entities of this type
+  - Field-level visibility: `fieldVisibility` overrides per field
+  
+- **Bundle Structure**: Bundles are generated per membership key
+  - Global bundles: `bundles/{keyId}/{typeId}.json` (published entities, field-projected)
+  - Org member bundles: `bundles/org/{orgId}/member/{typeId}.json` (published, all fields)
+  - Org admin bundles: `bundles/org/{orgId}/admin/{typeId}.json` (draft+deleted, all fields)
+
+**Field Projection**: Global bundles apply field projection based on membership key - users with higher keys see more fields. Org bundles include all fields since it's the organization's own content.
 
 ### Response Format
 
@@ -202,7 +226,7 @@ Get public site manifest listing all available entity types.
 
 **GET** `/public/bundles/:typeId`
 
-Get public entity bundle for a specific type.
+Get public entity bundle for a specific type. Returns published entities from all organizations that have `'public'` in their entity type's `visibleTo` array. Fields are projected based on the `public` membership key (only fields visible to `public` are included).
 
 **Path Parameters:**
 - `typeId` (required) - Entity type ID
@@ -346,7 +370,7 @@ List entities of a specific type in an organization.
 
 **GET** `/:orgSlug/:typeSlug/:entitySlug`
 
-Get a specific entity using slug chain (e.g., `/acme/products/dog-toy`).
+Get a specific entity using slug chain (e.g., `/acme/products/dog-toy`). Fields are projected based on the `public` membership key (only fields visible to `public` are included).
 
 **Path Parameters:**
 - `orgSlug` (required) - Organization slug
@@ -385,14 +409,16 @@ Require JWT authentication. These routes serve platform-wide authenticated conte
 
 **GET** `/api/manifests/site`
 
-Get platform manifest for authenticated users (includes authenticated visibility content).
+Get platform manifest for authenticated users. Returns manifest for the user's **highest membership key** based on their organization's `membershipTier`. For example:
+- Platform-tier users: `platform` key manifest
+- Full-member-tier users: `member` key manifest
 
 **Headers:**
 ```
 Authorization: Bearer <jwt_token>
 ```
 
-**Response:** Same format as public manifest, but includes authenticated visibility entity types
+**Response:** Same format as public manifest, but includes entity types visible to the user's highest membership key
 
 ### Get Platform Bundle
 
@@ -414,7 +440,7 @@ Authorization: Bearer <jwt_token>
 
 **GET** `/api/entities/:id`
 
-Get a global/platform entity by ID. This endpoint is for entities with `organizationId: null` (global entities stored in `platform/` or `public/` paths).
+Get a global/platform entity by ID. This endpoint is for entities with `organizationId: null` (global entities stored in `platform/` or `public/` paths). Fields are projected based on the user's highest membership key.
 
 **Note:** For organization-scoped entities, use `/api/orgs/:orgId/entities/:id` instead.
 
@@ -551,38 +577,6 @@ Authorization: Bearer <jwt_token>
 - `403` - Forbidden (insufficient permissions)
 - `404` - Entity not found
 
-### Create Entity
-
-**POST** `/api/entities`
-
-Create a new entity in the user's organization (or global if superadmin).
-
-**Headers:**
-```
-Authorization: Bearer <jwt_token>
-Content-Type: application/json
-```
-
-**Request Body:**
-```json
-{
-  "entityTypeId": "type123",
-  "data": {
-    "name": "New Product",
-    "description": "Product description",
-    "slug": "new-product"
-  },
-  "visibility": "public",
-  "organizationId": null
-}
-```
-
-**Notes:**
-- `organizationId` is optional. If not provided, uses user's organization
-- Superadmins can set `organizationId: null` to create global entities
-- Regular users cannot create global entities
-
-**Response:** Same format as Get Entity by ID
 
 ### Update Entity
 
@@ -697,7 +691,7 @@ Authorization: Bearer <jwt_token>
         "pluralName": "Products",
         "slug": "products",
         "description": "Product catalog",
-        "defaultVisibility": "public",
+        "visibleTo": ["public", "platform", "member"],
         "fieldCount": 8,
         "entityCount": 42,
         "isActive": true
@@ -707,6 +701,75 @@ Authorization: Bearer <jwt_token>
   }
 }
 ```
+
+### Get Entity Type
+
+**GET** `/api/entity-types/:id`
+
+Get entity type definition by ID.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Path Parameters:**
+- `id` (required) - Entity type ID
+
+**Response:** Full entity type definition object
+
+**Error Responses:**
+- `401` - Unauthorized (missing or invalid token)
+- `403` - Forbidden (insufficient permissions)
+- `404` - Entity type not found
+
+### Update Entity Type
+
+**PATCH** `/api/entity-types/:id`
+
+Update an entity type definition (superadmin only).
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+```
+
+**Path Parameters:**
+- `id` (required) - Entity type ID
+
+**Request Body:**
+```json
+{
+  "name": "Updated Product Name",
+  "pluralName": "Updated Products",
+  "slug": "updated-products",
+  "description": "Updated description",
+  "visibleTo": ["public", "members"],
+  "fieldVisibility": {
+    "price": ["public"],
+    "cost": ["members"]
+  },
+  "fields": [...],
+  "sections": [...],
+  "tableDisplayConfig": {...}
+}
+```
+
+All fields are optional - only provided fields will be updated.
+
+**Response:** Updated entity type object
+
+**Error Responses:**
+- `401` - Unauthorized (missing or invalid token)
+- `403` - Forbidden (not superadmin)
+- `404` - Entity type not found
+- `400` - Validation error (invalid visibleTo keys, duplicate slug, etc.)
+
+**Notes:**
+- If `visibleTo` or `fieldVisibility` is updated, manifests are automatically regenerated
+- If `slug` is changed, uniqueness is validated
+- `updatedAt` and `updatedBy` are automatically set
 
 ---
 
@@ -970,7 +1033,11 @@ Authorization: Bearer <jwt_token>
 
 **GET** `/api/orgs/:orgId/manifests/site`
 
-Get organization-specific manifest (includes members-only content).
+Get organization-specific manifest. Returns either:
+- **Member manifest**: For org members/admins (published entities, all fields)
+- **Admin manifest**: For org admins only (draft + deleted entities, all fields)
+
+The manifest type is determined by the user's role in the organization.
 
 **Path Parameters:**
 - `orgId` (required) - Organization ID
@@ -980,13 +1047,17 @@ Get organization-specific manifest (includes members-only content).
 Authorization: Bearer <jwt_token>
 ```
 
-**Response:** Same format as public manifest
+**Response:** Same format as public manifest, but scoped to the organization
 
 ### Get Organization Bundle
 
 **GET** `/api/orgs/:orgId/bundles/:typeId`
 
-Get organization-specific entity bundle.
+Get organization-specific entity bundle. Returns either:
+- **Member bundle**: For org members/admins - published entities only, all fields
+- **Admin bundle**: For org admins only - draft + deleted entities only, all fields (work queue)
+
+The bundle type is determined by the user's role in the organization. Org bundles include all fields since it's the organization's own content.
 
 **Path Parameters:**
 - `orgId` (required) - Organization ID
@@ -997,7 +1068,7 @@ Get organization-specific entity bundle.
 Authorization: Bearer <jwt_token>
 ```
 
-**Response:** Same format as public bundle
+**Response:** Same format as public bundle, but scoped to the organization with all fields included
 
 ### List Organization Users
 
@@ -1055,9 +1126,13 @@ Authorization: Bearer <jwt_token>
   "slug": "new-org",
   "description": "Organization description",
   "domainWhitelist": ["example.com"],
-  "allowSelfSignup": false
+  "allowSelfSignup": false,
+  "membershipTier": "platform"
 }
 ```
+
+**Request Fields:**
+- `membershipTier` (optional, default: `"platform"`) - Organization tier ID from app config. Determines which membership keys are granted to users in this organization. Valid values: `"platform"`, `"full_member"`, or other tiers defined in `app.json`.
 
 **Response:**
 ```json
@@ -1137,7 +1212,10 @@ Authorization: Bearer <jwt_token>
   "pluralName": "Products",
   "slug": "products",
   "description": "Product catalog",
-  "defaultVisibility": "public",
+  "visibleTo": ["public", "platform", "member"],
+  "fieldVisibility": {
+    "secret_field": ["member"]
+  },
   "fields": [
     {
       "name": "Name",
@@ -1157,6 +1235,10 @@ Authorization: Bearer <jwt_token>
 }
 ```
 
+**Request Fields:**
+- `visibleTo` (required) - Array of membership key IDs that can see entities of this type. Must reference keys defined in `app.json` (e.g., `["public", "platform", "member"]`)
+- `fieldVisibility` (optional) - Per-field visibility override. Maps field IDs to arrays of membership key IDs. Fields not in this map default to the type-level `visibleTo` setting.
+
 **Response:**
 ```json
 {
@@ -1167,7 +1249,10 @@ Authorization: Bearer <jwt_token>
     "pluralName": "Products",
     "slug": "products",
     "description": "Product catalog",
-    "defaultVisibility": "public",
+    "visibleTo": ["public", "platform", "member"],
+    "fieldVisibility": {
+      "secret_field": ["member"]
+    },
     "fields": [...],
     "sections": [...],
     "createdAt": "2026-01-11T12:00:00Z",
@@ -1555,6 +1640,176 @@ Authorization: Bearer <jwt_token>
 }
 ```
 
+### List All Bundles
+
+**GET** `/api/super/bundles`
+
+### Get Membership Keys Configuration
+
+**GET** `/api/super/config/membership-keys`
+
+Get the current membership keys configuration from `app.json`. The `public` key is always present and will be automatically added if missing.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "keys": [
+      {
+        "id": "public",
+        "name": "Public",
+        "description": "Accessible to everyone without authentication",
+        "requiresAuth": false,
+        "order": 0
+      },
+      {
+        "id": "platform",
+        "name": "Platform",
+        "description": "All authenticated platform users",
+        "requiresAuth": true,
+        "order": 1
+      }
+    ]
+  }
+}
+```
+
+**Notes:**
+- The `public` key is always included, even if missing from the stored config
+- If the config file doesn't exist, returns default structure with only the `public` key
+
+### Update Membership Keys Configuration
+
+**PATCH** `/api/super/config/membership-keys`
+
+Update the membership keys configuration in `app.json`. The `public` key will be automatically added if missing from the request.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Request Body:**
+```json
+{
+  "keys": [
+    {
+      "id": "public",
+      "name": "Public",
+      "description": "Accessible to everyone without authentication",
+      "requiresAuth": false,
+      "order": 0
+    },
+    {
+      "id": "platform",
+      "name": "Platform",
+      "description": "All authenticated platform users",
+      "requiresAuth": true,
+      "order": 1
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "keys": [...],
+    "warnings": []
+  }
+}
+```
+
+**Response Fields:**
+- `keys` - Array of membership key definitions (same format as request)
+- `warnings` - Array of warning messages if any deleted keys are still in use by entity types or organizations
+
+**Notes:**
+- The `public` key is automatically added if missing from the request
+- Keys that are in use by entity types or organizations will generate warnings but can still be deleted (for migration purposes)
+- The config cache is cleared after update
+
+### List All Bundles
+
+**GET** `/api/super/bundles`
+
+List all bundles stored in R2 with metadata including size, generation time, and version information.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "bundles": [
+      {
+        "path": "bundles/public/type123.json",
+        "type": "global",
+        "keyId": "public",
+        "typeId": "type123",
+        "generatedAt": "2026-01-15T10:30:00.000Z",
+        "size": 152340,
+        "version": 1234567890,
+        "entityCount": 42
+      },
+      {
+        "path": "bundles/org/org789/member/type123.json",
+        "type": "org-member",
+        "orgId": "org789",
+        "typeId": "type123",
+        "generatedAt": "2026-01-15T10:30:00.000Z",
+        "size": 234560,
+        "version": 1234567890,
+        "entityCount": 15
+      },
+      {
+        "path": "bundles/org/org789/admin/type123.json",
+        "type": "org-admin",
+        "orgId": "org789",
+        "typeId": "type123",
+        "generatedAt": "2026-01-15T10:30:00.000Z",
+        "size": 45678,
+        "version": 1234567890,
+        "entityCount": 3
+      }
+    ]
+  }
+}
+```
+
+**Bundle Types:**
+- `global` - Global bundles per membership key: `bundles/{keyId}/{typeId}.json`
+- `org-member` - Organization member bundles: `bundles/org/{orgId}/member/{typeId}.json`
+- `org-admin` - Organization admin bundles: `bundles/org/{orgId}/admin/{typeId}.json`
+
+**Response Fields:**
+- `path` - Full R2 path to the bundle file
+- `type` - Bundle type (global, org-member, org-admin)
+- `keyId` - Membership key ID (for global bundles only)
+- `orgId` - Organization ID (for org bundles only)
+- `typeId` - Entity type ID
+- `generatedAt` - ISO 8601 timestamp when bundle was generated
+- `size` - File size in bytes
+- `version` - Bundle version number (increments on entity changes)
+- `entityCount` - Number of entities in the bundle
+
+**Error Responses:**
+- `401` - Unauthorized (missing or invalid token)
+- `403` - Forbidden (not a superadmin)
+- `500` - Server error (failed to list bundles)
+
 ---
 
 ## File Routes
@@ -1612,8 +1867,10 @@ Content-Type: multipart/form-data
 
 Get/serve a file from R2 storage. Public endpoint - no authentication required.
 
+**Security:** This endpoint is restricted to files under the `uploads/` prefix only. Any other path will return 403 Forbidden.
+
 **Path Parameters:**
-- `path` (required) - File path in R2 storage (e.g., `uploads/logos/1642000000-abc123.svg`)
+- `path` (required) - File path in R2 storage (e.g., `uploads/logos/1642000000-abc123.svg`). Must start with `uploads/`.
 
 **Response:** File content with appropriate Content-Type header
 
@@ -1819,6 +2076,7 @@ curl -X POST http://localhost:8787/api/super/entities \
 curl http://localhost:8787/acme/products/dog-toy
 
 # No authentication required for public entities
+# Fields are projected based on public membership key
 ```
 
 ---
@@ -1834,6 +2092,37 @@ For API support or questions:
 ---
 
 ## Changelog
+
+### 2026-01-15 - Membership Keys Bundle System (Completed)
+
+- **Refactored bundle system** to use config-driven membership keys as primary access control
+- **New bundle structure**:
+  - Global bundles: `bundles/{keyId}/{typeId}.json` (published, field-projected)
+  - Org member bundles: `bundles/org/{orgId}/member/{typeId}.json` (published, all fields)
+  - Org admin bundles: `bundles/org/{orgId}/admin/{typeId}.json` (draft+deleted, all fields)
+- **Entity types** now use `visibleTo` array (membership key IDs) instead of `defaultVisibility`
+- **Field-level visibility** via `fieldVisibility` configuration
+- **Organizations** now have `membershipTier` field (determines which keys users receive)
+- **Field projection** applied to global bundles and entity GET endpoints based on membership key
+- **Manifest routes** updated:
+  - `/public/manifests/site` - public key manifest
+  - `/api/manifests/site` - user's highest key manifest
+  - `/api/orgs/:orgId/manifests/site` - org manifest (member or admin based on role)
+- **Bundle routes** updated:
+  - `/public/bundles/:typeId` - public key bundle
+  - `/api/bundles/:typeId` - user's highest key bundle
+  - `/api/orgs/:orgId/bundles/:typeId` - org bundle (member or admin based on role)
+- **Entity GET endpoints** now apply field projection based on user's membership keys
+- **File routes** security: `/files/*` restricted to `uploads/` prefix only
+- **Security checklist completed**:
+  - [x] `/files/*` endpoint restricted to `uploads/` prefix only
+  - [x] All bundle routes check membership keys before serving
+  - [x] Entity GET endpoints apply field projection for cross-org content
+  - [x] Deep link routes apply field projection
+  - [x] Config validation prevents invalid key references (visibleTo, fieldVisibility, membershipTier)
+  - [x] `requireMembershipKey()` middleware available for route-level access control
+- **Frontend sync** updated to fetch org-specific bundles for authenticated users
+- **Removed legacy** `apps/worker/src/routes/manifests.ts` (replaced by new route files)
 
 ### 2026-01-11 - Import/Export Endpoints
 

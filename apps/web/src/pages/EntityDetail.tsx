@@ -159,7 +159,7 @@ export function EntityDetailPage({ orgSlug, typeSlug, entitySlug }: EntityDetail
     );
   }
   
-  const name = (entity?.data.name as string) || `Entity ${entity?.id}`;
+  const name = entity?.name || `Entity ${entity?.id}`;
   const description = (entity?.data.description as string) || '';
   
   // Get other fields (excluding name and description)
