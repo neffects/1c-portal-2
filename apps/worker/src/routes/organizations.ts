@@ -133,14 +133,14 @@ organizationRoutes.post('/',
   // This ensures bundles exist immediately when the organization is created
   console.log('[Orgs] Generating bundles for all entity types for new organization:', orgId);
   try {
-    const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`);
+    const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`, ability);
     const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
     
     for (const file of definitionFiles) {
-      const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, file);
+      const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, file, ability);
       if (entityType && entityType.isActive) {
         try {
-          await regenerateEntityBundles(c.env.R2_BUCKET, entityType.id, orgId, config);
+          await regenerateEntityBundles(c.env.R2_BUCKET, entityType.id, orgId, config, ability);
         } catch (error) {
           console.error('[Orgs] Error generating bundles for type', entityType.id, ':', error);
           // Continue with other types even if one fails

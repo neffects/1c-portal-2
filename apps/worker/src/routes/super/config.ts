@@ -194,12 +194,6 @@ configRoutes.patch('/config/membership-keys',
       }
     };
     
-    // Get CASL ability for file-level permission checks (defense in depth)
-    const ability = c.get('ability');
-    if (!ability) {
-      throw new ForbiddenError('CASL ability required');
-    }
-    
     // Write updated config to R2 - CASL verifies superadmin can write config
     await writeJSON(c.env.R2_BUCKET, getAppConfigPath(), updatedConfig, ability);
     
@@ -310,9 +304,10 @@ configRoutes.post('/config/manifests/regenerate', async (c) => {
   
   try {
     const config = await loadAppConfig(c.env.R2_BUCKET);
+    const ability = c.get('ability');
     
     console.log('[Config] Starting manifest regeneration for all keys and orgs');
-    await regenerateAllManifests(c.env.R2_BUCKET, config);
+    await regenerateAllManifests(c.env.R2_BUCKET, config, ability);
     
     console.log('[Config] All manifests regenerated successfully');
     

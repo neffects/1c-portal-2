@@ -1064,7 +1064,7 @@ superEntityRoutes.post('/entities/bulk-import',
     const orgId = orgKey === 'global' ? null : orgKey;
     for (const visibility of visibilities) {
       console.log('[SuperEntities] Regenerating bundles for bulk import - org:', orgKey, 'visibility:', visibility);
-      await regenerateEntityBundles(c.env.R2_BUCKET, entityTypeId, orgId, config);
+      await regenerateEntityBundles(c.env.R2_BUCKET, entityTypeId, orgId, config, ability);
     }
   }
   
@@ -1199,7 +1199,8 @@ superEntityRoutes.post('/entities',
     c.env.R2_BUCKET,
     entityTypeId,
     targetOrgId,
-    config
+    config,
+    ability
   );
   
   return c.json({ success: true, data: entity }, 201);
@@ -1452,7 +1453,8 @@ superEntityRoutes.patch('/entities/:id',
     c.env.R2_BUCKET,
     entity.entityTypeId,
     orgId,
-    config
+    config,
+    ability
   );
   
   return c.json({
@@ -1591,7 +1593,8 @@ superEntityRoutes.post('/entities/:id/transition',
       c.env.R2_BUCKET,
       stub.entityTypeId,
       orgId,
-      config
+      config,
+      ability
     );
     
     console.log('[SuperEntities] SUPER DELETE complete for entity:', entityId);
@@ -1668,7 +1671,8 @@ superEntityRoutes.post('/entities/:id/transition',
       c.env.R2_BUCKET,
       stub.entityTypeId,
       orgId,
-      config
+      config,
+      ability
     );
   }
   

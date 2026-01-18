@@ -431,7 +431,7 @@ bundleRoutes.post('/bundles/regenerate',
     if (type === 'global') {
       // Regenerate all global bundles for this type (orgId = null)
       console.log('[Bundles] Regenerating global bundles for type:', typeId);
-      await regenerateEntityBundles(bucket, typeId, null, config);
+      await regenerateEntityBundles(bucket, typeId, null, config, ability);
     } else if (type === 'org-member' || type === 'org-admin') {
       // Regenerate org bundles (both member and admin bundles are regenerated together)
       if (!orgId) {
@@ -444,11 +444,11 @@ bundleRoutes.post('/bundles/regenerate',
         }, 400);
       }
       console.log('[Bundles] Regenerating org bundles:', orgId, typeId);
-      await regenerateEntityBundles(bucket, typeId, orgId, config);
+      await regenerateEntityBundles(bucket, typeId, orgId, config, ability);
     } else {
       // Regenerate all applicable bundles (both global and org if orgId provided)
       console.log('[Bundles] Regenerating all bundles for type:', typeId, 'org:', orgId || 'global');
-      await regenerateEntityBundles(bucket, typeId, orgId || null, config);
+      await regenerateEntityBundles(bucket, typeId, orgId || null, config, ability);
     }
     
     return c.json({
@@ -608,7 +608,7 @@ bundleRoutes.post('/bundles/regenerate-all',
       try {
         // Regenerate global bundles
         console.log('[Bundles] Regenerating global bundles for type:', entityType.id, entityType.name);
-        await regenerateEntityBundles(bucket, entityType.id, null, config);
+        await regenerateEntityBundles(bucket, entityType.id, null, config, ability);
         // Count each valid membership key as a separate bundle
         const validKeys = visibleTo.filter(keyId => {
           const keyDef = config.membershipKeys.keys.find(k => k.id === keyId);
@@ -627,7 +627,7 @@ bundleRoutes.post('/bundles/regenerate-all',
         for (const org of organizations) {
           try {
             console.log('[Bundles] Regenerating org bundles for:', org.id, entityType.id);
-            await regenerateEntityBundles(bucket, entityType.id, org.id, config);
+            await regenerateEntityBundles(bucket, entityType.id, org.id, config, ability);
             // Count both member and admin bundles (2 per org)
             successCount += 2;
             console.log('[Bundles] Successfully regenerated org bundles for:', org.id, entityType.id);

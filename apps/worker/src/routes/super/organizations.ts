@@ -86,7 +86,7 @@ superOrgRoutes.post('/organizations',
       const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, file, ability);
       if (entityType && entityType.isActive) {
         try {
-          await regenerateEntityBundles(c.env.R2_BUCKET, entityType.id, orgId, config);
+          await regenerateEntityBundles(c.env.R2_BUCKET, entityType.id, orgId, config, ability);
         } catch (error) {
           console.error('[SuperOrgs] Error generating bundles for type', entityType.id, ':', error);
           // Continue with other types even if one fails

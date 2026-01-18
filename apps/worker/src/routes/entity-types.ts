@@ -24,7 +24,8 @@ import { regenerateManifestsForType, regenerateAllManifests, loadAppConfig, vali
 import { createEntityTypeId, createSlug } from '../lib/id';
 import { requireSuperadmin } from '../middleware/auth';
 import { requireAbility } from '../middleware/casl';
-import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
+import { NotFoundError, ConflictError, ValidationError, ForbiddenError } from '../middleware/error';
+import type { AppAbility } from '../lib/abilities';
 import { R2_PATHS } from '@1cc/shared';
 import type { EntityType, EntityTypeListItem, FieldDefinition, FieldSection, EntityTypePermissions, EntityStub, EntityLatestPointer, VisibilityScope, Entity, Organization } from '@1cc/shared';
 
@@ -69,6 +70,11 @@ entityTypeRoutes.post('/',
   const typeId = createEntityTypeId();
   const now = new Date().toISOString();
   const userId = c.get('userId')!;
+  const ability = c.get('ability');
+  
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
   
   // Generate IDs for fields and sections
   // Preserve hard-coded IDs for 'name' and 'slug' fields (required fields)
@@ -117,16 +123,16 @@ entityTypeRoutes.post('/',
   };
   
   // Save entity type definition
-  await writeJSON(c.env.R2_BUCKET, getEntityTypePath(typeId), entityType);
+  await writeJSON(c.env.R2_BUCKET, getEntityTypePath(typeId), entityType, ability);
   
   console.log('[EntityTypes] Created entity type:', typeId, 'visibleTo:', entityType.visibleTo);
   
   // Auto-grant permissions to all existing organizations
-  await grantTypeToAllOrganizations(c.env.R2_BUCKET, typeId, userId);
+  await grantTypeToAllOrganizations(c.env.R2_BUCKET, typeId, userId, ability);
   
   // Regenerate all manifests to include the new type (config already loaded above)
   console.log('[EntityTypes] Regenerating manifests for newly created type:', typeId);
-  await regenerateManifestsForType(c.env.R2_BUCKET, typeId, config);
+  await regenerateManifestsForType(c.env.R2_BUCKET, typeId, config, ability);
   console.log('[EntityTypes] Manifest regeneration complete for new type:', typeId);
   
   // Generate bundles for this new entity type (even if empty)
@@ -135,17 +141,17 @@ entityTypeRoutes.post('/',
     console.log('[EntityTypes] Generating bundles for newly created type:', typeId);
     try {
       // Generate global bundles (for each key in visibleTo)
-      await regenerateEntityBundles(c.env.R2_BUCKET, typeId, null, config);
+      await regenerateEntityBundles(c.env.R2_BUCKET, typeId, null, config, ability);
       
       // Generate org bundles for all existing organizations
-      const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+      const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`, ability);
       const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
       
       for (const file of profileFiles) {
-        const org = await readJSON<Organization>(c.env.R2_BUCKET, file);
+        const org = await readJSON<Organization>(c.env.R2_BUCKET, file, ability);
         if (org && org.isActive) {
           try {
-            await regenerateEntityBundles(c.env.R2_BUCKET, typeId, org.id, config);
+            await regenerateEntityBundles(c.env.R2_BUCKET, typeId, org.id, config, ability);
           } catch (error) {
             console.error('[EntityTypes] Error generating bundles for org', org.id, ':', error);
             // Continue with other orgs even if one fails
@@ -242,9 +248,11 @@ entityTypeRoutes.get('/',
         }
         
         // Start counting entities in parallel (don't await yet)
+        // Get ability for entity counting (may be null for unauthenticated requests)
+        const ability = c.get('ability');
         typeData.push({
           type: entityType,
-          countPromise: countTypeEntities(c.env.R2_BUCKET, entityType.id)
+          countPromise: countTypeEntities(c.env.R2_BUCKET, entityType.id, ability)
         });
       } catch (err) {
         console.error('[EntityTypes] Error reading entity type file', file, ':', err);
@@ -386,7 +394,12 @@ entityTypeRoutes.patch('/:id',
   const typeId = c.req.param('id');
   console.log('[EntityTypes] Updating entity type:', typeId);
   
-  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId));
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId), ability, 'read', 'EntityType');
   
   if (!entityType) {
     throw new NotFoundError('Entity Type', typeId);
@@ -437,7 +450,7 @@ entityTypeRoutes.patch('/:id',
     updatedBy: c.get('userId')!
   };
   
-  await writeJSON(c.env.R2_BUCKET, getEntityTypePath(typeId), updatedType);
+  await writeJSON(c.env.R2_BUCKET, getEntityTypePath(typeId), updatedType, ability);
   
   console.log('[EntityTypes] Updated entity type:', typeId);
   
@@ -465,7 +478,7 @@ entityTypeRoutes.patch('/:id',
     } else {
       console.log('[EntityTypes] Metadata changed, regenerating manifests');
     }
-    await regenerateManifestsForType(c.env.R2_BUCKET, typeId, config);
+    await regenerateManifestsForType(c.env.R2_BUCKET, typeId, config, ability);
     console.log('[EntityTypes] Manifest regeneration complete for type:', typeId);
   } else {
     console.log('[EntityTypes] No manifest-affecting changes detected, skipping manifest regeneration');
@@ -476,17 +489,17 @@ entityTypeRoutes.patch('/:id',
     console.log('[EntityTypes] visibleTo changed - regenerating bundles for type:', typeId);
     try {
       // Regenerate global bundles (for each key in visibleTo)
-      await regenerateEntityBundles(c.env.R2_BUCKET, typeId, null, config);
+      await regenerateEntityBundles(c.env.R2_BUCKET, typeId, null, config, ability);
       
       // Regenerate org bundles for all existing organizations
-      const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+      const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`, ability);
       const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
       
       for (const file of profileFiles) {
-        const org = await readJSON<Organization>(c.env.R2_BUCKET, file);
+        const org = await readJSON<Organization>(c.env.R2_BUCKET, file, ability);
         if (org && org.isActive) {
           try {
-            await regenerateEntityBundles(c.env.R2_BUCKET, typeId, org.id, config);
+            await regenerateEntityBundles(c.env.R2_BUCKET, typeId, org.id, config, ability);
           } catch (error) {
             console.error('[EntityTypes] Error regenerating bundles for org', org.id, ':', error);
             // Continue with other orgs even if one fails
@@ -532,8 +545,12 @@ entityTypeRoutes.post('/migrate-permissions', requireSuperadmin(), async (c) => 
   console.log('[EntityTypes] Found', typeIds.length, 'active entity types');
   
   // Grant each type to all organizations
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
   for (const typeId of typeIds) {
-    await grantTypeToAllOrganizations(c.env.R2_BUCKET, typeId, userId);
+    await grantTypeToAllOrganizations(c.env.R2_BUCKET, typeId, userId, ability);
   }
   
   return c.json({
@@ -553,7 +570,12 @@ entityTypeRoutes.delete('/:id', requireSuperadmin(), requireAbility('delete', 'E
   const typeId = c.req.param('id');
   console.log('[EntityTypes] Archiving entity type:', typeId);
   
-  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId));
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId), ability, 'read', 'EntityType');
   
   if (!entityType) {
     throw new NotFoundError('Entity Type', typeId);
@@ -567,13 +589,13 @@ entityTypeRoutes.delete('/:id', requireSuperadmin(), requireAbility('delete', 'E
     updatedBy: c.get('userId')!
   };
   
-  await writeJSON(c.env.R2_BUCKET, getEntityTypePath(typeId), updatedType);
+  await writeJSON(c.env.R2_BUCKET, getEntityTypePath(typeId), updatedType, ability);
   
   console.log('[EntityTypes] Archived entity type:', typeId);
   
   // Regenerate manifests to remove the archived type
   const config = await loadAppConfig(c.env.R2_BUCKET);
-  await regenerateManifestsForType(c.env.R2_BUCKET, typeId, config);
+  await regenerateManifestsForType(c.env.R2_BUCKET, typeId, config, ability);
   
   return c.json({
     success: true,
@@ -609,7 +631,12 @@ entityTypeRoutes.delete('/:id/hard', requireSuperadmin(), requireAbility('delete
   }
   
   // Check if there are any entities of this type
-  const entityCount = await countTypeEntities(c.env.R2_BUCKET, typeId);
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  const entityCount = await countTypeEntities(c.env.R2_BUCKET, typeId, ability);
   
   if (entityCount > 0 && !deleteEntities) {
     console.log('[EntityTypes] HARD DELETE blocked - type has', entityCount, 'entities');
@@ -622,7 +649,7 @@ entityTypeRoutes.delete('/:id/hard', requireSuperadmin(), requireAbility('delete
   // If deleteEntities is true, delete all entities of this type first
   if (deleteEntities && entityCount > 0) {
     console.log('[EntityTypes] HARD DELETE - Deleting', entityCount, 'entities of type:', typeId);
-    await deleteAllEntitiesOfType(c.env.R2_BUCKET, typeId, entityType);
+    await deleteAllEntitiesOfType(c.env.R2_BUCKET, typeId, entityType, ability);
     console.log('[EntityTypes] HARD DELETE - All entities deleted, proceeding with type deletion');
   } else {
     console.log('[EntityTypes] HARD DELETE - No entities found, proceeding with deletion');
@@ -630,23 +657,23 @@ entityTypeRoutes.delete('/:id/hard', requireSuperadmin(), requireAbility('delete
   
   // 1. Clean up any orphaned stubs (stubs without entity data)
   console.log('[EntityTypes] HARD DELETE - Cleaning up orphaned stubs');
-  await cleanupOrphanedStubs(c.env.R2_BUCKET, typeId);
+  await cleanupOrphanedStubs(c.env.R2_BUCKET, typeId, ability);
   
   // 2. Delete the entity type definition file
   const typePath = getEntityTypePath(typeId);
   console.log('[EntityTypes] HARD DELETE - Deleting definition file:', typePath);
-  await deleteFile(c.env.R2_BUCKET, typePath);
+  await deleteFile(c.env.R2_BUCKET, typePath, ability);
   
   // 3. Remove this type from all organization permissions
   console.log('[EntityTypes] HARD DELETE - Removing from org permissions');
-  await removeTypeFromAllOrganizations(c.env.R2_BUCKET, typeId);
+  await removeTypeFromAllOrganizations(c.env.R2_BUCKET, typeId, ability);
   
   // 4. Regenerate all manifests (type will be excluded since it no longer exists)
   // We can't use regenerateManifestsForType because the type file is already deleted
   // Instead, regenerate all manifests which will list files and exclude deleted types
   console.log('[EntityTypes] HARD DELETE - Regenerating all manifests');
   const config = await loadAppConfig(c.env.R2_BUCKET);
-  await regenerateAllManifests(c.env.R2_BUCKET, config);
+  await regenerateAllManifests(c.env.R2_BUCKET, config, ability);
   
   console.log('[EntityTypes] HARD DELETE - Completed permanent deletion of entity type:', typeId, entityType.name);
   
@@ -683,10 +710,10 @@ async function findTypeBySlug(bucket: R2Bucket, slug: string): Promise<EntityTyp
  * Count entities of a specific type
  * Only counts entities that actually have data (not orphaned stubs)
  */
-async function countTypeEntities(bucket: R2Bucket, typeId: string): Promise<number> {
+async function countTypeEntities(bucket: R2Bucket, typeId: string, ability: AppAbility | null = null): Promise<number> {
   try {
     // Use stubs for faster counting (more efficient than listing all entity files)
-    const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`);
+    const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`, ability);
     let count = 0;
     
     // Count stubs that match this entity type AND have actual entity data
@@ -699,7 +726,7 @@ async function countTypeEntities(bucket: R2Bucket, typeId: string): Promise<numb
       if (filename.includes('/')) continue;
       
       try {
-        const stub = await readJSON<EntityStub>(bucket, stubFile);
+        const stub = await readJSON<EntityStub>(bucket, stubFile, ability, 'read', 'Entity');
         if (!stub || stub.entityTypeId !== typeId) continue;
         
         // Verify entity actually has data (not just an orphaned stub)
@@ -711,7 +738,8 @@ async function countTypeEntities(bucket: R2Bucket, typeId: string): Promise<numb
           // Global entity - check both authenticated and public paths
           for (const visibility of ['authenticated', 'public'] as const) {
             const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
-            const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath);
+            // Entity latest pointers are in public/platform paths - allow without ability
+            const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath, ability);
             if (latestPointer) {
               hasData = true;
               break;
@@ -720,7 +748,7 @@ async function countTypeEntities(bucket: R2Bucket, typeId: string): Promise<numb
         } else {
           // Org entity - check members path
           const latestPath = getEntityLatestPath('members', stub.entityId, orgId);
-          const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath);
+          const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath, ability);
           if (latestPointer) {
             hasData = true;
           }
@@ -761,7 +789,8 @@ function countEntitiesOfType(files: string[], typeId: string): number {
 async function grantTypeToAllOrganizations(
   bucket: R2Bucket,
   typeId: string,
-  updatedBy: string
+  updatedBy: string,
+  ability: AppAbility
 ): Promise<void> {
   console.log('[EntityTypes] Granting type permissions to all organizations:', typeId);
   
@@ -779,7 +808,7 @@ async function grantTypeToAllOrganizations(
       
       // Load existing permissions or create new
       const permissionsPath = getOrgPermissionsPath(orgId);
-      let permissions = await readJSON<EntityTypePermissions>(bucket, permissionsPath);
+      let permissions = await readJSON<EntityTypePermissions>(bucket, permissionsPath, ability, 'read', 'Organization');
       
       if (!permissions) {
         permissions = {
@@ -805,7 +834,7 @@ async function grantTypeToAllOrganizations(
         permissions.updatedBy = updatedBy;
       }
       
-      await writeJSON(bucket, permissionsPath, permissions);
+      await writeJSON(bucket, permissionsPath, permissions, ability, undefined, 'update', 'Organization');
       console.log('[EntityTypes] Granted permissions to org:', orgId);
     }
   } catch (error) {
@@ -820,7 +849,8 @@ async function grantTypeToAllOrganizations(
  */
 async function removeTypeFromAllOrganizations(
   bucket: R2Bucket,
-  typeId: string
+  typeId: string,
+  ability: AppAbility
 ): Promise<void> {
   console.log('[EntityTypes] Removing type permissions from all organizations:', typeId);
   
@@ -838,7 +868,7 @@ async function removeTypeFromAllOrganizations(
       
       // Load existing permissions
       const permissionsPath = getOrgPermissionsPath(orgId);
-      const permissions = await readJSON<EntityTypePermissions>(bucket, permissionsPath);
+      const permissions = await readJSON<EntityTypePermissions>(bucket, permissionsPath, ability, 'read', 'Organization');
       
       if (!permissions) continue;
       
@@ -858,7 +888,7 @@ async function removeTypeFromAllOrganizations(
       // Only write back if we made changes
       if (modified) {
         permissions.updatedAt = new Date().toISOString();
-        await writeJSON(bucket, permissionsPath, permissions);
+        await writeJSON(bucket, permissionsPath, permissions, ability, undefined, 'update', 'Organization');
         console.log('[EntityTypes] Removed type from org permissions:', orgId);
       }
     }
@@ -874,12 +904,13 @@ async function removeTypeFromAllOrganizations(
  */
 async function cleanupOrphanedStubs(
   bucket: R2Bucket,
-  typeId: string
+  typeId: string,
+  ability: AppAbility
 ): Promise<void> {
   console.log('[EntityTypes] Cleaning up orphaned stubs for type:', typeId);
   
   try {
-    const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`);
+    const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`, ability);
     let cleanedCount = 0;
     
     for (const stubFile of stubFiles) {
@@ -889,7 +920,7 @@ async function cleanupOrphanedStubs(
       if (filename.includes('/')) continue;
       
       try {
-        const stub = await readJSON<EntityStub>(bucket, stubFile);
+        const stub = await readJSON<EntityStub>(bucket, stubFile, ability, 'read', 'Entity');
         if (!stub || stub.entityTypeId !== typeId) continue;
         
         // Check if entity actually has data
@@ -900,7 +931,8 @@ async function cleanupOrphanedStubs(
           // Global entity - check both authenticated and public paths
           for (const visibility of ['authenticated', 'public'] as const) {
             const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
-            const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath);
+            // Public/platform paths - ability can be provided for reads
+            const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath, ability);
             if (latestPointer) {
               hasData = true;
               break;
@@ -909,7 +941,7 @@ async function cleanupOrphanedStubs(
         } else {
           // Org entity - check members path
           const latestPath = getEntityLatestPath('members', stub.entityId, orgId);
-          const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath);
+          const latestPointer = await readJSON<{ version?: number }>(bucket, latestPath, ability, 'read', 'Entity');
           if (latestPointer) {
             hasData = true;
           }
@@ -919,7 +951,7 @@ async function cleanupOrphanedStubs(
         if (!hasData) {
           console.log('[EntityTypes] Deleting orphaned stub:', stub.entityId);
           const stubPath = getEntityStubPath(stub.entityId);
-          await deleteFile(bucket, stubPath);
+          await deleteFile(bucket, stubPath, ability, 'delete', 'Entity');
           cleanedCount++;
         }
       } catch (err) {
@@ -944,13 +976,14 @@ async function cleanupOrphanedStubs(
 async function deleteAllEntitiesOfType(
   bucket: R2Bucket,
   typeId: string,
-  entityType: EntityType
+  entityType: EntityType,
+  ability: AppAbility
 ): Promise<void> {
   console.log('[EntityTypes] Deleting all entities of type:', typeId);
   
   try {
     // Get all entity stubs for this type
-    const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`);
+    const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`, ability);
     const entityStubs: Array<{ stub: EntityStub; stubPath: string; hasData: boolean; latestPointer: EntityLatestPointer | null; storageVisibility: VisibilityScope }> = [];
     
     for (const stubFile of stubFiles) {
@@ -960,7 +993,7 @@ async function deleteAllEntitiesOfType(
       if (filename.includes('/')) continue;
       
       try {
-        const stub = await readJSON<EntityStub>(bucket, stubFile);
+        const stub = await readJSON<EntityStub>(bucket, stubFile, ability, 'read', 'Entity');
         if (!stub || stub.entityTypeId !== typeId) continue;
         
         // Check if entity actually has data
@@ -972,7 +1005,8 @@ async function deleteAllEntitiesOfType(
           // Global entity - check both authenticated and public paths
           for (const visibility of ['authenticated', 'public'] as const) {
             const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
-            latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath);
+            // Public/platform paths - ability can be null for reads
+            latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath, ability);
             if (latestPointer) {
               storageVisibility = latestPointer.visibility;
               break;
@@ -981,7 +1015,7 @@ async function deleteAllEntitiesOfType(
         } else {
           // Org entity - check members path
           const latestPath = getEntityLatestPath('members', stub.entityId, orgId);
-          latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath);
+          latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath, ability, 'read', 'Entity');
           if (latestPointer) {
             storageVisibility = 'members';
           }
@@ -1014,7 +1048,7 @@ async function deleteAllEntitiesOfType(
         
         // Get the entity to check visibility and slug
         const versionPath = getEntityVersionPath(storageVisibility, entityId, latestPointer!.version, orgId || undefined);
-        const entity = await readJSON<Entity>(bucket, versionPath);
+        const entity = await readJSON<Entity>(bucket, versionPath, ability, 'read', 'Entity');
         
         if (!entity) {
           console.warn('[EntityTypes] Entity not found, skipping:', entityId);
@@ -1026,20 +1060,20 @@ async function deleteAllEntitiesOfType(
           ? `${storageVisibility === 'public' ? 'public/' : 'platform/'}entities/${entityId}/`
           : `private/orgs/${orgId}/entities/${entityId}/`;
         
-        const entityFiles = await listFiles(bucket, entityDir);
+        const entityFiles = await listFiles(bucket, entityDir, ability);
         for (const filePath of entityFiles) {
           console.log('[EntityTypes] Deleting version file:', filePath);
-          await deleteFile(bucket, filePath);
+          await deleteFile(bucket, filePath, ability, 'delete', 'Entity');
         }
         
         // 2. Delete the entity stub
         console.log('[EntityTypes] Deleting entity stub:', stubPath);
-        await deleteFile(bucket, stubPath);
+        await deleteFile(bucket, stubPath, ability, 'delete', 'Entity');
         
         // 3. Delete slug index if entity was public
         if (entity.visibility === 'public' && entity.slug) {
           console.log('[EntityTypes] Deleting slug index for:', entity.slug);
-          await deleteSlugIndex(bucket, orgId, entityType.slug, entity.slug);
+          await deleteSlugIndex(bucket, orgId, entityType.slug, entity.slug, ability);
         }
         
         deletedCount++;
@@ -1059,10 +1093,10 @@ async function deleteAllEntitiesOfType(
       affectedOrgIds.add(stub.organizationId);
     }
     
-    const config = await loadAppConfig(bucket);
+    const config = await loadAppConfig(bucket, ability);
     for (const orgId of affectedOrgIds) {
       console.log('[EntityTypes] Regenerating bundles for org after entity deletion:', orgId || 'global');
-      await regenerateEntityBundles(bucket, typeId, orgId, config);
+      await regenerateEntityBundles(bucket, typeId, orgId, config, ability);
     }
   } catch (error) {
     console.error('[EntityTypes] Error deleting all entities of type:', typeId, error);
