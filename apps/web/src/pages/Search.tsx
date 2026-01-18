@@ -6,7 +6,6 @@
 
 import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
-import { useSync } from '../stores/sync';
 import { useEntityTypes } from '../hooks/useDB';
 import { api } from '../lib/api';
 import { EntityCard } from '../components/EntityCard';
@@ -28,7 +27,6 @@ interface SearchResult {
 }
 
 export function Search() {
-  const { syncing } = useSync();
   const { data: types, loading: typesLoading } = useEntityTypes();
   
   const [filters, setFilters] = useState<SearchFilters>({

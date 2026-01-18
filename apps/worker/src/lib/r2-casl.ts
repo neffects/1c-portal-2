@@ -21,20 +21,15 @@ import { invalidateBundlesForFile } from './bundle-invalidation';
  * - entity-types/ paths: EntityType subject
  * - orgs/.../profile.json paths: Organization subject
  * - orgs/.../users/... paths: User subject
- * - bundles/ paths: Entity subject (bundles contain entities)
+ * - bundles/ paths: Platform subject for writes, Entity subject for reads
  * - manifests/ paths: Platform subject
  * - config/ and secret/ paths: Platform subject (system config)
- * - public/ paths: Entity subject (public entities)
+ * - public/ paths (non-bundle): null for special handling
  */
 function pathToPermission(path: string, operation: 'read' | 'write' | 'delete'): { action: Actions; subject: Subjects } | null {
-  // Public paths that don't require CASL (or require special handling)
-  if (path.startsWith('bundles/public/') || 
-      path.startsWith('public/') ||
-      path.startsWith('config/') ||
-      path.startsWith('secret/')) {
-    // These are either public content or system config
-    // Return null to indicate special handling needed
-    return null;
+  // Entity type operations (check before public path check - entity types in public/ still need CASL for writes)
+  if (path.includes('/entity-types/')) {
+    return { action: operation as Actions, subject: 'EntityType' };
   }
   
   // Entity operations
@@ -42,13 +37,33 @@ function pathToPermission(path: string, operation: 'read' | 'write' | 'delete'):
     return { action: operation as Actions, subject: 'Entity' };
   }
   
-  // Entity type operations
-  if (path.includes('/entity-types/')) {
-    return { action: operation as Actions, subject: 'EntityType' };
+  // Bundle/Manifest operations - CHECK BEFORE PUBLIC PATHS
+  // Bundles are internal platform files, not public content
+  // This must come before the public/ check to correctly handle bundles/public/* paths
+  if (path.startsWith('bundles/') || path.includes('/bundles/') || path.includes('/manifests/')) {
+    // For write/delete operations on bundles/manifests, use Platform subject
+    // For read operations, bundles contain entities so use Entity subject
+    if (operation === 'write' || operation === 'delete') {
+      return { action: operation as Actions, subject: 'Platform' };
+    }
+    return { action: 'read', subject: 'Entity' }; // Bundles contain entities for reads
+  }
+  
+  // Public/config/secret paths that don't require CASL (return null for special handling)
+  // Note: Entity types and bundles are checked above, so they're excluded from this
+  if (path.startsWith('public/') ||
+      path.startsWith('config/') ||
+      path.startsWith('secret/')) {
+    return null;
   }
   
   // Organization operations
   if (path.includes('/orgs/') && (path.includes('/profile.json') || path.includes('/entity-type-permissions.json'))) {
+    return { action: operation as Actions, subject: 'Organization' };
+  }
+  
+  // Organization permissions (policies path)
+  if (path.includes('/policies/organizations/') && path.includes('/entity-type-permissions.json')) {
     return { action: operation as Actions, subject: 'Organization' };
   }
   
@@ -62,21 +77,20 @@ function pathToPermission(path: string, operation: 'read' | 'write' | 'delete'):
     return { action: operation as Actions, subject: 'Platform' };
   }
   
-  // Bundle/Manifest operations (contain entities)
-  if (path.includes('/bundles/') || path.includes('/manifests/')) {
-    return { action: 'read', subject: 'Entity' }; // Bundles contain entities
-  }
-  
   // Default: Platform level
   return { action: operation as Actions, subject: 'Platform' };
 }
 
 /**
- * Check if a path is public (doesn't require ability check)
+ * Check if a path is public (doesn't require ability check for reads)
+ * Note: bundles/ are internal platform files and require Platform permission for writes
  */
 function isPublicPath(path: string): boolean {
-  return path.startsWith('bundles/public/') || 
-         path.startsWith('public/') ||
+  // Bundles are internal platform files, NOT public content - they require Platform permission
+  if (path.startsWith('bundles/')) {
+    return false;
+  }
+  return path.startsWith('public/') ||
          path.startsWith('config/') ||
          path.startsWith('secret/');
 }

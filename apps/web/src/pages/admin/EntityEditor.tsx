@@ -10,6 +10,10 @@ import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
 import { FieldRenderer } from '../../components/fields';
 import { slugify, checkDuplicatesInBundle, type DuplicateCheckResult } from '../../lib/utils';
+import { useEntity } from '../../hooks/useDB';
+import { invalidateEntityLists } from '../../stores/query-sync';
+import { useSync } from '../../stores/sync';
+import { getEntityWithTypeId } from '../../stores/db';
 import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, OrganizationListItem, EntityBundle, BundleEntity } from '@1cc/shared';
 
 interface EntityEditorProps {
@@ -20,6 +24,7 @@ interface EntityEditorProps {
 
 export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorProps) {
   const { currentOrganization } = useAuth();
+  const { sync } = useSync();
   
   // Helper to get org identifier (slug or ID fallback)
   const getOrgIdentifier = (): string => {
@@ -34,6 +39,9 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
   const typeIdFromQuery = urlParams.get('type');
   const typeId = typeIdProp || typeIdFromQuery || undefined;
   const { isAuthenticated, isOrgAdmin, isSuperadmin, loading: authLoading, organizationId, user, userId } = useAuth();
+  
+  // Try to load entity from TanStack DB first (only for existing entities)
+  const { data: bundleEntity, loading: dbLoading, error: dbError } = useEntity(id);
   
   const [entity, setEntity] = useState<Entity | null>(null);
   const [entityType, setEntityType] = useState<EntityType | null>(null);
@@ -262,12 +270,98 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     }
   }
   
-  // Load existing entity
+  // Try to load entity from TanStack DB first (for existing entities)
   useEffect(() => {
-    if (id && isOrgAdmin.value) {
+    if (!id || !isOrgAdmin.value || dbLoading || !bundleEntity) return;
+    
+    console.log('[EntityEditor] Entity found in TanStack DB, loading typeId and converting to Entity format...');
+    
+    // Get typeId from DB (bundleEntity already has the entity data, just need typeId)
+    getEntityWithTypeId(id).then(async (result) => {
+      if (!result) {
+        console.log('[EntityEditor] Entity not found in DB with typeId, falling back to API');
+        loadEntity(id);
+        return;
+      }
+      
+      const { typeId } = result;
+      // Use bundleEntity from hook (already loaded) instead of result.entity
+      const dbEntity = bundleEntity;
+      
+      // Convert BundleEntity to Entity format
+      // We need to get version, createdAt, organizationId from API
+      const convertedEntity: Entity = {
+        id: dbEntity.id,
+        entityTypeId: typeId,
+        organizationId: null, // Will be loaded from API
+        version: 1, // Default, will be updated from API
+        status: dbEntity.status,
+        visibility: 'public' as any, // Default
+        name: dbEntity.name,
+        slug: dbEntity.slug,
+        data: dbEntity.data,
+        createdAt: dbEntity.updatedAt, // Use updatedAt as fallback
+        updatedAt: dbEntity.updatedAt,
+      };
+      
+      setEntity(convertedEntity);
+      
+      // Load entity type definition (always from API since DB doesn't have full definition)
+      const typeResponse = await api.get(`/api/entity-types/${typeId}`) as {
+        success: boolean;
+        data?: EntityType;
+      };
+      
+      if (typeResponse.success && typeResponse.data) {
+        const type = typeResponse.data;
+        setEntityType(type);
+        
+        // Find name and slug field IDs
+        const nameFieldDef = type.fields.find(f => f.id === 'name' || f.name?.toLowerCase() === 'name');
+        const slugFieldDef = type.fields.find(f => f.id === 'slug' || f.name?.toLowerCase() === 'slug');
+        const nameFieldId = nameFieldDef?.id || 'name';
+        const slugFieldId = slugFieldDef?.id || 'slug';
+        
+        // Populate formData with entity data
+        const formDataWithNameSlug = {
+          ...dbEntity.data,
+          [nameFieldId]: dbEntity.name,
+          [slugFieldId]: dbEntity.slug
+        };
+        setFormData(formDataWithNameSlug);
+        setHasBeenSaved(true);
+      }
+      
+      // Try to get full entity from API to get version, createdAt, organizationId
+      // But don't fail if it doesn't work - we have the basic data from DB
+      try {
+        const fullEntityResponse = await api.get<Entity>(`/api/entities/${id}`);
+        if (fullEntityResponse.success && fullEntityResponse.data) {
+          // Update with full entity data
+          setEntity(fullEntityResponse.data);
+          if (fullEntityResponse.data.organizationId) {
+            loadOrganizationName(fullEntityResponse.data.organizationId);
+          } else {
+            setEntityOrgName(null);
+          }
+        }
+      } catch (err) {
+        console.warn('[EntityEditor] Could not load full entity from API, using DB data:', err);
+      }
+    }).catch((err) => {
+      console.error('[EntityEditor] Error loading entity from DB:', err);
+      // Fall back to API
+      loadEntity(id);
+    });
+  }, [id, isOrgAdmin.value, bundleEntity, dbLoading, dbError]);
+  
+  // Load existing entity from API (fallback if not in DB)
+  useEffect(() => {
+    if (id && isOrgAdmin.value && !bundleEntity && !dbLoading) {
+      console.log('[EntityEditor] Entity not in DB, loading from API');
       loadEntity(id);
     }
-  }, [id, isOrgAdmin.value]);
+  }, [id, isOrgAdmin.value, bundleEntity, dbLoading]);
   
   function initializeFormData(type: EntityType) {
     const data: Record<string, unknown> = {};
@@ -605,6 +699,12 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
         // Mark entity as saved - slug should no longer auto-update
         setHasBeenSaved(true);
         
+        // Trigger sync to update TanStack DB with new/updated entity
+        console.log('[EntityEditor] Entity saved, triggering sync to update TanStack DB...');
+        sync(true).catch((err) => {
+          console.warn('[EntityEditor] Sync failed after save (non-blocking):', err);
+        });
+        
         if (isNew) {
           route(`/admin/${effectiveOrgId}/entities/${response.data.id}/edit`);
         } else {
@@ -650,6 +750,15 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
     });
     
     if (response.success) {
+      // Invalidate entity list queries to refresh listing pages
+      invalidateEntityLists();
+      
+      // Trigger sync to update TanStack DB
+      console.log('[EntityEditor] Entity transitioned, triggering sync...');
+      sync(true).catch((err) => {
+        console.warn('[EntityEditor] Sync failed after transition (non-blocking):', err);
+      });
+      
       // Reload entity
       loadEntity(entity.id);
     } else {
@@ -660,7 +769,7 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
   }
   
   // Render loading state
-  if (authLoading.value || loading) {
+  if (authLoading.value || loading || (dbLoading && id && !bundleEntity)) {
     return (
       <div class="min-h-[60vh] flex items-center justify-center">
         <span class="i-lucide-loader-2 animate-spin text-3xl text-primary-500"></span>

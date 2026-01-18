@@ -9,6 +9,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
+import type { EntityListResponse } from '../../stores/query-sync';
 import { EntitiesTableCore, type EntitiesTableFilters } from '../../components/entities';
 import { downloadCSV, downloadJSON } from '../../lib/csv';
 import type { Entity, EntityListItem, EntityType, OrganizationListItem } from '@1cc/shared';
@@ -21,11 +22,15 @@ export function SuperEntityTypeView({ typeId }: SuperEntityTypeViewProps) {
   const { isAuthenticated, isSuperadmin, loading: authLoading } = useAuth();
   
   const [entityType, setEntityType] = useState<EntityType | null>(null);
-  const [entities, setEntities] = useState<EntityListItem[]>([]);
   const [organizations, setOrganizations] = useState<OrganizationListItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [loadingType, setLoadingType] = useState(true);
   const [loadingOrgs, setLoadingOrgs] = useState(true);
+  
+  // Entity list state
+  const [entities, setEntities] = useState<EntityListItem[]>([]);
+  const [loadingEntities, setLoadingEntities] = useState(false);
+  const [totalPages, setTotalPages] = useState(1);
+  const [entityError, setEntityError] = useState<Error | undefined>(undefined);
   
   // Filters
   const [filters, setFilters] = useState<EntitiesTableFilters>({
@@ -35,7 +40,6 @@ export function SuperEntityTypeView({ typeId }: SuperEntityTypeViewProps) {
     organizationId: undefined, // undefined = all orgs
   });
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
   const pageSize = 20;
   
   // Bulk delete state
@@ -61,7 +65,7 @@ export function SuperEntityTypeView({ typeId }: SuperEntityTypeViewProps) {
     }
   }, [isSuperadmin.value, typeId]);
   
-  // Load entities when filters change
+  // Load entities when typeId, filters, or page changes
   useEffect(() => {
     if (isSuperadmin.value && typeId) {
       loadEntities();
@@ -119,59 +123,56 @@ export function SuperEntityTypeView({ typeId }: SuperEntityTypeViewProps) {
   async function loadEntities() {
     if (!typeId) return;
     
-    setLoading(true);
-    console.log('[SuperEntityTypeView] Fetching entities for type:', typeId);
+    setLoadingEntities(true);
+    setEntityError(undefined);
+    console.log('[SuperEntityTypeView] Loading entities with filters:', filters, 'page:', currentPage);
     
     try {
       const params = new URLSearchParams();
       params.set('typeId', typeId);
-      if (filters.status) params.set('status', filters.status);
-      if (filters.search) params.set('search', filters.search);
-      
-      // Handle organization filter
-      if (filters.organizationId === null) {
-        // Global only
-        params.set('organizationId', '');
-      } else if (filters.organizationId) {
-        // Specific org
-        params.set('organizationId', filters.organizationId);
-      }
-      
       params.set('page', currentPage.toString());
       params.set('pageSize', pageSize.toString());
       params.set('sortBy', 'updatedAt');
       params.set('sortDirection', 'desc');
       
+      if (filters.status) params.set('status', filters.status);
+      if (filters.search) params.set('search', filters.search);
+      if (filters.organizationId !== undefined) {
+        params.set('organizationId', filters.organizationId || '');
+      }
+      
       const response = await api.get(`/api/super/entities?${params.toString()}`) as {
         success: boolean;
-        data?: {
-          items: EntityListItem[];
-          total?: number;
-          page?: number;
-          pageSize?: number;
-          hasMore?: boolean;
-        };
+        data?: EntityListResponse;
+        error?: { message: string };
       };
       
       if (response.success && response.data) {
-        console.log('[SuperEntityTypeView] API response:', {
-          itemsCount: response.data.items.length,
-          total: response.data.total,
-          page: response.data.page,
-          pageSize: response.data.pageSize,
-          hasMore: response.data.hasMore,
-          entityIds: response.data.items.map(e => e.id)
-        });
-        setEntities(response.data.items);
-        if (response.data.total && response.data.pageSize) {
+        setEntities(response.data.items || []);
+        
+        // Calculate total pages
+        if (response.data.pagination?.totalPages) {
+          setTotalPages(response.data.pagination.totalPages);
+        } else if (response.data.total && response.data.pageSize) {
           setTotalPages(Math.ceil(response.data.total / response.data.pageSize));
+        } else {
+          setTotalPages(1);
         }
-        console.log('[SuperEntityTypeView] Loaded', response.data.items.length, 'of', response.data.total, 'total entities');
+        
+        console.log('[SuperEntityTypeView] Loaded', response.data.items?.length || 0, 'entities');
+      } else {
+        const errorMsg = response.error?.message || 'Failed to load entities';
+        setEntityError(new Error(errorMsg));
+        console.error('[SuperEntityTypeView] Failed to load entities:', response.error);
+        setEntities([]);
       }
     } catch (err) {
+      const error = err instanceof Error ? err : new Error('Unknown error');
+      setEntityError(error);
       console.error('[SuperEntityTypeView] Error loading entities:', err);
+      setEntities([]);
     } finally {
-      setLoading(false);
+      setLoadingEntities(false);
     }
   }
   
@@ -442,7 +443,7 @@ export function SuperEntityTypeView({ typeId }: SuperEntityTypeViewProps) {
         basePath="/super"
         entities={entities}
         entityTypes={[entityTypeListItem]}
-        loading={loading}
+        loading={loadingEntities}
         loadingTypes={false}
         filters={{ ...filters, typeId: typeId || '' }}
         pagination={{

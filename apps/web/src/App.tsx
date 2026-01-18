@@ -48,6 +48,8 @@ import { SuperEntityEditor } from './pages/superadmin/SuperEntityEditor';
 // Auth and state
 import { AuthProvider } from './stores/auth';
 import { SyncProvider } from './stores/sync';
+import { QueryClientProvider } from '@preact-signals/query';
+import { getQueryClient } from './stores/query-sync';
 
 /**
  * Main App component with routing
@@ -67,10 +69,14 @@ export function App() {
   
   // Branding is now loaded automatically via manifest config in sync store
   
+  // Get or create QueryClient for TanStack Query
+  const queryClient = getQueryClient();
+  
   return (
-    <AuthProvider>
-      <SyncProvider>
-        <Layout>
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <SyncProvider>
+          <Layout>
           <Router>
             {/* Public routes */}
             <Route path="/" component={HomePage} />
@@ -124,5 +130,6 @@ export function App() {
         </Layout>
       </SyncProvider>
     </AuthProvider>
+    </QueryClientProvider>
   );
 }

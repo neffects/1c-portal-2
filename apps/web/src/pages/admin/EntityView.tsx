@@ -10,6 +10,9 @@ import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
+import { useEntity } from '../../hooks/useDB';
+import { useSync } from '../../stores/sync';
+import { getEntityWithTypeId } from '../../stores/db';
 import type { Entity, EntityType, FieldDefinition, FieldSection } from '@1cc/shared';
 
 interface EntityViewProps {
@@ -120,6 +123,10 @@ function FieldValue({ value, fieldType }: { value: unknown; fieldType?: string }
 
 export function EntityView({ orgSlug, id }: EntityViewProps) {
   const { isAuthenticated, isOrgAdmin, loading: authLoading, currentOrganization, organizations, session, refreshToken } = useAuth();
+  const { sync } = useSync();
+  
+  // Try to load entity from TanStack DB first
+  const { data: bundleEntity, loading: dbLoading, error: dbError } = useEntity(id);
   
   // State for tracking org refresh - prevents infinite loop
   const [orgRefreshAttempted, setOrgRefreshAttempted] = useState(false);
@@ -149,6 +156,7 @@ export function EntityView({ orgSlug, id }: EntityViewProps) {
   const [entityType, setEntityType] = useState<EntityType | null>(null);
   const [entityOrgName, setEntityOrgName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingFromDB, setLoadingFromDB] = useState(false);
   
   // Compute effective org ID for links - use resolvedOrgId, orgSlug, or current org
   const effectiveOrgId = resolvedOrgId || orgSlug || currentOrganization.value?.id || '';
@@ -220,7 +228,105 @@ export function EntityView({ orgSlug, id }: EntityViewProps) {
     }
   }
   
+  // Try to load entity from TanStack DB first
+  useEffect(() => {
+    if (!id || dbLoading || !bundleEntity) return;
+    
+    console.log('[EntityView] Entity found in TanStack DB, loading typeId and converting to Entity format...');
+    setLoadingFromDB(true);
+    
+    // Get typeId from DB (bundleEntity already has the entity data, just need typeId)
+    getEntityWithTypeId(id).then(async (result) => {
+      if (!result) {
+        console.log('[EntityView] Entity not found in DB with typeId, falling back to API');
+        setLoadingFromDB(false);
+        return;
+      }
+      
+      const { entity: dbEntity, typeId } = result;
+      
+      // Use bundleEntity from hook (already loaded) instead of result.entity
+      const dbEntityToUse = bundleEntity;
+      
+      // Convert BundleEntity to Entity format
+      // We need to get version, createdAt, organizationId from API, but try DB first
+      // For now, use defaults and let API fill in if needed
+      const convertedEntity: Entity = {
+        id: dbEntityToUse.id,
+        entityTypeId: typeId,
+        organizationId: null, // Will be loaded from API if needed
+        version: 1, // Default, will be updated if API call succeeds
+        status: dbEntityToUse.status,
+        visibility: 'public' as any, // Default
+        name: dbEntityToUse.name,
+        slug: dbEntityToUse.slug,
+        data: dbEntityToUse.data,
+        createdAt: dbEntityToUse.updatedAt, // Use updatedAt as fallback
+        updatedAt: dbEntityToUse.updatedAt,
+      };
+      
+      setEntity(convertedEntity);
+      
+      // Load entity type definition (always from API since DB doesn't have full definition)
+      const typeResponse = await api.get(`/api/entity-types/${typeId}`) as {
+        success: boolean;
+        data?: EntityType;
+      };
+      
+      if (typeResponse.success && typeResponse.data) {
+        setEntityType(typeResponse.data);
+      }
+      
+      // Try to get full entity from API to get version, createdAt, organizationId
+      // But don't fail if it doesn't work - we have the basic data from DB
+      const orgId = resolvedOrgId || getOrgId();
+      if (orgId) {
+        try {
+          const fullEntityResponse = await api.get(`/api/orgs/${orgId}/entities/${id}`) as {
+            success: boolean;
+            data?: Entity;
+            error?: { code: string };
+          };
+          
+          if (fullEntityResponse.success && fullEntityResponse.data) {
+            // Update with full entity data
+            setEntity(fullEntityResponse.data);
+            if (fullEntityResponse.data.organizationId) {
+              loadOrganizationName(fullEntityResponse.data.organizationId);
+            } else {
+              setEntityOrgName(null);
+            }
+          } else if (!fullEntityResponse.success && fullEntityResponse.error?.code === 'NOT_FOUND') {
+            // Try generic endpoint
+            const genericResponse = await api.get(`/api/entities/${id}`) as {
+              success: boolean;
+              data?: Entity;
+            };
+            if (genericResponse.success && genericResponse.data) {
+              setEntity(genericResponse.data);
+              if (genericResponse.data.organizationId) {
+                loadOrganizationName(genericResponse.data.organizationId);
+              } else {
+                setEntityOrgName(null);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[EntityView] Could not load full entity from API, using DB data:', err);
+        }
+      }
+      
+      setLoadingFromDB(false);
+      setLoading(false);
+    }).catch((err) => {
+      console.error('[EntityView] Error loading entity from DB:', err);
+      setLoadingFromDB(false);
+      // Fall through to API loading
+    });
+  }, [id, bundleEntity, dbLoading, resolvedOrgId]);
+  
   // Load entity and entity type - wait for auth and organizations to be loaded
+  // Only load from API if not found in DB
   useEffect(() => {
     const sessionOrgs = session.value?.user?.organizations || [];
     console.log('[EntityView] useEffect triggered', {
@@ -231,7 +337,10 @@ export function EntityView({ orgSlug, id }: EntityViewProps) {
       organizationsCount: organizations.value.length,
       sessionOrgsCount: sessionOrgs.length,
       orgRefreshAttempted,
-      resolvedOrgId
+      resolvedOrgId,
+      bundleEntity: !!bundleEntity,
+      dbLoading,
+      loadingFromDB
     });
     
     // Wait for auth to finish loading
@@ -242,6 +351,18 @@ export function EntityView({ orgSlug, id }: EntityViewProps) {
     
     if (!isOrgAdmin.value || !id) {
       console.log('[EntityView] Not ready:', { isOrgAdmin: isOrgAdmin.value, id });
+      return;
+    }
+    
+    // If entity is loading from DB, wait
+    if (loadingFromDB || (dbLoading && !dbError)) {
+      console.log('[EntityView] Loading from DB, waiting...');
+      return;
+    }
+    
+    // If entity was found in DB, don't load from API
+    if (bundleEntity && entity) {
+      console.log('[EntityView] Entity already loaded from DB');
       return;
     }
     
@@ -335,10 +456,10 @@ export function EntityView({ orgSlug, id }: EntityViewProps) {
       setResolvedOrgId(orgId);
     }
     
-    // All conditions met, load the entity
-    console.log('[EntityView] All conditions met, loading entity...', { orgId });
+    // All conditions met, load the entity from API (fallback if not in DB)
+    console.log('[EntityView] All conditions met, loading entity from API...', { orgId });
     loadEntity();
-  }, [authLoading.value, isOrgAdmin.value, id, orgSlug, organizations.value.length, orgRefreshAttempted, resolvedOrgId]);
+  }, [authLoading.value, isOrgAdmin.value, id, orgSlug, organizations.value.length, orgRefreshAttempted, resolvedOrgId, bundleEntity, dbLoading, dbError, loadingFromDB, entity]);
   
   async function loadEntity() {
     if (!id) return;
@@ -433,7 +554,7 @@ export function EntityView({ orgSlug, id }: EntityViewProps) {
   }
   
   // Loading state
-  if (authLoading.value || loading) {
+  if (authLoading.value || loading || (dbLoading && !bundleEntity) || loadingFromDB) {
     return (
       <div class="container-default py-12">
         <div class="max-w-4xl mx-auto">

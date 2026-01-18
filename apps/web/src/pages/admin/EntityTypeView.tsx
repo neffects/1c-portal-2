@@ -9,6 +9,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
+import { useEntityList } from '../../stores/query-sync';
 import type { EntityListItem, EntityTypeListItem, EntityType } from '@1cc/shared';
 
 interface EntityTypeViewProps {
@@ -29,14 +30,28 @@ export function EntityTypeView({ orgSlug, typeId }: EntityTypeViewProps) {
   const effectiveOrgId = getOrgIdentifier();
   
   const [entityType, setEntityType] = useState<EntityType | null>(null);
-  const [entities, setEntities] = useState<EntityListItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [loadingType, setLoadingType] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('');
   const pageSize = 20;
+  
+  // Use TanStack Query for entity list
+  const entityListQuery = useEntityList({
+    typeId: typeId || undefined,
+    status: selectedStatus || undefined,
+    search: searchQuery || undefined,
+    page: currentPage,
+    pageSize,
+    sortBy: 'updatedAt',
+    sortDirection: 'desc',
+  });
+  
+  const entities = entityListQuery.data?.items || [];
+  const totalPages = entityListQuery.data?.total && entityListQuery.data?.pageSize 
+    ? Math.ceil(entityListQuery.data.total / entityListQuery.data.pageSize)
+    : 1;
+  const loading = entityListQuery.isLoading;
   
   // Redirect if not admin
   useEffect(() => {
@@ -52,13 +67,6 @@ export function EntityTypeView({ orgSlug, typeId }: EntityTypeViewProps) {
       loadEntityType();
     }
   }, [isOrgAdmin.value, typeId]);
-  
-  // Load entities when filters change
-  useEffect(() => {
-    if (isOrgAdmin.value && typeId) {
-      loadEntities();
-    }
-  }, [isOrgAdmin.value, typeId, selectedStatus, searchQuery, currentPage]);
   
   async function loadEntityType() {
     if (!typeId) return;
@@ -84,47 +92,6 @@ export function EntityTypeView({ orgSlug, typeId }: EntityTypeViewProps) {
       route('/admin');
     } finally {
       setLoadingType(false);
-    }
-  }
-  
-  async function loadEntities() {
-    if (!typeId) return;
-    
-    setLoading(true);
-    console.log('[EntityTypeView] Fetching entities for type:', typeId);
-    
-    try {
-      const params = new URLSearchParams();
-      params.set('typeId', typeId);
-      if (selectedStatus) params.set('status', selectedStatus);
-      if (searchQuery) params.set('search', searchQuery);
-      params.set('page', currentPage.toString());
-      params.set('pageSize', pageSize.toString());
-      params.set('sortBy', 'updatedAt');
-      params.set('sortDirection', 'desc');
-      
-      const response = await api.get(`/api/entities?${params.toString()}`) as {
-        success: boolean;
-        data?: {
-          items: EntityListItem[];
-          total?: number;
-          page?: number;
-          pageSize?: number;
-          hasMore?: boolean;
-        };
-      };
-      
-      if (response.success && response.data) {
-        setEntities(response.data.items);
-        if (response.data.total && response.data.pageSize) {
-          setTotalPages(Math.ceil(response.data.total / response.data.pageSize));
-        }
-        console.log('[EntityTypeView] Loaded', response.data.items.length, 'entities');
-      }
-    } catch (err) {
-      console.error('[EntityTypeView] Error loading entities:', err);
-    } finally {
-      setLoading(false);
     }
   }
   

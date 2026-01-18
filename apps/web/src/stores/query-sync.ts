@@ -10,7 +10,7 @@
 
 import { QueryClient } from '@tanstack/query-core';
 import { useQuery$ } from '@preact-signals/query';
-import type { SiteManifest, EntityBundle } from '@1cc/shared';
+import type { SiteManifest, EntityBundle, EntityListItem } from '@1cc/shared';
 import { api, type ApiResponseWithHeaders } from '../lib/api';
 import { syncManifest, syncBundle, getManifest, getBundle, getBundleEtag } from './db';
 
@@ -139,10 +139,121 @@ export function useBundle(manifestId: string, typeId: string) {
 }
 
 /**
+ * Hook for fetching entity list from /api/entities
+ * Used by admin listing pages for entities with filtering and pagination
+ */
+export interface EntityListParams {
+  typeId?: string;
+  status?: string;
+  search?: string;
+  page?: number;
+  pageSize?: number;
+  sortBy?: string;
+  sortDirection?: 'asc' | 'desc';
+  organizationId?: string;
+}
+
+export interface EntityListResponse {
+  items: EntityListItem[];
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  hasMore?: boolean;
+  pagination?: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+export function useEntityList(params: EntityListParams, endpoint: '/api/entities' | '/api/super/entities' = '/api/entities') {
+  return useQuery$(() => {
+    // Build query params inside the callback so values are captured reactively
+    const queryParams = new URLSearchParams();
+    if (params.typeId) queryParams.set('typeId', params.typeId);
+    if (params.status) queryParams.set('status', params.status);
+    if (params.search) queryParams.set('search', params.search);
+    if (params.page) queryParams.set('page', params.page.toString());
+    if (params.pageSize) queryParams.set('pageSize', params.pageSize.toString());
+    if (params.sortBy) queryParams.set('sortBy', params.sortBy);
+    if (params.sortDirection) queryParams.set('sortDirection', params.sortDirection);
+    if (params.organizationId !== undefined) {
+      queryParams.set('organizationId', params.organizationId || '');
+    }
+    
+    const paramString = queryParams.toString();
+    const queryKey = ['entities', endpoint, paramString || 'all'];
+    
+    // For super/entities endpoint, typeId is required - skip query if missing
+    if (endpoint === '/api/super/entities' && !params.typeId) {
+      // Return empty result without executing query
+      return {
+        queryKey: ['entities', endpoint, 'disabled'],
+        queryFn: async () => ({ items: [] } as EntityListResponse),
+      };
+    }
+    
+    console.log('[useEntityList] Query options computed:', {
+      endpoint,
+      typeId: params.typeId,
+      queryKey: JSON.stringify(queryKey),
+      paramString
+    });
+    
+    return {
+      queryKey,
+      staleTime: 0, // Force immediate fetch (no cache)
+      suspense: false, // Disable suspense to ensure queryFn runs
+      // placeholderData: undefined, // No placeholder for entity lists (not in DB)
+      queryFn: async () => {
+        const url = `${endpoint}?${paramString}`;
+        console.log('[useEntityList] Executing queryFn for:', url);
+        
+        const response = await api.get(url) as {
+          success: boolean;
+          data?: EntityListResponse;
+        };
+        
+        console.log('[useEntityList] Response:', {
+          success: response.success,
+          hasData: !!response.data,
+          itemsCount: response.data?.items?.length || 0,
+          error: response.error
+        });
+        
+        if (!response.success || !response.data) {
+          const errorMsg = response.error?.message || 'Failed to fetch entity list';
+          console.error('[useEntityList] Query failed:', errorMsg, response);
+          throw new Error(errorMsg);
+        }
+        
+        return response.data;
+      },
+    };
+  });
+}
+
+/**
+ * Hook for fetching entity list from /api/super/entities (superadmin)
+ */
+export function useSuperEntityList(params: EntityListParams) {
+  return useEntityList(params, '/api/super/entities');
+}
+
+/**
  * Refresh all queries (manual refresh button)
  */
 export function refreshAll() {
   const client = getQueryClient();
   client.invalidateQueries({ queryKey: ['manifest'] });
   client.invalidateQueries({ queryKey: ['bundle'] });
+}
+
+/**
+ * Invalidate entity list queries (call after entity transitions)
+ */
+export function invalidateEntityLists() {
+  const client = getQueryClient();
+  client.invalidateQueries({ queryKey: ['entities'] });
 }

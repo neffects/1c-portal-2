@@ -10,6 +10,7 @@ import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
 import { FieldRenderer } from '../../components/fields';
+import { invalidateEntityLists } from '../../stores/query-sync';
 import { slugify, checkDuplicatesInBundle, type DuplicateCheckResult } from '../../lib/utils';
 import type { Entity, EntityType, EntityTypeListItem, FieldDefinition, OrganizationListItem, EntityBundle, BundleEntity } from '@1cc/shared';
 
@@ -547,6 +548,8 @@ export function SuperEntityEditor({ id, typeId }: SuperEntityEditorProps) {
     });
     
     if (response.success) {
+      // Invalidate entity list queries to refresh listing pages
+      invalidateEntityLists();
       loadEntity(entity.id);
     } else {
       setSaveError(response.error?.message || 'Failed to submit for approval');

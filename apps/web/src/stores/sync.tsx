@@ -424,7 +424,6 @@ async function sync(force: boolean = false) {
               console.warn('[Sync] Failed to sync org manifest to DB:', dbErr);
               // Continue even if DB sync fails
             }
-          }
             
             // Fetch org bundles for each type
             const currentOrgBundles = orgBundles.value;

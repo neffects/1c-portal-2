@@ -266,6 +266,7 @@ export async function syncManifest(
     console.log('[DB] Existing manifest:', existing ? `version ${existing.version}, ETag ${existing.etag}` : 'none');
     
     const etagChanged = !existing || !existing.etag || existing.etag !== etag;
+    const versionChanged = !existing || existing.version !== manifest.version;
     
     if (!etagChanged && existing && etag) {
       console.log('[DB] Manifest ETag unchanged:', manifestId, 'ETag:', etag);
@@ -695,6 +696,29 @@ export async function getEntity(entityId: string): Promise<BundleEntity | null> 
     slug: entityRow.slug,
     data: entityRow.data,
     updatedAt: entityRow.updatedAt,
+  };
+}
+
+/**
+ * Get entity with typeId from TanStack DB
+ * Returns entity data with typeId for easier conversion to Entity format
+ */
+export async function getEntityWithTypeId(entityId: string): Promise<{ entity: BundleEntity; typeId: string } | null> {
+  const db = getDatabase();
+  
+  const entityRow = db.collections.entities.get(entityId);
+  if (!entityRow) return null;
+  
+  return {
+    entity: {
+      id: entityRow.id,
+      status: entityRow.status as any,
+      name: entityRow.name,
+      slug: entityRow.slug,
+      data: entityRow.data,
+      updatedAt: entityRow.updatedAt,
+    },
+    typeId: entityRow.typeId,
   };
 }
 

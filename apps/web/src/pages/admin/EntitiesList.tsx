@@ -8,6 +8,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
+import { useEntityList } from '../../stores/query-sync';
 import type { EntityListItem, EntityTypeListItem } from '@1cc/shared';
 
 interface EntitiesListProps {
@@ -26,9 +27,7 @@ export function EntitiesList({ orgSlug }: EntitiesListProps) {
   
   const effectiveOrgId = getOrgIdentifier();
   
-  const [entities, setEntities] = useState<EntityListItem[]>([]);
   const [entityTypes, setEntityTypes] = useState<EntityTypeListItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [loadingTypes, setLoadingTypes] = useState(true);
   
   // Filters
@@ -36,8 +35,34 @@ export function EntitiesList({ orgSlug }: EntitiesListProps) {
   const [selectedStatus, setSelectedStatus] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
   const pageSize = 20;
+  
+  // Sync selectedTypeId with URL params
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlTypeId = urlParams.get('typeId');
+    if (urlTypeId && urlTypeId !== selectedTypeId) {
+      setSelectedTypeId(urlTypeId);
+    }
+  }, [selectedTypeId]);
+  
+  // Use TanStack Query for entity list
+  const entityListQuery = useEntityList({
+    typeId: selectedTypeId || undefined,
+    status: selectedStatus || undefined,
+    search: searchQuery || undefined,
+    page: currentPage,
+    pageSize,
+    sortBy: 'updatedAt',
+    sortDirection: 'desc',
+  });
+  
+  const entities = entityListQuery.data?.items || [];
+  const totalPages = entityListQuery.data?.pagination?.totalPages || 
+    (entityListQuery.data?.total && entityListQuery.data?.pageSize 
+      ? Math.ceil(entityListQuery.data.total / entityListQuery.data.pageSize)
+      : 1);
+  const loading = entityListQuery.isLoading;
   
   // Redirect if not admin
   useEffect(() => {
@@ -64,13 +89,6 @@ export function EntitiesList({ orgSlug }: EntitiesListProps) {
     }
   }, [isOrgAdmin.value]);
   
-  // Load entities when filters change
-  useEffect(() => {
-    if (isOrgAdmin.value) {
-      loadEntities();
-    }
-  }, [isOrgAdmin.value, selectedTypeId, selectedStatus, searchQuery, currentPage]);
-  
   async function loadEntityTypes() {
     setLoadingTypes(true);
     console.log('[EntitiesList] Fetching entity types...');
@@ -90,88 +108,6 @@ export function EntitiesList({ orgSlug }: EntitiesListProps) {
       console.error('[EntitiesList] Error loading entity types:', err);
     } finally {
       setLoadingTypes(false);
-    }
-  }
-  
-  async function loadEntities() {
-    setLoading(true);
-    console.log('[EntitiesList] Fetching entities...');
-    
-    // Read URL params to sync with current URL (in case of navigation)
-    const urlParams = new URLSearchParams(window.location.search);
-    const urlTypeId = urlParams.get('typeId');
-    
-    // Sync selectedTypeId with URL if different
-    if (urlTypeId && urlTypeId !== selectedTypeId) {
-      setSelectedTypeId(urlTypeId);
-      // Use URL value for this request
-      const params = new URLSearchParams();
-      params.set('typeId', urlTypeId);
-      if (selectedStatus) params.set('status', selectedStatus);
-      if (searchQuery) params.set('search', searchQuery);
-      params.set('page', currentPage.toString());
-      params.set('pageSize', pageSize.toString());
-      params.set('sortBy', 'updatedAt');
-      params.set('sortDirection', 'desc');
-      
-      const response = await api.get(`/api/entities?${params.toString()}`) as { 
-        success: boolean; 
-        data?: { 
-          items: EntityListItem[];
-          pagination?: {
-            page: number;
-            pageSize: number;
-            total: number;
-            totalPages: number;
-          };
-        } 
-      };
-      
-      if (response.success && response.data) {
-        setEntities(response.data.items);
-        if (response.data.pagination) {
-          setTotalPages(response.data.pagination.totalPages);
-        }
-        console.log('[EntitiesList] Loaded', response.data.items.length, 'entities');
-      }
-      setLoading(false);
-      return;
-    }
-    
-    try {
-      const params = new URLSearchParams();
-      if (selectedTypeId) params.set('typeId', selectedTypeId);
-      if (selectedStatus) params.set('status', selectedStatus);
-      if (searchQuery) params.set('search', searchQuery);
-      params.set('page', currentPage.toString());
-      params.set('pageSize', pageSize.toString());
-      params.set('sortBy', 'updatedAt');
-      params.set('sortDirection', 'desc');
-      
-      const response = await api.get(`/api/entities?${params.toString()}`) as { 
-        success: boolean; 
-        data?: { 
-          items: EntityListItem[];
-          pagination?: {
-            page: number;
-            pageSize: number;
-            total: number;
-            totalPages: number;
-          };
-        } 
-      };
-      
-      if (response.success && response.data) {
-        setEntities(response.data.items);
-        if (response.data.pagination) {
-          setTotalPages(response.data.pagination.totalPages);
-        }
-        console.log('[EntitiesList] Loaded', response.data.items.length, 'entities');
-      }
-    } catch (err) {
-      console.error('[EntitiesList] Error loading entities:', err);
-    } finally {
-      setLoading(false);
     }
   }
   

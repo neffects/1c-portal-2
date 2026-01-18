@@ -8,6 +8,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
 import { api } from '../../lib/api';
+import { invalidateEntityLists } from '../../stores/query-sync';
 import type { EntityListItem, OrganizationListItem } from '@1cc/shared';
 
 export function ApprovalQueue() {
@@ -66,6 +67,8 @@ export function ApprovalQueue() {
     });
     
     if (response.success) {
+      // Invalidate entity list queries to refresh listing pages
+      invalidateEntityLists();
       setPendingEntities(pendingEntities.filter(e => e.id !== entityId));
     }
     
@@ -95,6 +98,8 @@ export function ApprovalQueue() {
     });
     
     if (response.success) {
+      // Invalidate entity list queries to refresh listing pages
+      invalidateEntityLists();
       setPendingEntities(pendingEntities.filter(e => e.id !== entityId));
     }
     

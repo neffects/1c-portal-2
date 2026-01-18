@@ -125,11 +125,30 @@ apiEntityRoutes.get('/entities',
         console.log('[API] Skipping org entity (not member, userRole:', userRole, 'userOrgId:', userOrgId, 'entityOrgId:', stub.organizationId, ')');
         continue;
       }
-      // For superadmins viewing org entities, check members path for that organization
-      // CASL verifies user can access this org's entities
+      // For org entities, check members path first, then visibility-based paths
+      // Published entities with public/authenticated visibility may be in visibility-based paths
       latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
       console.log('[API] Checking latest pointer for org entity:', stub.entityId, 'in org:', stub.organizationId, 'at path:', latestPath);
       latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+      
+      // If not found in members path, check visibility-based paths (for published entities)
+      if (!latestPointer) {
+        for (const visibility of ['public', 'authenticated'] as const) {
+          latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
+          latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+          // Verify this entity actually belongs to the org by checking stub
+          if (latestPointer) {
+            // Verify entity org matches stub org (defense in depth)
+            const versionPath = getEntityVersionPath(visibility, stub.entityId, latestPointer.version, undefined);
+            const entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
+            if (entity && entity.organizationId === stub.organizationId) {
+              break;
+            } else {
+              latestPointer = null; // Wrong entity, continue searching
+            }
+          }
+        }
+      }
     }
     
     if (!latestPointer) {
@@ -174,9 +193,23 @@ apiEntityRoutes.get('/entities',
     }
     
     // Get full entity - CASL verifies user can access this entity file
-    const storageVisibility: VisibilityScope = stub.organizationId === null 
-      ? latestPointer.visibility 
-      : 'members';
+    // Determine storage visibility based on status and visibility (matches transition logic)
+    // Global entities use visibility-based paths
+    // Org entities: drafts/pending/members visibility use 'members', published public/authenticated use visibility-based paths
+    let storageVisibility: VisibilityScope;
+    if (stub.organizationId === null) {
+      // Global entity - use visibility-based path
+      storageVisibility = latestPointer.visibility;
+    } else if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
+      // Drafts and pending entities are always in the org's private space
+      storageVisibility = 'members';
+    } else if (latestPointer.visibility === 'members') {
+      // Published entities with members visibility
+      storageVisibility = 'members';
+    } else {
+      // Published entities with public/authenticated visibility are in visibility-based paths
+      storageVisibility = latestPointer.visibility;
+    }
     const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
     const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath, ability, 'read', 'Entity');
     

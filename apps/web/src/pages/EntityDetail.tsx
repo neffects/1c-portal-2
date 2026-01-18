@@ -4,7 +4,6 @@
  * Shows full details of a single entity.
  */
 
-import { useSync } from '../stores/sync';
 import { useAuth } from '../stores/auth';
 import { useEntityType, useEntityBySlug } from '../hooks/useDB';
 import { api } from '../lib/api';
@@ -77,7 +76,6 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
 }
 
 export function EntityDetailPage({ orgSlug, typeSlug, entitySlug }: EntityDetailPageProps) {
-  const { syncing } = useSync();
   const { isAuthenticated, user } = useAuth();
   const { data: entityType, loading: typeLoading } = useEntityType(typeSlug);
   const { data: entity, loading: entityLoading } = useEntityBySlug(entityType?.id, entitySlug);
@@ -85,7 +83,7 @@ export function EntityDetailPage({ orgSlug, typeSlug, entitySlug }: EntityDetail
   const [flagged, setFlagged] = useState(false);
   const [flagLoading, setFlagLoading] = useState(false);
   
-  const isLoading = typeLoading || entityLoading || (syncing.value && !entity);
+  const isLoading = typeLoading || entityLoading;
   
   // Flag entity for alerts
   async function handleFlag() {
