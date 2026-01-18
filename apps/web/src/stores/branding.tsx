@@ -2,83 +2,60 @@
  * Branding Store
  * 
  * Manages platform branding configuration state.
+ * Now reads from manifest config (loaded via sync store) instead of separate API call.
  */
 
-import { signal, computed } from '@preact/signals';
-import { api } from '../lib/api';
+import { computed } from '@preact/signals';
 import type { BrandingConfig } from '@1cc/shared';
+import { useSync } from './sync';
 
-// Branding config signal
-const branding = signal<BrandingConfig | null>(null);
-const loading = signal(false);
-const error = signal<string | null>(null);
-
-/**
- * Load branding configuration from API
- */
-export async function loadBranding() {
-  loading.value = true;
-  error.value = null;
-  
-  try {
-    const response = await api.get('/public/branding') as {
-      success: boolean;
-      data?: BrandingConfig | null;
-      error?: { message: string };
-    };
-    
-    if (response.success && response.data) {
-      branding.value = response.data;
-    } else {
-      // Use defaults if no branding config exists
-      branding.value = {
-        rootOrgId: 'root001',
-        siteName: 'OneConsortium',
-        defaultTheme: 'light',
-        logoUrl: '/logo.svg'
-      };
-    }
-  } catch (err) {
-    console.error('[Branding] Error loading branding:', err);
-    error.value = err instanceof Error ? err.message : 'Failed to load branding';
-    // Use defaults on error
-    branding.value = {
-      rootOrgId: 'root001',
-      siteName: 'OneConsortium',
-      defaultTheme: 'light',
-      logoUrl: '/logo.svg'
-    };
-  } finally {
-    loading.value = false;
-  }
-}
+// Default branding config fallback
+const defaultBranding: BrandingConfig = {
+  rootOrgId: 'root001',
+  siteName: 'OneConsortium',
+  defaultTheme: 'light',
+  logoUrl: '/logo.svg'
+};
 
 /**
  * Get computed branding values with defaults
- */
-export const siteName = computed(() => branding.value?.siteName || 'OneConsortium');
-export const logoUrl = computed(() => branding.value?.logoUrl || '/logo.svg');
-export const logoDarkUrl = computed(() => branding.value?.logoDarkUrl || null);
-export const faviconUrl = computed(() => branding.value?.faviconUrl || null);
-export const privacyPolicyUrl = computed(() => branding.value?.privacyPolicyUrl || null);
-export const primaryColor = computed(() => branding.value?.primaryColor || null);
-export const accentColor = computed(() => branding.value?.accentColor || null);
-
-/**
- * Branding store hook
+ * Now computed from sync store's manifest config
  */
 export function useBranding() {
+  const sync = useSync();
+  const branding = computed(() => sync.config.value?.branding || defaultBranding);
+  
   return {
-    branding: computed(() => branding.value),
-    loading: computed(() => loading.value),
-    error: computed(() => error.value),
-    siteName,
-    logoUrl,
-    logoDarkUrl,
-    faviconUrl,
-    privacyPolicyUrl,
-    primaryColor,
-    accentColor,
-    loadBranding
+    branding,
+    loading: computed(() => sync.syncing.value),
+    error: computed(() => sync.syncError.value),
+    siteName: computed(() => branding.value?.siteName || 'OneConsortium'),
+    logoUrl: computed(() => branding.value?.logoUrl || '/logo.svg'),
+    logoDarkUrl: computed(() => branding.value?.logoDarkUrl || null),
+    faviconUrl: computed(() => branding.value?.faviconUrl || null),
+    privacyPolicyUrl: computed(() => branding.value?.privacyPolicyUrl || null),
+    primaryColor: computed(() => branding.value?.primaryColor || null),
+    accentColor: computed(() => branding.value?.accentColor || null)
   };
+}
+
+// Legacy exports for backwards compatibility (now use sync store)
+export const siteName = computed(() => {
+  // This won't work without useSync context - use useBranding() hook instead
+  return defaultBranding.siteName;
+});
+export const logoUrl = computed(() => defaultBranding.logoUrl);
+export const logoDarkUrl = computed(() => null);
+export const faviconUrl = computed(() => null);
+export const privacyPolicyUrl = computed(() => null);
+export const primaryColor = computed(() => null);
+export const accentColor = computed(() => null);
+
+/**
+ * Legacy loadBranding function - no longer needed, branding comes from manifest
+ * Kept for backwards compatibility but does nothing
+ */
+export async function loadBranding() {
+  console.log('[Branding] loadBranding() called but branding now comes from manifest config via sync store');
+  // No-op - branding is loaded automatically via manifest
 }

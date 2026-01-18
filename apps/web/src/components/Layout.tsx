@@ -8,7 +8,7 @@
 import { useEffect } from 'preact/hooks';
 import { useAuth } from '../stores/auth';
 import { useSync } from '../stores/sync';
-import { useBranding, loadBranding } from '../stores/branding';
+import { useBranding } from '../stores/branding';
 import { DebugPanel } from './DebugPanel';
 
 interface LayoutProps {
@@ -168,10 +168,7 @@ function Footer() {
 export function Layout({ children }: LayoutProps) {
   const { siteName, faviconUrl, primaryColor, accentColor } = useBranding();
   
-  // Load branding on mount
-  useEffect(() => {
-    loadBranding();
-  }, []);
+  // Branding is now loaded automatically via manifest config in sync store
   
   // Update document title and favicon
   useEffect(() => {

@@ -50,14 +50,16 @@ userMeRoutes.get('/me', async (c) => {
     // Superadmins get access to ALL organizations
     console.log('[User] /me - Superadmin user, listing all organizations');
     const prefix = `${R2_PATHS.PRIVATE}orgs/`;
-    const orgFiles = await listFiles(c.env.R2_BUCKET, prefix);
+    // Pass null ability - auth paths are allowed during authentication flows
+    const orgFiles = await listFiles(c.env.R2_BUCKET, prefix, null);
     
     // Filter for profile.json files only
     const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
     console.log('[User] /me - Found', profileFiles.length, 'organization profiles');
     
     for (const profilePath of profileFiles) {
-      const org = await readJSON<Organization>(c.env.R2_BUCKET, profilePath);
+      // Pass null ability - auth paths are allowed during authentication flows
+      const org = await readJSON<Organization>(c.env.R2_BUCKET, profilePath, null);
       if (org && org.isActive) {
         organizations.push({
           id: org.id,
@@ -72,9 +74,11 @@ userMeRoutes.get('/me', async (c) => {
     const userOrgs = await listUserOrganizations(c.env.R2_BUCKET, payload.email, payload.sub);
     
     for (const userOrg of userOrgs) {
+      // Pass null ability - auth paths are allowed during authentication flows
       const org = await readJSON<Organization>(
         c.env.R2_BUCKET,
-        getOrgProfilePath(userOrg.orgId)
+        getOrgProfilePath(userOrg.orgId),
+        null
       );
       if (org) {
         organizations.push({

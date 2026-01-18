@@ -128,8 +128,13 @@ export const exportQuerySchema = z.object({
 
 /**
  * Single entity for bulk import
- * Supports per-row id, organizationId, and slug
+ * Supports per-row id, organizationId, organizationSlug, and slug
  * - id: optional - if provided, updates existing entity or creates with that ID
+ * - organizationId: optional - organization ID (can use organizationSlug instead)
+ * - organizationSlug: optional - organization slug (alternative to organizationId)
+ * - slug: optional - entity slug (can be used with slug lookup if id is empty)
+ * - shouldUpdate: optional - per-entity update flag (for mixed mode)
+ * - updateMode: optional - per-entity update mode override (in-place or increment-version)
  * - If id is empty/missing, a new entity is created with a generated ID
  */
 export const bulkImportEntitySchema = z.object({
@@ -140,7 +145,10 @@ export const bulkImportEntitySchema = z.object({
     .max(100, 'Slug must not exceed 100 characters')
     .regex(/^[a-z0-9-]+$/, 'Slug can only contain lowercase letters, numbers, and hyphens')
     .optional(),
-  organizationId: entityIdSchema.nullable().optional() // Per-row org (overrides request-level)
+  organizationId: entityIdSchema.nullable().optional(), // Per-row org ID (overrides request-level)
+  organizationSlug: z.string().optional(), // Per-row org slug (alternative to organizationId)
+  shouldUpdate: z.boolean().optional(), // Per-entity update flag (for mixed mode)
+  updateMode: z.enum(['in-place', 'increment-version']).optional() // Per-entity update mode override
 });
 
 /**
@@ -148,7 +156,9 @@ export const bulkImportEntitySchema = z.object({
  */
 export const bulkImportRequestSchema = z.object({
   entityTypeId: entityIdSchema,
-  organizationId: entityIdSchema.nullable().optional(), // Target org (null for global)
+  organizationId: entityIdSchema.nullable().optional(), // Target org (null for global) - default for all entities
+  importMode: z.enum(['add-new', 'update', 'mixed']).optional().default('add-new'), // Import mode: add-new only, update only, or mixed (per-entity)
+  updateMode: z.enum(['in-place', 'increment-version']).optional().default('increment-version'), // Global update mode (per-entity can override)
   entities: z.array(bulkImportEntitySchema).min(1).max(1000)
 });
 

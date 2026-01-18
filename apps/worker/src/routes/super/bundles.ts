@@ -8,8 +8,9 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import type { Env, Variables } from '../../types';
-import { readJSON, writeJSON, listFiles, getEntityTypePath, getOrgProfilePath, getAppConfigPath, getBundlePath, getOrgMemberBundlePath, getOrgAdminBundlePath } from '../../lib/r2';
+import { readJSON, writeJSON, listFiles, headFile, getEntityTypePath, getOrgProfilePath, getAppConfigPath, getBundlePath, getOrgMemberBundlePath, getOrgAdminBundlePath } from '../../lib/r2';
 import { loadAppConfig, regenerateEntityBundles } from '../../lib/bundle-invalidation';
+import { requireAbility } from '../../middleware/casl';
 import { R2_PATHS } from '@1cc/shared';
 import type { EntityBundle, EntityType, Organization, AppConfig } from '@1cc/shared';
 
@@ -83,7 +84,9 @@ function parseBundlePath(path: string): {
  * 
  * Requires superadmin access (enforced by app-level middleware)
  */
-bundleRoutes.get('/bundles', async (c) => {
+bundleRoutes.get('/bundles',
+  requireAbility('read', 'Platform'),
+  async (c) => {
   console.log('[Bundles] Listing all bundles (existing and expected)');
   console.log('[Bundles] Request path:', c.req.path);
   console.log('[Bundles] User role:', c.get('userRole'));
@@ -102,16 +105,24 @@ bundleRoutes.get('/bundles', async (c) => {
       }, 500);
     }
     
+    const ability = c.get('ability');
+    if (!ability) {
+      return c.json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'CASL ability required' }
+      }, 401);
+    }
+    
     // Load app config for membership keys
-    const config = await loadAppConfig(bucket);
+    const config = await loadAppConfig(bucket, ability);
     
     // Get all entity types
-    const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`);
+    const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`, ability);
     const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
     const entityTypes: EntityType[] = [];
     
     for (const file of definitionFiles) {
-      const entityType = await readJSON<EntityType>(bucket, file);
+      const entityType = await readJSON<EntityType>(bucket, file, ability, 'read', 'EntityType');
       if (entityType && entityType.isActive) {
         entityTypes.push(entityType);
       }
@@ -120,12 +131,12 @@ bundleRoutes.get('/bundles', async (c) => {
     console.log('[Bundles] Found', entityTypes.length, 'active entity types');
     
     // Get all organizations
-    const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+    const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`, ability);
     const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
     const organizations: Organization[] = [];
     
     for (const file of profileFiles) {
-      const org = await readJSON<Organization>(bucket, file);
+      const org = await readJSON<Organization>(bucket, file, ability, 'read', 'Organization');
       if (org && org.isActive) {
         organizations.push(org);
       }
@@ -133,46 +144,43 @@ bundleRoutes.get('/bundles', async (c) => {
     
     console.log('[Bundles] Found', organizations.length, 'active organizations');
     
-    // Get all existing bundle files
-    const listed = await bucket.list({
-      prefix: 'bundles/',
-      limit: 1000
-    });
+    // Get all existing bundle files (bundles are public paths - allow null ability)
+    const bundleFiles = await listFiles(bucket, 'bundles/', null, 1000);
     
-    console.log('[Bundles] Found', listed.objects.length, 'bundle files in R2');
+    console.log('[Bundles] Found', bundleFiles.length, 'bundle files in R2');
     
     // Create a map of existing bundles by path
     const existingBundles = new Map<string, { bundle: EntityBundle; size: number }>();
     
-    for (const obj of listed.objects) {
+    for (const bundlePath of bundleFiles) {
       // Skip manifest files (site.json)
-      if (obj.key.endsWith('/site.json')) {
+      if (bundlePath.endsWith('/site.json')) {
         continue;
       }
       
       // Only process .json files that match bundle patterns
-      if (!obj.key.endsWith('.json')) {
+      if (!bundlePath.endsWith('.json')) {
         continue;
       }
       
       // Parse bundle path
-      const parsed = parseBundlePath(obj.key);
+      const parsed = parseBundlePath(bundlePath);
       if (!parsed) {
         continue;
       }
       
       try {
-        // Get file metadata (size)
-        const head = await bucket.head(obj.key);
+        // Get file metadata (size) - bundles are public paths
+        const head = await headFile(bucket, bundlePath, null);
         const size = head?.size || 0;
         
-        // Read bundle JSON
-        const bundle = await readJSON<EntityBundle>(bucket, obj.key);
+        // Read bundle JSON - bundles are public paths
+        const bundle = await readJSON<EntityBundle>(bucket, bundlePath, null, 'read', 'Entity');
         if (bundle) {
-          existingBundles.set(obj.key, { bundle, size });
+          existingBundles.set(bundlePath, { bundle, size });
         }
       } catch (error) {
-        console.error('[Bundles] Error reading existing bundle:', obj.key, error);
+        console.error('[Bundles] Error reading existing bundle:', bundlePath, error);
       }
     }
     
@@ -393,11 +401,20 @@ bundleRoutes.post('/bundles/regenerate',
       }, 500);
     }
     
-    const config = await loadAppConfig(bucket);
+    // Get CASL ability for file-level permission checks (defense in depth)
+    const ability = c.get('ability');
+    if (!ability) {
+      return c.json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'CASL ability required' }
+      }, 401);
+    }
+    
+    const config = await loadAppConfig(bucket, ability);
     const { typeId, orgId, type } = body;
     
-    // Load entity type
-    const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+    // Load entity type - CASL verifies superadmin can read entity types
+    const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId), ability);
     if (!entityType) {
       return c.json({
         success: false,
@@ -481,19 +498,28 @@ bundleRoutes.post('/bundles/regenerate-all',
       }, 500);
     }
     
-    const config = await loadAppConfig(bucket);
+    // Get CASL ability for file-level permission checks (defense in depth)
+    const ability = c.get('ability');
+    if (!ability) {
+      return c.json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'CASL ability required' }
+      }, 401);
+    }
+    
+    const config = await loadAppConfig(bucket, ability);
     
     // Log actual configured membership keys
     console.log('[Bundles] Configured membership keys:', config.membershipKeys.keys.map(k => `${k.id} (${k.name})`));
     
-    // Get all entity types
-    const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`);
+    // Get all entity types - CASL verifies superadmin can list and read entity types
+    const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`, ability);
     const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
     const entityTypes: EntityType[] = [];
     const updatedEntityTypes: string[] = []; // Track which entity types were updated
     
     for (const file of definitionFiles) {
-      let entityType = await readJSON<EntityType>(bucket, file);
+      let entityType = await readJSON<EntityType>(bucket, file, ability);
       if (!entityType || !entityType.isActive) continue;
       
       // If entity type is missing visibleTo and addDefaultVisibleTo is true, add default
@@ -506,8 +532,8 @@ bundleRoutes.post('/bundles/regenerate-all',
             ...entityType,
             visibleTo: [defaultKey.id]
           };
-          // Save updated entity type
-          await writeJSON(bucket, file, entityType);
+          // Save updated entity type - CASL verifies superadmin can write entity types
+          await writeJSON(bucket, file, entityType, ability);
           updatedEntityTypes.push(entityType.id);
           console.log('[Bundles] Updated entity type', entityType.id, 'with visibleTo:', entityType.visibleTo);
         }
@@ -538,13 +564,13 @@ bundleRoutes.post('/bundles/regenerate-all',
         invalidKeys.length > 0 ? `INVALID keys: ${invalidKeys.join(', ')}` : '');
     }
     
-    // Get all organizations
-    const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+    // Get all organizations - CASL verifies superadmin can list and read orgs
+    const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`, ability);
     const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
     const organizations: Organization[] = [];
     
     for (const file of profileFiles) {
-      const org = await readJSON<Organization>(bucket, file);
+      const org = await readJSON<Organization>(bucket, file, ability);
       if (org && org.isActive) {
         organizations.push(org);
       }

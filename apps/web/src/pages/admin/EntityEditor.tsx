@@ -7,7 +7,6 @@
 import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
-import { useSync } from '../../stores/sync';
 import { api } from '../../lib/api';
 import { FieldRenderer } from '../../components/fields';
 import { slugify, checkDuplicatesInBundle, type DuplicateCheckResult } from '../../lib/utils';
@@ -35,7 +34,6 @@ export function EntityEditor({ orgSlug, id, typeId: typeIdProp }: EntityEditorPr
   const typeIdFromQuery = urlParams.get('type');
   const typeId = typeIdProp || typeIdFromQuery || undefined;
   const { isAuthenticated, isOrgAdmin, isSuperadmin, loading: authLoading, organizationId, user, userId } = useAuth();
-  const { entityTypes } = useSync();
   
   const [entity, setEntity] = useState<Entity | null>(null);
   const [entityType, setEntityType] = useState<EntityType | null>(null);

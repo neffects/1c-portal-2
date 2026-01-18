@@ -6,7 +6,7 @@
 
 import { useState, useRef, useEffect } from 'preact/hooks';
 import type { FieldDefinition } from '@1cc/shared';
-import { useSync } from '../../stores/sync';
+import { useEntityType } from '../../hooks/useDB';
 import { api } from '../../lib/api';
 
 interface LinkFieldProps {
@@ -31,9 +31,8 @@ export function LinkField({ field, value, onChange, error, disabled }: LinkField
   const [linkedEntity, setLinkedEntity] = useState<LinkedEntity | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
-  const { entityTypes } = useSync();
   const linkedTypeId = field.constraints?.linkedTypeId;
-  const linkedType = entityTypes.value.find(t => t.id === linkedTypeId);
+  const { data: linkedType } = useEntityType(linkedTypeId);
   
   // Close dropdown when clicking outside
   useEffect(() => {

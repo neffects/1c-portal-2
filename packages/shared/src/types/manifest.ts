@@ -3,6 +3,7 @@
  */
 
 import type { EntityStatus, VisibilityScope } from './entity';
+import type { BrandingConfig, FeatureFlags, SyncConfig, AuthConfig } from './config';
 
 /**
  * Site manifest - index of available entity types
@@ -18,6 +19,15 @@ export interface SiteManifest {
   version: number;
   /** Available entity types */
   entityTypes: ManifestEntityType[];
+  /** Application configuration (branding, features, sync, auth) */
+  config?: {
+    branding: BrandingConfig;
+    features: FeatureFlags;
+    sync: SyncConfig;
+    auth: AuthConfig;
+    apiBaseUrl?: string;
+    r2PublicUrl?: string;
+  };
 }
 
 /**
@@ -36,8 +46,6 @@ export interface ManifestEntityType {
   description?: string;
   /** Number of entities of this type */
   entityCount: number;
-  /** Current bundle version */
-  bundleVersion: number;
   /** When last updated (ISO 8601) */
   lastUpdated: string;
 }
@@ -51,6 +59,8 @@ export interface ManifestEntityType {
  * 
  * NOTE: Bundles use `typeId` (NOT `entityTypeId`) to identify the entity type.
  * This is intentional - bundles are scoped by type, so the type ID is stored at the bundle level.
+ * 
+ * NOTE: Bundles do NOT have versions. Change detection uses HTTP ETags instead.
  */
 export interface EntityBundle {
   /** Entity type ID (NOT entityTypeId - this is the bundle-level type identifier) */
@@ -59,8 +69,6 @@ export interface EntityBundle {
   typeName: string;
   /** When the bundle was generated (ISO 8601) */
   generatedAt: string;
-  /** Bundle version (increments on any entity change) */
-  version: number;
   /** Total entity count */
   entityCount: number;
   /** Entities in this bundle */

@@ -7,7 +7,7 @@
 
 import { Hono } from 'hono';
 import type { Env, Variables } from '../../types';
-import { readJSON, getManifestPath, getBundlePath, getEntityTypePath, getAppConfigPath } from '../../lib/r2';
+import { readJSON, readJSONWithEtag, getManifestPath, getBundlePath, getEntityTypePath, getAppConfigPath } from '../../lib/r2';
 import { NotFoundError } from '../../middleware/error';
 import type { SiteManifest, EntityBundle, EntityType, AppConfig } from '@1cc/shared';
 
@@ -83,10 +83,12 @@ publicManifestRoutes.get('/manifests/site', async (c) => {
  * GET /bundles/:typeId
  * Get public entity bundle (no auth required)
  * Returns bundle for 'public' membership key
+ * Supports ETag-based conditional requests (If-None-Match header)
  */
 publicManifestRoutes.get('/bundles/:typeId', async (c) => {
   const typeId = c.req.param('typeId');
-  console.log('[Public] Getting public bundle:', typeId);
+  const ifNoneMatch = c.req.header('If-None-Match'); // ETag from client
+  console.log('[Public] Getting public bundle:', typeId, ifNoneMatch ? `(If-None-Match: ${ifNoneMatch})` : '');
   
   // Verify entity type exists
   const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId));
@@ -99,22 +101,60 @@ publicManifestRoutes.get('/bundles/:typeId', async (c) => {
     throw new NotFoundError('Entity Type', typeId);
   }
   
-  let bundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, getBundlePath('public', typeId));
+  // Read bundle with ETag metadata
+  const bundlePath = getBundlePath('public', typeId);
+  const { data: bundle, etag } = await readJSONWithEtag<EntityBundle>(c.env.R2_BUCKET, bundlePath);
+  
+  // Generate ETag for empty bundle (hash of JSON content)
+  let bundleEtag: string | null = etag;
+  let finalBundle: EntityBundle;
   
   if (!bundle) {
-    // Return empty bundle if not exists
-    bundle = {
+    // Return empty bundle if not exists (bundles don't have versions)
+    finalBundle = {
       typeId,
       typeName: entityType.pluralName,
       generatedAt: new Date().toISOString(),
-      version: 0,
       entityCount: 0,
       entities: []
     };
+    
+    // Generate ETag for empty bundle (hash of JSON string)
+    const emptyBundleJson = JSON.stringify(finalBundle);
+    bundleEtag = `"${Buffer.from(emptyBundleJson).toString('base64').substring(0, 32)}"`; // Simple hash approximation
+  } else {
+    finalBundle = bundle;
   }
   
-  return c.json({
+  // Handle conditional request (If-None-Match)
+  if (ifNoneMatch && bundleEtag) {
+    // Remove quotes if present for comparison
+    const clientEtag = ifNoneMatch.replace(/^"|"$/g, '');
+    const serverEtag = bundleEtag.replace(/^"|"$/g, '');
+    
+    if (clientEtag === serverEtag) {
+      console.log('[Public] Bundle ETag matches - returning 304 Not Modified:', typeId);
+      return new Response(null, {
+        status: 304,
+        headers: {
+          'ETag': bundleEtag,
+          'Cache-Control': 'public, max-age=300' // 5 minutes
+        }
+      });
+    }
+  }
+  
+  // Return bundle with ETag header
+  const response = c.json({
     success: true,
-    data: bundle
+    data: finalBundle
   });
+  
+  // Add ETag header if available
+  if (bundleEtag) {
+    response.headers.set('ETag', bundleEtag);
+    response.headers.set('Cache-Control', 'public, max-age=300'); // 5 minutes
+  }
+  
+  return response;
 });

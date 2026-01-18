@@ -135,6 +135,7 @@ export function generateTemplateRow(entityType: EntityType): Record<string, stri
   const template: Record<string, string> = {
     id: '[7-char alphanumeric or empty for new]',
     organizationId: '[7-char org ID or empty for global]',
+    organizationSlug: '[org slug or empty for global]',
     name: '[entity name - required]',
     slug: '[lowercase-with-hyphens or auto-generated]',
     visibility: '[public|authenticated|members]'
@@ -202,11 +203,12 @@ export function generateCSV(entities: Entity[], entityType: EntityType): string 
   
   // Create header row with friendly names
   // Format: "Field Name|field_id" to preserve mapping for parsing
-  // System fields: Id, Organization, Name, Slug, Visibility (read from entity top-level, not data)
-  const headerRow: string[] = ['Id|id', 'Organization|organizationId', 'Name|name', 'Slug|slug', 'Visibility|visibility'];
+  // System fields: Id, Organization, Organization Slug, Name, Slug, Visibility (read from entity top-level, not data)
+  const headerRow: string[] = ['Id|id', 'Organization|organizationId', 'Organization Slug|organizationSlug', 'Name|name', 'Slug|slug', 'Visibility|visibility'];
   const fieldMapping: Array<{ name: string; id: string; isSystemField: boolean }> = [
     { name: 'Id', id: 'id', isSystemField: true },
     { name: 'Organization', id: 'organizationId', isSystemField: true },
+    { name: 'Organization Slug', id: 'organizationSlug', isSystemField: true },
     { name: 'Name', id: 'name', isSystemField: true },
     { name: 'Slug', id: 'slug', isSystemField: true },
     { name: 'Visibility', id: 'visibility', isSystemField: true }
@@ -251,6 +253,11 @@ export function generateCSV(entities: Entity[], entityType: EntityType): string 
         }
         if (f.id === 'organizationId') {
           return escapeCSVValue(entity.organizationId || '');
+        }
+        if (f.id === 'organizationSlug') {
+          // Organization slug: read from computed property (added by backend export endpoint)
+          const orgSlug = (entity as Entity & { organizationSlug?: string | null }).organizationSlug;
+          return escapeCSVValue(orgSlug || '');
         }
         if (f.id === 'name') {
           // Name: prefer entity.name, fall back to entity.data[nameFieldId] for legacy entities
@@ -431,8 +438,8 @@ export function parseCSV(text: string, skipTemplateRow = true): CSVParseResult {
 export function convertToImportData(
   data: Record<string, unknown>[],
   entityType: EntityType
-): { entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; name?: string; organizationId?: string | null; id?: string }>; errors: ImportError[] } {
-  const entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; name?: string; organizationId?: string | null; id?: string }> = [];
+): { entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; name?: string; organizationId?: string | null; organizationSlug?: string; id?: string }>; errors: ImportError[] } {
+  const entities: Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; name?: string; organizationId?: string | null; organizationSlug?: string; id?: string }> = [];
   const errors: ImportError[] = [];
   
   for (let i = 0; i < data.length; i++) {
@@ -442,6 +449,7 @@ export function convertToImportData(
     let slug: string | undefined;
     let name: string | undefined;
     let organizationId: string | null | undefined;
+    let organizationSlug: string | undefined;
     let id: string | undefined;
     
     // Extract entity ID if present
@@ -461,20 +469,28 @@ export function convertToImportData(
     }
     // Note: Empty ID means create new entity (ID will be generated)
     
-    // Extract organizationId if present (header is 'Organization|organizationId')
-    const orgValue = row['organizationId'] as string | undefined;
-    if (orgValue !== undefined) {
-      if (orgValue === '' || orgValue === null) {
+    // Extract organizationId or organizationSlug (header is 'Organization|organizationId' or 'Organization Slug|organizationSlug')
+    // organizationSlug takes precedence if both are provided
+    const orgSlugValue = row['organizationSlug'] as string | undefined;
+    const orgIdValue = row['organizationId'] as string | undefined;
+    
+    if (orgSlugValue !== undefined && orgSlugValue !== null && orgSlugValue !== '') {
+      // Organization slug provided - backend will resolve it
+      organizationSlug = String(orgSlugValue).trim();
+      // Don't set organizationId when slug is provided - backend will resolve
+    } else if (orgIdValue !== undefined) {
+      // Organization ID provided
+      if (orgIdValue === '' || orgIdValue === null) {
         // Empty or null means global entity
         organizationId = null;
-      } else if (typeof orgValue === 'string' && orgValue.length === 7 && /^[a-z0-9]+$/.test(orgValue)) {
-        organizationId = orgValue;
-      } else if (typeof orgValue === 'string' && orgValue.trim() !== '') {
+      } else if (typeof orgIdValue === 'string' && orgIdValue.length === 7 && /^[a-z0-9]+$/.test(orgIdValue)) {
+        organizationId = orgIdValue;
+      } else if (typeof orgIdValue === 'string' && orgIdValue.trim() !== '') {
         errors.push({
           rowIndex: i,
           csvRow: i + 3,
           field: 'organizationId',
-          message: `Invalid organization ID: "${orgValue}". Must be 7 lowercase alphanumeric characters or empty for global`,
+          message: `Invalid organization ID: "${orgIdValue}". Must be 7 lowercase alphanumeric characters or empty for global`,
           source: 'validation'
         });
       }
@@ -593,7 +609,7 @@ export function convertToImportData(
       entityData.slug = slug;
     }
     
-    entities.push({ data: entityData, visibility, slug, name, organizationId, id });
+    entities.push({ data: entityData, visibility, slug, name, organizationId, organizationSlug, id });
   }
   
   return { entities, errors };

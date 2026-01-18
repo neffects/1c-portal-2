@@ -49,14 +49,20 @@ orgEntityRoutes.post('/entities',
     visibility
   });
   
+  // Get CASL ability for file-level permission checks
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
   // Check permissions
-  const permissions = await readJSON<EntityTypePermissions>(c.env.R2_BUCKET, getOrgPermissionsPath(orgId));
+  const permissions = await readJSON<EntityTypePermissions>(c.env.R2_BUCKET, getOrgPermissionsPath(orgId), ability);
   if (!permissions?.creatable.includes(entityTypeId)) {
     throw new ForbiddenError('This organization cannot create entities of this type');
   }
   
   // Get entity type
-  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entityTypeId));
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entityTypeId), ability);
   if (!entityType || !entityType.isActive) {
     throw new NotFoundError('Entity Type', entityTypeId);
   }
@@ -72,12 +78,13 @@ orgEntityRoutes.post('/entities',
   const finalVisibility: VisibilityScope = visibility || entityType.defaultVisibility;
   const entityId = createEntityId();
   
-  // Check slug uniqueness within org and entity type
+  // Check slug uniqueness within org and entity type (uses slug index - O(1) check)
   await checkSlugUniqueness(
     c.env.R2_BUCKET,
     entityTypeId,
     orgId,
-    slug.trim()
+    slug.trim(),
+    ability
   );
   
   const now = new Date().toISOString();
@@ -106,10 +113,10 @@ orgEntityRoutes.post('/entities',
     createdAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub);
+  await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub, ability);
   
   const versionPath = getEntityVersionPath('members', entityId, 1, orgId);
-  await writeJSON(c.env.R2_BUCKET, versionPath, entity);
+  await writeJSON(c.env.R2_BUCKET, versionPath, entity, ability);
   
   const latestPointer = {
     version: 1,
@@ -119,7 +126,7 @@ orgEntityRoutes.post('/entities',
   };
   
   const latestPath = getEntityLatestPath('members', entityId, orgId);
-  await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
+  await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer, ability);
   
   // Create slug index for public entities
   if (finalVisibility === 'public') {
@@ -150,6 +157,7 @@ orgEntityRoutes.post('/entities',
  * List entities in organization
  */
 orgEntityRoutes.get('/entities',
+  requireAbility('read', 'Entity'),
   zValidator('query', entityQueryParamsSchema),
   async (c) => {
   const orgId = c.req.param('orgId')!;
@@ -169,6 +177,7 @@ orgEntityRoutes.get('/entities',
  * Get entity by ID within organization
  */
 orgEntityRoutes.get('/entities/:id',
+  requireAbility('read', 'Entity'),
   zValidator('query', entityVersionQuerySchema),
   async (c) => {
   const orgId = c.req.param('orgId')!;
@@ -177,16 +186,22 @@ orgEntityRoutes.get('/entities/:id',
   
   console.log('[OrgEntities] Getting entity:', entityId, 'for org:', orgId);
   
-  // Get entity stub
-  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId));
+  // Get CASL ability for file-level permission checks
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity stub - CASL verifies user can access this entity
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId), ability, 'read', 'Entity');
   
   if (!stub || stub.organizationId !== orgId) {
     throw new NotFoundError('Entity', entityId);
   }
   
-  // Get latest pointer
+  // Get latest pointer - CASL verifies user can access this org's entities
   const latestPath = getEntityLatestPath('members', entityId, orgId);
-  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
   
   if (!latestPointer) {
     throw new NotFoundError('Entity', entityId);
@@ -195,9 +210,9 @@ orgEntityRoutes.get('/entities/:id',
   // Determine version to fetch
   const version = versionQuery.version || latestPointer.version;
   
-  // Get entity version
+  // Get entity version - CASL verifies user can access this org's entities
   const entityPath = getEntityVersionPath('members', entityId, version, orgId);
-  const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
+  const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath, ability, 'read', 'Entity');
   
   if (!entity) {
     throw new NotFoundError('Entity', entityId);
@@ -224,16 +239,22 @@ orgEntityRoutes.patch('/entities/:id',
   
   console.log('[OrgEntities] Updating entity:', entityId, 'in org:', orgId);
   
-  // Get entity stub
-  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId));
+  // Get CASL ability for file-level permission checks
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity stub - CASL verifies user can access this entity
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId), ability, 'read', 'Entity');
   
   if (!stub || stub.organizationId !== orgId) {
     throw new NotFoundError('Entity', entityId);
   }
   
-  // Get latest pointer
+  // Get latest pointer - CASL verifies user can access this org's entities
   const latestPath = getEntityLatestPath('members', entityId, orgId);
-  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
   
   if (!latestPointer) {
     throw new NotFoundError('Entity', entityId);
@@ -244,16 +265,16 @@ orgEntityRoutes.patch('/entities/:id',
     throw new AppError('INVALID_STATUS', 'Only draft entities can be edited', 400);
   }
   
-  // Get current version
+  // Get current version - CASL verifies user can access this org's entities
   const currentPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
-  const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath);
+  const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath, ability, 'read', 'Entity');
   
   if (!currentEntity) {
     throw new NotFoundError('Entity', entityId);
   }
   
   // Get entity type for validation
-  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(currentEntity.entityTypeId));
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(currentEntity.entityTypeId), ability);
   
   if (!entityType) {
     throw new NotFoundError('Entity Type', currentEntity.entityTypeId);
@@ -291,11 +312,11 @@ orgEntityRoutes.patch('/entities/:id',
     updatedBy: userId
   };
   
-  // Write new version
+  // Write new version - CASL verifies user can write to this org's entities
   const newVersionPath = getEntityVersionPath('members', entityId, newVersion, orgId);
-  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
+  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity, ability);
   
-  // Update latest pointer
+  // Update latest pointer - CASL verifies user can write to this org's entities
   const newPointer: EntityLatestPointer = {
     version: newVersion,
     status: updatedEntity.status,
@@ -303,7 +324,7 @@ orgEntityRoutes.patch('/entities/:id',
     updatedAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer, ability);
   
   // Update slug index if visibility is public and slug changed
   const currentSlug = currentEntity.slug;
@@ -350,19 +371,20 @@ orgEntityRoutes.post('/entities/:id/transition',
   const { action, feedback } = c.req.valid('json');
   const userId = c.get('userId')!;
   const userRole = c.get('userRole');
+  const ability = c.get('ability');
   
   console.log('[OrgEntities] Processing transition for:', entityId, 'action:', action);
   
-  // Get entity stub
-  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId));
+  // Get entity stub - CASL verifies user can access this entity
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId), ability, 'read', 'Entity');
   
   if (!stub || stub.organizationId !== orgId) {
     throw new NotFoundError('Entity', entityId);
   }
   
-  // Get latest pointer
+  // Get latest pointer - CASL verifies user can access this org's entities
   const latestPath = getEntityLatestPath('members', entityId, orgId);
-  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+  const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
   
   if (!latestPointer) {
     throw new NotFoundError('Entity', entityId);
@@ -371,9 +393,11 @@ orgEntityRoutes.post('/entities/:id/transition',
   // Check permissions for the action
   const currentStatus = latestPointer.status;
   
-  // Role-based action permissions
-  if (['approve', 'reject'].includes(action) && userRole !== 'superadmin') {
-    throw new ForbiddenError('Only superadmins can approve or reject entities');
+  // CASL permission checks for approve/reject actions
+  if (['approve', 'reject'].includes(action)) {
+    if (!ability?.can('approve', 'Entity')) {
+      throw new ForbiddenError('Only superadmins can approve or reject entities');
+    }
   }
   
   // Validate transition
@@ -397,9 +421,9 @@ orgEntityRoutes.post('/entities/:id/transition',
   
   const newStatus = statusMap[action];
   
-  // Get current entity version
+  // Get current entity version - CASL verifies user can access this org's entities
   const currentPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
-  const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath);
+  const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath, ability, 'read', 'Entity');
   
   if (!currentEntity) {
     throw new NotFoundError('Entity', entityId);
@@ -422,11 +446,11 @@ orgEntityRoutes.post('/entities/:id/transition',
     })
   };
   
-  // Write new version
+  // Write new version - CASL verifies user can write to this org's entities
   const newVersionPath = getEntityVersionPath('members', entityId, newVersion, orgId);
-  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
+  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity, ability);
   
-  // Update latest pointer
+  // Update latest pointer - CASL verifies user can write to this org's entities
   const newPointer: EntityLatestPointer = {
     version: newVersion,
     status: newStatus,
@@ -434,7 +458,7 @@ orgEntityRoutes.post('/entities/:id/transition',
     updatedAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer, ability);
   
   console.log('[OrgEntities] Transitioned entity:', entityId, currentStatus, '->', newStatus);
   

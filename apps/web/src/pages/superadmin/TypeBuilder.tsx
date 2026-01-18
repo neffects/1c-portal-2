@@ -573,9 +573,6 @@ function FieldEditorModal({
   onSave: (field: Partial<FieldDefinition>) => void;
   onClose: () => void;
 }) {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'FieldEditorModal:520',message:'FieldEditorModal rendered',data:{fieldId:field?.id,fieldName:field?.name,hasField:!!field},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C,E'})}).catch(()=>{});
-  // #endregion
   const [editingField, setEditingField] = useState<Partial<FieldDefinition>>(
     field || { ...defaultField, sectionId: sections[0]?.id || '' }
   );
@@ -589,9 +586,6 @@ function FieldEditorModal({
   // Sync local state when the field prop changes (e.g., when editing a different field)
   // Only depend on field.id to avoid resetting when other things change
   useEffect(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'FieldEditorModal:526',message:'useEffect triggered',data:{fieldId:field?.id,fieldName:field?.name,hasField:!!field},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     if (field) {
       console.log('[FieldEditorModal] Field prop changed, syncing state:', field.name, field.id);
       setEditingField({ ...field });
@@ -1276,21 +1270,9 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
   
   // Open modal to edit existing field
   function handleEditField(field: FieldDefinition) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1016',message:'handleEditField called',data:{fieldId:field.id,fieldName:field.name,fieldType:field.type,hasId:!!field.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B'})}).catch(()=>{});
-    // #endregion
     console.log('[TypeBuilder] Opening edit field modal:', field.name);
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1018',message:'Before setEditingField',data:{showFieldModal,editingFieldId:editingField?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     setEditingField({ ...field });
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1019',message:'Before setShowFieldModal',data:{fieldId:field.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     setShowFieldModal(true);
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1020',message:'After setShowFieldModal',data:{fieldId:field.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
   }
   
   // Save field from modal
@@ -1860,12 +1842,6 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                           // Check if this is a built-in/default field
                           const isBuiltIn = isBuiltInField(field.id);
                           
-                          // #region agent log
-                          if (!isBuiltIn) {
-                            fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1448',message:'Rendering custom field',data:{fieldId:field.id,fieldName:field.name,fieldType:field.type,hasId:!!field.id,isCompleteField:!!(field.id && field.name && field.type)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-                          }
-                          // #endregion
-                          
                           return (
                             <div 
                               key={field.id}
@@ -1875,19 +1851,11 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                                   : 'bg-surface-50 dark:bg-surface-900 border-surface-200 dark:border-surface-700 hover:border-primary-300 dark:hover:border-primary-700 cursor-pointer'
                               }`}
                               onClick={(e) => {
-                                // #region agent log
-                                if (!isBuiltIn) {
-                                  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1484',message:'Field div clicked - opening editor',data:{fieldId:field.id,targetTagName:(e.target as HTMLElement).tagName,currentTargetTagName:(e.currentTarget as HTMLElement).tagName,isButton:(e.target as HTMLElement).closest('button') !== null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                                }
-                                // #endregion
                                 // Open field editor when clicking on the field row (but not on action buttons)
                                 const target = e.target as HTMLElement;
                                 const clickedButton = target.closest('button');
                                 // Only open editor if we didn't click on a button (buttons have their own handlers)
                                 if (!clickedButton && !isBuiltIn) {
-                                  // #region agent log
-                                  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1490',message:'Opening field editor from row click',data:{fieldId:field.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                                  // #endregion
                                   handleEditField(field);
                                 }
                               }}
@@ -1963,9 +1931,6 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                               <button
                                 type="button"
                                 onClick={(e) => {
-                                  // #region agent log
-                                  fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1520',message:'Edit button clicked',data:{fieldId:field.id,fieldName:field.name,isBuiltIn,eventType:e.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                                  // #endregion
                                   e.stopPropagation();
                                   if (!isBuiltIn) {
                                     handleEditField(field);
@@ -1985,9 +1950,6 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
                                 <button
                                   type="button"
                                   onClick={(e) => {
-                                    // #region agent log
-                                    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1568',message:'Delete button clicked',data:{fieldId:field.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                                    // #endregion
                                     e.stopPropagation();
                                     handleRemoveField(field.id);
                                   }}
@@ -2100,12 +2062,6 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
       </div>
       
       {/* Field Editor Modal */}
-      {/* #region agent log */}
-      {(() => {
-        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1618',message:'Modal render check',data:{showFieldModal,hasEditingField:!!editingField,editingFieldId:editingField?.id,shouldRender:showFieldModal && !!editingField},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C,E'})}).catch(()=>{});
-        return null;
-      })()}
-      {/* #endregion */}
       {showFieldModal && editingField && (
         <FieldEditorModal
           key={editingField.id || 'new-field'}
@@ -2115,9 +2071,6 @@ export function TypeBuilder({ id }: TypeBuilderProps) {
           existingFieldIds={fields.map(f => f.id)}
           onSave={handleSaveField}
           onClose={() => {
-            // #region agent log
-            fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TypeBuilder.tsx:1626',message:'Modal onClose called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-            // #endregion
             console.log('[TypeBuilder] Closing field modal');
             setShowFieldModal(false);
             setEditingField(null);

@@ -23,29 +23,45 @@ const error = signal<string | null>(null);
 const currentOrgId = signal<string | null>(null);
 
 // Computed values
-const isAuthenticated = computed(() => session.value !== null);
-const user = computed(() => session.value?.user || null);
+const isAuthenticated = computed(() => {
+  const s = session.value;
+  return s !== null && s !== undefined;
+});
+const user = computed(() => {
+  const s = session.value;
+  return (s && s.user) ? s.user : null;
+});
 
 // Organizations the user belongs to
-const organizations = computed(() => session.value?.user.organizations || []);
+const organizations = computed(() => {
+  const user = session.value?.user;
+  if (!user || !user.organizations) return [];
+  return Array.isArray(user.organizations) ? user.organizations : [];
+});
 
 // Current organization details
 const currentOrganization = computed(() => {
   const orgId = currentOrgId.value;
   if (!orgId) return null;
-  return organizations.value.find(o => o.id === orgId) || null;
+  const orgs = organizations.value;
+  if (!Array.isArray(orgs)) return null;
+  return orgs.find(o => o && o.id === orgId) || null;
 });
 
 // Current organization ID (for compatibility with existing code)
 const organizationId = computed(() => currentOrgId.value);
 
 // Is the user a superadmin?
-const isSuperadmin = computed(() => session.value?.user.isSuperadmin || false);
+const isSuperadmin = computed(() => {
+  const user = session.value?.user;
+  return user ? (user.isSuperadmin === true) : false;
+});
 
 // Role in the current organization
 const currentRole = computed(() => {
   if (isSuperadmin.value) return 'superadmin' as UserRole;
-  return currentOrganization.value?.role || null;
+  const org = currentOrganization.value;
+  return (org && org.role) ? org.role : null;
 });
 
 // Is the user an admin in the current organization?

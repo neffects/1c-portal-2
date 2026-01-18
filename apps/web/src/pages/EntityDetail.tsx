@@ -6,6 +6,7 @@
 
 import { useSync } from '../stores/sync';
 import { useAuth } from '../stores/auth';
+import { useEntityType, useEntityBySlug } from '../hooks/useDB';
 import { api } from '../lib/api';
 import { useState } from 'preact/hooks';
 
@@ -76,17 +77,15 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
 }
 
 export function EntityDetailPage({ orgSlug, typeSlug, entitySlug }: EntityDetailPageProps) {
-  const { getEntityType, getEntityBySlug, syncing } = useSync();
+  const { syncing } = useSync();
   const { isAuthenticated, user } = useAuth();
+  const { data: entityType, loading: typeLoading } = useEntityType(typeSlug);
+  const { data: entity, loading: entityLoading } = useEntityBySlug(entityType?.id, entitySlug);
   
   const [flagged, setFlagged] = useState(false);
   const [flagLoading, setFlagLoading] = useState(false);
   
-  // Get entity type and entity
-  const entityType = typeSlug ? getEntityType(typeSlug) : undefined;
-  const entity = entityType && entitySlug ? getEntityBySlug(entityType.id, entitySlug) : undefined;
-  
-  const isLoading = syncing.value && !entity;
+  const isLoading = typeLoading || entityLoading || (syncing.value && !entity);
   
   // Flag entity for alerts
   async function handleFlag() {
@@ -274,8 +273,8 @@ export function EntityDetailPage({ orgSlug, typeSlug, entitySlug }: EntityDetail
               </div>
               
               <div class="flex justify-between">
-                <dt class="text-surface-500 dark:text-surface-400">Version</dt>
-                <dd class="text-surface-900 dark:text-surface-100">v{entity?.version}</dd>
+                <dt class="text-surface-500 dark:text-surface-400">Status</dt>
+                <dd class="text-surface-900 dark:text-surface-100">{entity?.status}</dd>
               </div>
             </dl>
             

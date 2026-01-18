@@ -5,6 +5,7 @@
  */
 
 import { useSync } from '../stores/sync';
+import { useEntityType, useBundle, useManifestId } from '../hooks/useDB';
 import { EntityCard, EntityCardSkeleton } from '../components/EntityCard';
 
 interface BrowsePageProps {
@@ -12,14 +13,13 @@ interface BrowsePageProps {
 }
 
 export function BrowsePage({ typeSlug }: BrowsePageProps) {
-  const { getEntityType, getBundle, syncing } = useSync();
-  
-  // Get entity type info
-  const entityType = typeSlug ? getEntityType(typeSlug) : undefined;
-  const bundle = entityType ? getBundle(entityType.id) : undefined;
+  const { syncing } = useSync();
+  const manifestId = useManifestId();
+  const { data: entityType, loading: typeLoading } = useEntityType(typeSlug);
+  const { data: bundle, loading: bundleLoading } = useBundle(manifestId, entityType?.id);
   
   const entities = bundle?.entities || [];
-  const isLoading = syncing.value && entities.length === 0;
+  const isLoading = typeLoading || bundleLoading || (syncing.value && entities.length === 0);
   
   if (!typeSlug) {
     return (
@@ -29,7 +29,7 @@ export function BrowsePage({ typeSlug }: BrowsePageProps) {
     );
   }
   
-  if (!entityType && !syncing.value) {
+  if (!entityType && !typeLoading && !syncing.value) {
     return (
       <div class="container-default py-12">
         <div class="text-center py-16">

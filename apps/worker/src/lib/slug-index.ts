@@ -7,6 +7,7 @@
 
 import { R2_PATHS } from '@1cc/shared';
 import { readJSON, writeJSON, deleteFile, fileExists } from './r2';
+import type { AppAbility } from './abilities';
 import type { VisibilityScope } from '@1cc/shared';
 
 /**
@@ -40,11 +41,12 @@ export async function upsertSlugIndex(
   orgId: string | null,
   typeSlug: string,
   entitySlug: string,
-  index: SlugIndex
+  index: SlugIndex,
+  ability: AppAbility | null
 ): Promise<void> {
   const path = getSlugIndexPath(orgId, typeSlug, entitySlug);
   console.log('[SlugIndex] Upserting slug index:', path);
-  await writeJSON(bucket, path, index);
+  await writeJSON(bucket, path, index, ability, undefined, 'update', 'Entity');
 }
 
 /**
@@ -54,11 +56,12 @@ export async function readSlugIndex(
   bucket: R2Bucket,
   orgId: string | null,
   typeSlug: string,
-  entitySlug: string
+  entitySlug: string,
+  ability: AppAbility | null
 ): Promise<SlugIndex | null> {
   const path = getSlugIndexPath(orgId, typeSlug, entitySlug);
   console.log('[SlugIndex] Reading slug index:', path);
-  return await readJSON<SlugIndex>(bucket, path);
+  return await readJSON<SlugIndex>(bucket, path, ability, 'read', 'Entity');
 }
 
 /**
@@ -68,11 +71,12 @@ export async function deleteSlugIndex(
   bucket: R2Bucket,
   orgId: string | null,
   typeSlug: string,
-  entitySlug: string
+  entitySlug: string,
+  ability: AppAbility | null
 ): Promise<void> {
   const path = getSlugIndexPath(orgId, typeSlug, entitySlug);
   console.log('[SlugIndex] Deleting slug index:', path);
-  await deleteFile(bucket, path);
+  await deleteFile(bucket, path, ability, 'delete', 'Entity');
 }
 
 /**
@@ -82,8 +86,9 @@ export async function slugIndexExists(
   bucket: R2Bucket,
   orgId: string | null,
   typeSlug: string,
-  entitySlug: string
+  entitySlug: string,
+  ability: AppAbility | null
 ): Promise<boolean> {
   const path = getSlugIndexPath(orgId, typeSlug, entitySlug);
-  return await fileExists(bucket, path);
+  return await fileExists(bucket, path, ability);
 }

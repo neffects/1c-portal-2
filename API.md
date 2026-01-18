@@ -228,10 +228,23 @@ Get public site manifest listing all available entity types.
 
 Get public entity bundle for a specific type. Returns published entities from all organizations that have `'public'` in their entity type's `visibleTo` array. Fields are projected based on the `public` membership key (only fields visible to `public` are included).
 
+**Supports ETag-based conditional requests** - send `If-None-Match` header to check if bundle has changed.
+
 **Path Parameters:**
 - `typeId` (required) - Entity type ID
 
-**Response:**
+**Request Headers (Optional):**
+```
+If-None-Match: "etag-value-from-previous-response"
+```
+
+**Response Headers:**
+```
+ETag: "etag-value"
+Cache-Control: public, max-age=300
+```
+
+**Response (200 OK):**
 ```json
 {
   "success": true,
@@ -239,16 +252,14 @@ Get public entity bundle for a specific type. Returns published entities from al
     "typeId": "type123",
     "typeName": "Products",
     "generatedAt": "2026-01-11T12:00:00Z",
-    "version": 1234567891,
     "entityCount": 42,
     "entities": [
       {
         "id": "ent456",
-        "version": 1,
         "status": "published",
+        "name": "Dog Toy",
         "slug": "dog-toy",
         "data": {
-          "name": "Dog Toy",
           "description": "A fun toy for dogs"
         },
         "updatedAt": "2026-01-10T10:00:00Z"
@@ -257,6 +268,17 @@ Get public entity bundle for a specific type. Returns published entities from al
   }
 }
 ```
+
+**Response (304 Not Modified):**
+If `If-None-Match` header matches the current bundle ETag, returns:
+- Status: `304 Not Modified`
+- No response body
+- ETag header included
+
+**Notes:**
+- Bundles do NOT have version numbers - change detection uses HTTP ETags
+- ETag is generated from R2 object MD5 hash (automatically computed by R2)
+- Store ETag from response header for conditional requests
 
 ### Get Public Entity
 
@@ -424,7 +446,9 @@ Authorization: Bearer <jwt_token>
 
 **GET** `/api/bundles/:typeId`
 
-Get platform entity bundle (includes authenticated visibility entities).
+Get platform entity bundle (includes authenticated visibility entities). Returns bundle for the user's **highest membership key** based on their organization's `membershipTier`.
+
+**Supports ETag-based conditional requests** - send `If-None-Match` header to check if bundle has changed.
 
 **Path Parameters:**
 - `typeId` (required) - Entity type ID
@@ -432,9 +456,26 @@ Get platform entity bundle (includes authenticated visibility entities).
 **Headers:**
 ```
 Authorization: Bearer <jwt_token>
+If-None-Match: "etag-value" (optional - for conditional requests)
 ```
 
-**Response:** Same format as public bundle
+**Response Headers:**
+```
+ETag: "etag-value"
+Cache-Control: public, max-age=300
+```
+
+**Response (200 OK):** Same format as public bundle (no `version` field)
+
+**Response (304 Not Modified):**
+If `If-None-Match` header matches the current bundle ETag, returns:
+- Status: `304 Not Modified`
+- No response body
+- ETag header included
+
+**Notes:**
+- Bundles do NOT have version numbers - change detection uses HTTP ETags
+- Store ETag from response header for conditional requests
 
 ### Get Global Entity
 
@@ -1059,6 +1100,8 @@ Get organization-specific entity bundle. Returns either:
 
 The bundle type is determined by the user's role in the organization. Org bundles include all fields since it's the organization's own content.
 
+**Supports ETag-based conditional requests** - send `If-None-Match` header to check if bundle has changed.
+
 **Path Parameters:**
 - `orgId` (required) - Organization ID
 - `typeId` (required) - Entity type ID
@@ -1066,9 +1109,26 @@ The bundle type is determined by the user's role in the organization. Org bundle
 **Headers:**
 ```
 Authorization: Bearer <jwt_token>
+If-None-Match: "etag-value" (optional - for conditional requests)
 ```
 
-**Response:** Same format as public bundle, but scoped to the organization with all fields included
+**Response Headers:**
+```
+ETag: "etag-value"
+Cache-Control: private, max-age=300
+```
+
+**Response (200 OK):** Same format as public bundle (no `version` field), but scoped to the organization with all fields included
+
+**Response (304 Not Modified):**
+If `If-None-Match` header matches the current bundle ETag, returns:
+- Status: `304 Not Modified`
+- No response body
+- ETag header included
+
+**Notes:**
+- Bundles do NOT have version numbers - change detection uses HTTP ETags
+- Cache-Control is `private` (not `public`) for org bundles
 
 ### List Organization Users
 
@@ -1802,8 +1862,9 @@ Authorization: Bearer <jwt_token>
 - `typeId` - Entity type ID
 - `generatedAt` - ISO 8601 timestamp when bundle was generated
 - `size` - File size in bytes
-- `version` - Bundle version number (increments on entity changes)
 - `entityCount` - Number of entities in the bundle
+
+**Note:** Bundles do NOT have version numbers in the response - change detection uses HTTP ETags instead. The `/api/super/bundles` endpoint may include version metadata for listing purposes, but bundle JSON responses do not include a `version` field.
 
 **Error Responses:**
 - `401` - Unauthorized (missing or invalid token)
@@ -1953,6 +2014,51 @@ The API uses CASL (Code Access Security Layer) for fine-grained authorization. A
 | Superadmin | manage all | manage all | manage all | manage all |
 | Org Admin | manage (own org) | read, create, update (own org) | read | read |
 | Org Member | read (own org) | read (own org) | read | read |
+
+### R2 Storage Access (CASL-Protected)
+
+**CRITICAL SECURITY**: All R2 storage access is CASL-protected. There is no way to bypass CASL authorization when accessing R2.
+
+**Single-Function Access Layer:**
+- All R2 operations must use CASL-aware functions from `lib/r2.ts`
+- Direct bucket operations (`bucket.get()`, `bucket.put()`, etc.) are **forbidden** outside the CASL layer
+- The CASL layer enforces permissions before any R2 operation executes
+
+**CASL-Aware R2 Functions:**
+All routes and helpers must use these functions (imported from `lib/r2.ts`):
+
+- `readJSON<T>(bucket, path, ability, action?, subject?)` - Read JSON with CASL check
+- `readJSONWithEtag<T>(bucket, path, ability, action?, subject?)` - Read JSON with ETag
+- `writeJSON<T>(bucket, path, data, ability, metadata?, action?, subject?)` - Write JSON with CASL check + auto bundle invalidation
+- `deleteFile(bucket, path, ability, action?, subject?)` - Delete file with CASL check
+- `fileExists(bucket, path, ability)` - Check existence with CASL check
+- `headFile(bucket, path, ability)` - Get metadata with CASL check
+- `listFiles(bucket, prefix, ability, limit?)` - List files with CASL check
+- `listFilesPaginated(bucket, prefix, ability, options?)` - List with pagination + CASL check
+- `writeFile(bucket, path, data, ability, metadata?, contentType?)` - Write binary files with CASL check
+- `readFile(bucket, path, ability)` - Read binary files with CASL check
+- `checkETag(bucket, path, ability)` - Low-cost ETag check with CASL check
+
+**Path-to-Permission Mapping:**
+The CASL layer automatically maps R2 paths to subjects:
+- `entities/` and `stubs/` → `Entity` subject
+- `entity-types/` → `EntityType` subject
+- `orgs/*/profile.json` → `Organization` subject
+- `orgs/*/users/*` → `User` subject
+- `bundles/` → `Entity` subject (bundles contain entities)
+- `manifests/` → `Platform` subject
+- `uploads/` → `Platform` subject (file management)
+- `config/` and `secret/` → `Platform` subject (system config)
+
+**Defense in Depth:**
+1. **Route Level**: `requireAbility()` middleware checks permissions before route handlers
+2. **R2 Level**: CASL-aware functions verify permissions again before R2 operations
+3. **Automatic Bundle Invalidation**: `writeJSON()` automatically triggers bundle regeneration
+
+**Security Guarantee:**
+- No route or helper can bypass CASL - all R2 access requires valid `AppAbility`
+- Permission checks happen at the data access layer, not just route level
+- Even if route middleware is bypassed, R2 operations are still protected
 
 ---
 

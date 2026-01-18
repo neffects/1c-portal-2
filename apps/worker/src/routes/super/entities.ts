@@ -29,18 +29,22 @@ import type { BulkImportError } from '@1cc/shared';
 import { 
   readJSON, writeJSON, listFiles, deleteFile,
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath, 
-  getEntityTypePath, getOrgPermissionsPath, getBundlePath,
+  getEntityTypePath, getOrgPermissionsPath, getOrgProfilePath, getBundlePath,
   getOrgMemberBundlePath, getOrgAdminBundlePath, getGlobalAdminBundlePath
 } from '../../lib/r2';
 import { regenerateEntityBundles, loadAppConfig } from '../../lib/bundle-invalidation';
-import { upsertSlugIndex, deleteSlugIndex } from '../../lib/slug-index';
+import { upsertSlugIndex, deleteSlugIndex, readSlugIndex } from '../../lib/slug-index';
+import { findOrgBySlug } from '../../lib/organizations';
 import { R2_PATHS } from '@1cc/shared';
 import { createEntityId } from '../../lib/id';
+import { requireAbility } from '../../middleware/casl';
+import type { AppAbility } from '../../lib/abilities';
 import { NotFoundError, ForbiddenError, ValidationError, AppError } from '../../middleware/error';
 import { validateEntityData, validateEntityFields, checkSlugUniqueness } from '../../lib/entity-validation';
 import type { 
   Entity, EntityStub, EntityLatestPointer, EntityType, EntityListItem,
-  EntityTypePermissions, VisibilityScope, EntityStatus, EntityBundle, BundleEntity
+  EntityTypePermissions, VisibilityScope, EntityStatus, EntityBundle, BundleEntity,
+  Organization
 } from '@1cc/shared';
 
 export const superEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -52,6 +56,7 @@ export const superEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables 
  * Uses bundles to aggregate entities (same approach as listing endpoint)
  */
 superEntityRoutes.get('/entities/export',
+  requireAbility('read', 'Entity'),
   zValidator('query', exportQuerySchema),
   async (c) => {
   console.log('[SuperEntities] Export handler called');
@@ -59,10 +64,19 @@ superEntityRoutes.get('/entities/export',
   const query = c.req.valid('query');
   console.log('[SuperEntities] Exporting entities for type:', query.typeId);
   
-  // Get entity type definition
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity type definition - CASL verifies superadmin can read entity types
   const entityType = await readJSON<EntityType>(
     c.env.R2_BUCKET,
-    getEntityTypePath(query.typeId)
+    getEntityTypePath(query.typeId),
+    ability,
+    'read',
+    'EntityType'
   );
   
   if (!entityType || !entityType.isActive) {
@@ -76,7 +90,7 @@ superEntityRoutes.get('/entities/export',
   console.log('[SuperEntities] Loading global bundles for export - type:', query.typeId);
   
   const publicBundlePath = getBundlePath('public', query.typeId);
-  const publicBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicBundlePath);
+  const publicBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicBundlePath, ability, 'read', 'Entity');
   if (publicBundle) {
     console.log('[SuperEntities] Loaded public bundle with', publicBundle.entities.length, 'entities');
     for (const bundleEntity of publicBundle.entities) {
@@ -91,7 +105,7 @@ superEntityRoutes.get('/entities/export',
   }
   
   const platformBundlePath = getBundlePath('platform', query.typeId);
-  const platformBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformBundlePath);
+  const platformBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformBundlePath, ability, 'read', 'Entity');
   if (platformBundle) {
     console.log('[SuperEntities] Loaded platform bundle with', platformBundle.entities.length, 'entities');
     for (const bundleEntity of platformBundle.entities) {
@@ -105,10 +119,45 @@ superEntityRoutes.get('/entities/export',
     }
   }
   
+  // Load global admin bundles (draft + deleted entities) for public and platform
+  // Admin bundles include all draft/deleted entities regardless of visibility
+  console.log('[SuperEntities] Loading global admin bundles for export - type:', query.typeId);
+  
+  const publicAdminBundlePath = getGlobalAdminBundlePath('public', query.typeId);
+  const publicAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicAdminBundlePath, ability, 'read', 'Entity');
+  if (publicAdminBundle) {
+    console.log('[SuperEntities] Loaded public admin bundle with', publicAdminBundle.entities.length, 'entities');
+    for (const bundleEntity of publicAdminBundle.entities) {
+      if (!bundleEntityMap.has(bundleEntity.id)) {
+        bundleEntityMap.set(bundleEntity.id, {
+          bundleEntity,
+          organizationId: null,
+          visibility: 'public'
+        });
+      }
+    }
+  }
+  
+  const platformAdminBundlePath = getGlobalAdminBundlePath('platform', query.typeId);
+  const platformAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformAdminBundlePath, ability, 'read', 'Entity');
+  if (platformAdminBundle) {
+    console.log('[SuperEntities] Loaded platform admin bundle with', platformAdminBundle.entities.length, 'entities');
+    for (const bundleEntity of platformAdminBundle.entities) {
+      if (!bundleEntityMap.has(bundleEntity.id)) {
+        bundleEntityMap.set(bundleEntity.id, {
+          bundleEntity,
+          organizationId: null,
+          visibility: 'authenticated'
+        });
+      }
+    }
+  }
+  
   // 2. Load all organization bundles
   console.log('[SuperEntities] Loading organization bundles for export - type:', query.typeId);
   
-  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+  // CASL verifies superadmin can list orgs
+  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`, ability);
   const orgIds = new Set<string>();
   
   // Extract organization IDs from file paths
@@ -123,9 +172,9 @@ superEntityRoutes.get('/entities/export',
   
   // Load all organization bundles first (don't filter inside the loop)
   for (const orgId of orgIds) {
-    // Load member bundle (published entities)
+    // Load member bundle (published entities) - CASL verifies superadmin can read org bundles
     const memberBundlePath = getOrgMemberBundlePath(orgId, query.typeId);
-    const memberBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, memberBundlePath);
+    const memberBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, memberBundlePath, ability, 'read', 'Entity');
     if (memberBundle) {
       console.log('[SuperEntities] Loaded member bundle for org', orgId, 'with', memberBundle.entities.length, 'entities');
       for (const bundleEntity of memberBundle.entities) {
@@ -140,8 +189,9 @@ superEntityRoutes.get('/entities/export',
     }
     
     // Load admin bundle (draft + deleted entities) - superadmins can see these
+    // CASL verifies superadmin can read org bundles
     const adminBundlePath = getOrgAdminBundlePath(orgId, query.typeId);
-    const adminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, adminBundlePath);
+    const adminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, adminBundlePath, ability, 'read', 'Entity');
     if (adminBundle) {
       console.log('[SuperEntities] Loaded admin bundle for org', orgId, 'with', adminBundle.entities.length, 'entities');
       for (const bundleEntity of adminBundle.entities) {
@@ -179,49 +229,95 @@ superEntityRoutes.get('/entities/export',
   // 4. Load full Entity objects from R2
   // Use latest pointer approach to get current version (bundles might have stale version)
   const entities: Entity[] = [];
+  const missingEntityIds: string[] = [];
+  
+  console.log('[SuperEntities] Attempting to load', filteredBundleEntities.length, 'entities from bundle entries');
+  console.log('[SuperEntities] Bundle entity IDs:', filteredBundleEntities.map(e => `${e.bundleEntity.id} (org: ${e.organizationId ?? 'null'})`).join(', '));
   
   for (const { bundleEntity, organizationId, visibility } of filteredBundleEntities) {
     let entity: Entity | null = null;
     let latestPointer: EntityLatestPointer | null = null;
     
-    // Get latest pointer to get current version
+    // Get latest pointer to get current version - CASL verifies superadmin can read entities
     if (organizationId === null) {
       // Global entity - try both public and authenticated paths (bundle might have wrong visibility)
       for (const checkVisibility of ['public', 'authenticated'] as const) {
         const latestPath = getEntityLatestPath(checkVisibility, bundleEntity.id, undefined);
-        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
         
         if (latestPointer) {
           const versionPath = getEntityVersionPath(checkVisibility, bundleEntity.id, latestPointer.version, undefined);
           console.log('[SuperEntities] Loading global entity:', bundleEntity.id, 'visibility:', checkVisibility, 'version:', latestPointer.version, 'path:', versionPath);
-          entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+          entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
           if (entity) break; // Found entity, stop searching
         }
       }
     } else {
-      // Org entity - always use members path
+      // Org entity - always use members path - CASL verifies superadmin can read org entities
       const latestPath = getEntityLatestPath('members', bundleEntity.id, organizationId);
-      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
       
       if (latestPointer) {
         const versionPath = getEntityVersionPath('members', bundleEntity.id, latestPointer.version, organizationId);
         console.log('[SuperEntities] Loading org entity:', bundleEntity.id, 'org:', organizationId, 'version:', latestPointer.version, 'path:', versionPath);
-        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
       }
     }
     
     if (entity) {
       entities.push(entity);
+      console.log('[SuperEntities] ✓ Successfully loaded entity:', bundleEntity.id, 'name:', bundleEntity.name);
     } else {
       const versionInfo = latestPointer ? `latest version ${latestPointer.version}` : 'no latest pointer';
-      console.warn('[SuperEntities] Entity file not found for bundle entity:', bundleEntity.id, 'org:', organizationId, versionInfo);
+      console.warn('[SuperEntities] ✗ Entity file not found for bundle entity:', bundleEntity.id, 'name:', bundleEntity.name, 'org:', organizationId, versionInfo);
+      missingEntityIds.push(bundleEntity.id);
     }
   }
   
   // Sort by createdAt
   entities.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   
+  // 5. Load organization slugs for all unique org IDs (for export)
+  console.log('[SuperEntities] Loading organization slugs for export');
+  const orgSlugMap = new Map<string, string>(); // orgId -> orgSlug
+  const uniqueOrgIds = new Set<string>();
+  for (const entity of entities) {
+    if (entity.organizationId !== null && entity.organizationId !== undefined) {
+      uniqueOrgIds.add(entity.organizationId);
+    }
+  }
+  
+  console.log('[SuperEntities] Found', uniqueOrgIds.size, 'unique organizations to load slugs for');
+  for (const orgId of uniqueOrgIds) {
+    try {
+      const orgPath = getOrgProfilePath(orgId);
+      // CASL verifies superadmin can read org profiles
+      const org = await readJSON<Organization>(c.env.R2_BUCKET, orgPath, ability, 'read', 'Organization');
+      if (org && org.slug) {
+        orgSlugMap.set(orgId, org.slug);
+        console.log('[SuperEntities] Loaded org slug for', orgId, ':', org.slug);
+      } else {
+        console.warn('[SuperEntities] Organization profile not found or missing slug for:', orgId);
+      }
+    } catch (error) {
+      console.warn('[SuperEntities] Error loading organization profile for', orgId, ':', error);
+    }
+  }
+  
+  // Add organization slugs to entities (computed field, not stored in entity)
+  const entitiesWithOrgSlugs = entities.map(entity => {
+    const orgSlug = entity.organizationId ? orgSlugMap.get(entity.organizationId) : undefined;
+    return {
+      ...entity,
+      organizationSlug: orgSlug || null // Add computed organization slug
+    };
+  });
+  
   console.log('[SuperEntities] Exporting', entities.length, 'entities for type:', query.typeId);
+  if (missingEntityIds.length > 0) {
+    console.warn('[SuperEntities] WARNING:', missingEntityIds.length, 'entity/entities from bundles had missing files and were skipped:', missingEntityIds.join(', '));
+    console.warn('[SuperEntities] This indicates a data integrity issue - entities exist in bundles but their data files are missing');
+  }
   if (entities.length > 0) {
     console.log('[SuperEntities] Entity IDs being exported:', entities.map(e => e.id));
     console.log('[SuperEntities] Entity names being exported:', entities.map(e => e.name));
@@ -240,11 +336,139 @@ superEntityRoutes.get('/entities/export',
         fields: entityType.fields,
         sections: entityType.sections
       },
-      entities,
+      entities: entitiesWithOrgSlugs, // Include organization slugs in export
       exportedAt: new Date().toISOString()
     }
   });
 });
+
+/**
+ * Resolve organization ID from slug or ID
+ * Returns organization ID if found, null if global entity, or undefined if not found
+ */
+async function resolveOrganizationId(
+  bucket: R2Bucket,
+  orgValue: string | null | undefined,
+  ability: AppAbility | null
+): Promise<string | null | undefined> {
+  console.log('[SuperEntities] Resolving organization ID from value:', orgValue);
+  
+  if (orgValue === null || orgValue === undefined || orgValue === '') {
+    console.log('[SuperEntities] Organization value is null/undefined/empty - treating as global entity');
+    return null; // Global entity
+  }
+  
+  // If it's a valid ID format (7 chars alphanumeric), use as-is
+  if (/^[a-z0-9]{7}$/.test(orgValue)) {
+    console.log('[SuperEntities] Organization value looks like ID format, verifying existence:', orgValue);
+    // Verify org exists by checking profile - CASL verifies access
+    const orgPath = getOrgProfilePath(orgValue);
+    const org = await readJSON<Organization>(bucket, orgPath, ability, 'read', 'Organization');
+    if (org) {
+      console.log('[SuperEntities] Organization ID verified:', orgValue, 'slug:', org.slug);
+      return orgValue;
+    }
+    console.warn('[SuperEntities] Organization ID not found:', orgValue);
+    return undefined;
+  }
+  
+  // Try slug lookup
+  console.log('[SuperEntities] Attempting slug lookup for:', orgValue);
+  const org = await findOrgBySlug(bucket, orgValue);
+  if (org) {
+    console.log('[SuperEntities] Organization found by slug:', orgValue, '->', org.id);
+    return org.id;
+  }
+  
+  console.warn('[SuperEntities] Organization not found by slug:', orgValue);
+  return undefined;
+}
+
+/**
+ * Find entity by ID or slug
+ * Returns entity and entityId if found, null values if not found
+ */
+async function findEntityByIdOrSlug(
+  bucket: R2Bucket,
+  entityTypeId: string,
+  organizationId: string | null,
+  entityValue: string,
+  ability: AppAbility | null
+): Promise<{ entity: Entity | null; entityId: string | null }> {
+  console.log('[SuperEntities] Finding entity by ID or slug:', entityValue, 'type:', entityTypeId, 'org:', organizationId);
+  
+  // Try ID first (7 chars alphanumeric)
+  if (/^[a-z0-9]{7}$/.test(entityValue)) {
+    console.log('[SuperEntities] Entity value looks like ID format, checking stub:', entityValue);
+    const stub = await readJSON<EntityStub>(bucket, getEntityStubPath(entityValue), ability, 'read', 'Entity');
+    if (stub && stub.entityTypeId === entityTypeId) {
+      // Load entity to verify org matches - CASL verifies access
+      let latestPointer: EntityLatestPointer | null = null;
+      if (stub.organizationId === null) {
+        for (const visibility of ['public', 'authenticated'] as const) {
+          const latestPath = getEntityLatestPath(visibility, entityValue, undefined);
+          latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath, ability, 'read', 'Entity');
+          if (latestPointer) break;
+        }
+      } else {
+        const latestPath = getEntityLatestPath('members', entityValue, stub.organizationId);
+        latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath, ability, 'read', 'Entity');
+      }
+      
+      if (latestPointer) {
+        const storageVisibility: VisibilityScope = stub.organizationId === null 
+          ? latestPointer.visibility 
+          : 'members';
+        const entityPath = getEntityVersionPath(storageVisibility, entityValue, latestPointer.version, stub.organizationId || undefined);
+        const entity = await readJSON<Entity>(bucket, entityPath, ability, 'read', 'Entity');
+        if (entity && entity.organizationId === organizationId) {
+          console.log('[SuperEntities] Entity found by ID:', entityValue, 'name:', entity.name);
+          return { entity, entityId: entityValue };
+        } else if (entity && entity.organizationId !== organizationId) {
+          console.warn('[SuperEntities] Entity ID found but organization mismatch:', entityValue, 'expected org:', organizationId, 'actual org:', entity.organizationId);
+        }
+      }
+    } else if (stub && stub.entityTypeId !== entityTypeId) {
+      console.warn('[SuperEntities] Entity ID found but entity type mismatch:', entityValue, 'expected type:', entityTypeId, 'actual type:', stub.entityTypeId);
+    }
+  }
+  
+  // Try slug lookup using slug index (only for org entities - global entities don't have slug index)
+  if (organizationId !== null && organizationId !== undefined) {
+    console.log('[SuperEntities] Attempting slug lookup for org entity:', entityValue, 'org:', organizationId);
+    const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(entityTypeId), ability, 'read', 'EntityType');
+    if (entityType) {
+      const slugIndex = await readSlugIndex(bucket, organizationId, entityType.slug, entityValue, ability);
+      if (slugIndex && slugIndex.entityId) {
+        console.log('[SuperEntities] Slug index found for:', entityValue, '-> entity ID:', slugIndex.entityId);
+        // Load entity by ID from slug index - CASL verifies access
+        const stub = await readJSON<EntityStub>(bucket, getEntityStubPath(slugIndex.entityId), ability, 'read', 'Entity');
+        if (stub && stub.entityTypeId === entityTypeId && stub.organizationId === organizationId) {
+          // Load full entity - CASL verifies access
+          let latestPointer: EntityLatestPointer | null = null;
+          const latestPath = getEntityLatestPath('members', slugIndex.entityId, organizationId);
+          latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath, ability, 'read', 'Entity');
+          
+          if (latestPointer) {
+            const entityPath = getEntityVersionPath('members', slugIndex.entityId, latestPointer.version, organizationId);
+            const entity = await readJSON<Entity>(bucket, entityPath, ability, 'read', 'Entity');
+            if (entity) {
+              console.log('[SuperEntities] Entity found by slug:', entityValue, '-> entity ID:', slugIndex.entityId, 'name:', entity.name);
+              return { entity, entityId: slugIndex.entityId };
+            }
+          }
+        } else {
+          console.warn('[SuperEntities] Slug index found but entity stub mismatch:', entityValue);
+        }
+      }
+    }
+  } else {
+    console.log('[SuperEntities] Global entities do not support slug lookup (slug index only for org entities)');
+  }
+  
+  console.log('[SuperEntities] Entity not found by ID or slug:', entityValue);
+  return { entity: null, entityId: null };
+}
 
 /**
  * POST /entities/bulk-import
@@ -253,38 +477,63 @@ superEntityRoutes.get('/entities/export',
  * Supports per-row organizationId, slug, and entity ID for versioning
  */
 superEntityRoutes.post('/entities/bulk-import',
+  requireAbility('create', 'Entity'),
   zValidator('json', bulkImportRequestSchema),
   async (c) => {
   console.log('[SuperEntities] Bulk importing entities');
   
-  const { entityTypeId, organizationId: defaultOrgId, entities: importEntities } = c.req.valid('json');
+  const { 
+    entityTypeId, 
+    organizationId: defaultOrgId, 
+    importMode = 'add-new',
+    updateMode = 'increment-version',
+    entities: importEntities 
+  } = c.req.valid('json');
   const userId = c.get('userId')!;
   
-  // Get entity type definition
+  console.log('[SuperEntities] Import mode:', importMode, 'Update mode:', updateMode);
+  
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity type definition - CASL verifies superadmin can read entity types
   const entityType = await readJSON<EntityType>(
     c.env.R2_BUCKET,
-    getEntityTypePath(entityTypeId)
+    getEntityTypePath(entityTypeId),
+    ability,
+    'read',
+    'EntityType'
   );
   
   if (!entityType || !entityType.isActive) {
     throw new NotFoundError('Entity Type', entityTypeId);
   }
   
-  // Collect unique organization IDs from all entities for permission validation
-  const uniqueOrgIds = new Set<string>();
-  for (const entity of importEntities) {
-    // Per-row organizationId takes precedence over default
-    const orgId = entity.organizationId !== undefined ? entity.organizationId : defaultOrgId;
-    if (orgId !== null && orgId !== undefined) {
-      uniqueOrgIds.add(orgId);
+  // Resolve default organization ID (if provided as slug or ID)
+  let resolvedDefaultOrgId: string | null | undefined;
+  if (defaultOrgId !== undefined) {
+    resolvedDefaultOrgId = await resolveOrganizationId(c.env.R2_BUCKET, defaultOrgId, ability);
+    if (resolvedDefaultOrgId === undefined) {
+      console.warn('[SuperEntities] Default organization not found:', defaultOrgId, '- treating as null');
+      resolvedDefaultOrgId = null;
     }
   }
   
-  // Check organization permissions for all unique orgs
+  // Collect unique organization IDs from all entities for permission validation
+  // Note: We'll resolve org slugs in the validation loop
+  const uniqueOrgIds = new Set<string>();
+  
+  // Check organization permissions for all unique orgs - CASL verifies access
   for (const orgId of uniqueOrgIds) {
     const permissions = await readJSON<EntityTypePermissions>(
       c.env.R2_BUCKET,
-      getOrgPermissionsPath(orgId)
+      getOrgPermissionsPath(orgId),
+      ability,
+      'read',
+      'Organization'
     );
     
     if (!permissions?.creatable.includes(entityTypeId)) {
@@ -307,6 +556,7 @@ superEntityRoutes.post('/entities/bulk-import',
     entityId?: string;
     existingEntity?: Entity;
     existingVersion?: number;
+    updateMode: 'in-place' | 'increment-version'; // Update mode for this entity
   };
   
   const validatedEntities: ValidatedEntity[] = [];
@@ -315,24 +565,24 @@ superEntityRoutes.post('/entities/bulk-import',
   const existingSlugs = new Map<string, string>(); // key: "orgId|slug", value: entityId that owns it
   const batchNewSlugs = new Map<string, number>(); // key: "orgId|slug", value: row index
   
-  // First pass: Load existing slugs for this entity type
-  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
+  // First pass: Load existing slugs for this entity type - CASL verifies access
+  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`, ability);
   for (const stubFile of stubFiles) {
     if (!stubFile.endsWith('.json')) continue;
-    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile);
+    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile, ability, 'read', 'Entity');
     if (!stub || stub.entityTypeId !== entityTypeId) continue;
     
-    // Get entity to read its slug
+    // Get entity to read its slug - CASL verifies access
     let latestPointer: EntityLatestPointer | null = null;
     if (stub.organizationId === null) {
       for (const visibility of ['public', 'authenticated'] as const) {
         const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
-        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
         if (latestPointer) break;
       }
     } else {
       const latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
-      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
     }
     
     if (latestPointer) {
@@ -340,7 +590,7 @@ superEntityRoutes.post('/entities/bulk-import',
         ? latestPointer.visibility 
         : 'members';
       const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
-      const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
+      const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath, ability, 'read', 'Entity');
       if (entity) {
         // Slug is stored at top-level
         const entitySlug = entity.slug || '';
@@ -353,77 +603,159 @@ superEntityRoutes.post('/entities/bulk-import',
   for (let i = 0; i < importEntities.length; i++) {
     const importEntity = importEntities[i];
     
-    // Determine organization for this entity (per-row takes precedence)
-    const entityOrgId = importEntity.organizationId !== undefined 
-      ? importEntity.organizationId 
-      : (defaultOrgId ?? null);
+    // Resolve organization ID (per-row takes precedence, support slug or ID)
+    let entityOrgId: string | null | undefined;
+    if (importEntity.organizationId !== undefined) {
+      // Use organizationId if provided
+      entityOrgId = await resolveOrganizationId(c.env.R2_BUCKET, importEntity.organizationId, ability);
+    } else if (importEntity.organizationSlug !== undefined && importEntity.organizationSlug !== '') {
+      // Use organizationSlug if provided and organizationId is not
+      entityOrgId = await resolveOrganizationId(c.env.R2_BUCKET, importEntity.organizationSlug, ability);
+    } else {
+      // Use default
+      entityOrgId = resolvedDefaultOrgId ?? null;
+    }
     
-    // Check if entity ID is provided
+    if (entityOrgId === undefined) {
+      // Organization not found (only happens when orgSlug/orgId was provided but invalid)
+      const orgValue = importEntity.organizationId || importEntity.organizationSlug;
+      validationErrors.push({
+        rowIndex: i,
+        field: importEntity.organizationSlug ? 'organizationSlug' : 'organizationId',
+        message: `Organization not found: ${orgValue}`
+      });
+      continue;
+    }
+    
+    // Add to unique org IDs set for permission check
+    if (entityOrgId !== null) {
+      uniqueOrgIds.add(entityOrgId);
+    }
+    
+    // Determine update mode for this entity (per-entity override or global default)
+    const entityUpdateMode = importEntity.updateMode || updateMode;
+    
+    // Check if entity ID or slug is provided for lookup
     const providedId = importEntity.id;
+    const providedSlug = importEntity.slug;
     let mode: 'create' | 'update' | 'create-with-id' = 'create';
     let existingEntity: Entity | undefined;
     let existingVersion: number | undefined;
+    let resolvedEntityId: string | undefined;
     
+    // Try to find entity by ID or slug
     if (providedId) {
-      // Check if entity exists
-      const existingStub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(providedId));
+      // Try ID first
+      const { entity: foundEntity, entityId: foundId } = await findEntityByIdOrSlug(
+        c.env.R2_BUCKET,
+        entityTypeId,
+        entityOrgId,
+        providedId,
+        ability
+      );
       
-      if (existingStub) {
+      if (foundEntity && foundId) {
         // Entity exists - this is an update
         mode = 'update';
+        existingEntity = foundEntity;
+        resolvedEntityId = foundId;
         
-        // Verify entity type matches
-        if (existingStub.entityTypeId !== entityTypeId) {
-          validationErrors.push({
-            rowIndex: i,
-            field: 'id',
-            message: `Entity ${providedId} belongs to a different entity type`
-          });
-          continue;
-        }
-        
-        // Get current entity for update
+        // Get current version - CASL verifies access
         let latestPointer: EntityLatestPointer | null = null;
-        if (existingStub.organizationId === null) {
+        if (foundEntity.organizationId === null) {
           for (const visibility of ['public', 'authenticated'] as const) {
-            const latestPath = getEntityLatestPath(visibility, providedId, undefined);
-            latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+            const latestPath = getEntityLatestPath(visibility, foundId, undefined);
+            latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
             if (latestPointer) break;
           }
         } else {
-          const latestPath = getEntityLatestPath('members', providedId, existingStub.organizationId);
-          latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+          const latestPath = getEntityLatestPath('members', foundId, foundEntity.organizationId);
+          latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
         }
         
-        if (!latestPointer) {
-          validationErrors.push({
-            rowIndex: i,
-            field: 'id',
-            message: `Entity ${providedId} not found (corrupted state)`
-          });
-          continue;
-        }
-        
-        existingVersion = latestPointer.version;
-        
-        // Get current entity data
-        const storageVisibility: VisibilityScope = existingStub.organizationId === null 
-          ? latestPointer.visibility 
-          : 'members';
-        const entityPath = getEntityVersionPath(storageVisibility, providedId, latestPointer.version, existingStub.organizationId || undefined);
-        existingEntity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath) || undefined;
-        
-        if (!existingEntity) {
-          validationErrors.push({
-            rowIndex: i,
-            field: 'id',
-            message: `Entity ${providedId} version ${latestPointer.version} not found`
-          });
-          continue;
+        if (latestPointer) {
+          existingVersion = latestPointer.version;
         }
       } else {
         // Entity doesn't exist - create with this specific ID
         mode = 'create-with-id';
+        resolvedEntityId = providedId;
+      }
+    } else if (providedSlug && entityOrgId !== null) {
+      // Try slug lookup (only for org entities - global entities don't support slug lookup)
+      const { entity: foundEntity, entityId: foundId } = await findEntityByIdOrSlug(
+        c.env.R2_BUCKET,
+        entityTypeId,
+        entityOrgId,
+        providedSlug,
+        ability
+      );
+      
+      if (foundEntity && foundId) {
+        // Entity exists - this is an update
+        mode = 'update';
+        existingEntity = foundEntity;
+        resolvedEntityId = foundId;
+        
+        // Get current version - CASL verifies access
+        const latestPath = getEntityLatestPath('members', foundId, entityOrgId);
+        const latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+        if (latestPointer) {
+          existingVersion = latestPointer.version;
+        }
+      }
+    }
+    
+    // Handle import mode restrictions
+    if (importMode === 'update' && mode !== 'update') {
+      // Update mode requires entity to exist
+      if (!providedId && !providedSlug) {
+        validationErrors.push({
+          rowIndex: i,
+          field: 'id',
+          message: 'Entity ID or slug is required in update mode'
+        });
+        continue;
+      }
+      validationErrors.push({
+        rowIndex: i,
+        field: providedId ? 'id' : 'slug',
+        message: `Entity not found: ${providedId || providedSlug} (update mode requires existing entity)`
+      });
+      continue;
+    }
+    
+    if (importMode === 'add-new' && mode === 'update') {
+      // Add-new mode doesn't allow updates - check shouldUpdate flag
+      if (!importEntity.shouldUpdate) {
+        // Create new entity with different slug/ID
+        mode = 'create';
+        existingEntity = undefined;
+        existingVersion = undefined;
+        resolvedEntityId = undefined;
+      } else {
+        // shouldUpdate=true allows update even in add-new mode (mixed behavior)
+        // Keep update mode
+      }
+    }
+    
+    // Handle mixed mode with shouldUpdate flag
+    if (importMode === 'mixed') {
+      if (importEntity.shouldUpdate && mode !== 'update') {
+        // shouldUpdate=true but entity doesn't exist
+        validationErrors.push({
+          rowIndex: i,
+          field: 'id',
+          message: `Entity not found: ${providedId || providedSlug || 'N/A'} (shouldUpdate=true requires existing entity)`
+        });
+        continue;
+      }
+      if (!importEntity.shouldUpdate && mode === 'update') {
+        // shouldUpdate=false but entity exists - create new instead
+        mode = 'create';
+        existingEntity = undefined;
+        existingVersion = undefined;
+        resolvedEntityId = undefined;
       }
     }
     
@@ -519,7 +851,7 @@ superEntityRoutes.post('/entities/bulk-import',
         
         // Check against existing slugs in database
         const existingOwner = existingSlugs.get(slugKey);
-        if (existingOwner && existingOwner !== providedId) {
+        if (existingOwner && existingOwner !== resolvedEntityId) {
           validationErrors.push({
             rowIndex: i,
             field: 'slug',
@@ -551,9 +883,10 @@ superEntityRoutes.post('/entities/bulk-import',
         slug: slug.trim(),
         organizationId: entityOrgId,
         mode,
-        entityId: providedId,
+        entityId: resolvedEntityId,
         existingEntity,
-        existingVersion
+        existingVersion,
+        updateMode: entityUpdateMode
       });
     } catch (error) {
       if (error instanceof ValidationError) {
@@ -597,37 +930,71 @@ superEntityRoutes.post('/entities/bulk-import',
   
   for (const validated of validatedEntities) {
     if (validated.mode === 'update' && validated.existingEntity && validated.existingVersion !== undefined) {
-      // Update existing entity - create new version
-      const newVersion = validated.existingVersion + 1;
-      
-      const updatedEntity: Entity = {
-        ...validated.existingEntity,
-        version: newVersion,
-        visibility: validated.visibility,
-        name: validated.name,
-        slug: validated.slug,
-        data: validated.data, // Dynamic fields only (name and slug removed)
-        updatedAt: now,
-        updatedBy: userId
-      };
-      
-      // Write new version
+      // Update existing entity
       const storageVisibility: VisibilityScope = validated.organizationId === null ? validated.visibility : 'members';
-      const versionPath = getEntityVersionPath(storageVisibility, validated.entityId!, newVersion, validated.organizationId || undefined);
-      await writeJSON(c.env.R2_BUCKET, versionPath, updatedEntity);
+      const entityId = validated.entityId!;
       
-      // Update latest pointer
-      const latestPointer: EntityLatestPointer = {
-        version: newVersion,
-        status: validated.existingEntity.status, // Keep existing status
-        visibility: validated.visibility,
-        updatedAt: now
-      };
+      if (validated.updateMode === 'in-place') {
+        // Update in-place: overwrite existing version
+        console.log('[SuperEntities] Updating entity in-place:', entityId, 'version:', validated.existingVersion);
+        
+        const updatedEntity: Entity = {
+          ...validated.existingEntity,
+          version: validated.existingVersion, // Keep same version
+          visibility: validated.visibility,
+          name: validated.name,
+          slug: validated.slug,
+          data: validated.data, // Dynamic fields only (name and slug removed)
+          updatedAt: now, // Update timestamp
+          updatedBy: userId
+        };
+        
+        // Overwrite existing version file - CASL verifies superadmin can write entities
+        const versionPath = getEntityVersionPath(storageVisibility, entityId, validated.existingVersion, validated.organizationId || undefined);
+        await writeJSON(c.env.R2_BUCKET, versionPath, updatedEntity, ability);
+        
+        // Update latest pointer (version unchanged) - CASL verifies superadmin can write entities
+        const latestPath = getEntityLatestPath(storageVisibility, entityId, validated.organizationId || undefined);
+        const currentPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+        const latestPointer: EntityLatestPointer = {
+          ...currentPointer!,
+          visibility: validated.visibility,
+          updatedAt: now
+        };
+        await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer, ability);
+      } else {
+        // Increment version: create new version (current behavior)
+        console.log('[SuperEntities] Updating entity with new version:', entityId, 'from version:', validated.existingVersion);
+        const newVersion = validated.existingVersion + 1;
+        
+        const updatedEntity: Entity = {
+          ...validated.existingEntity,
+          version: newVersion,
+          visibility: validated.visibility,
+          name: validated.name,
+          slug: validated.slug,
+          data: validated.data, // Dynamic fields only (name and slug removed)
+          updatedAt: now,
+          updatedBy: userId
+        };
+        
+        // Write new version - CASL verifies superadmin can write entities
+        const versionPath = getEntityVersionPath(storageVisibility, entityId, newVersion, validated.organizationId || undefined);
+        await writeJSON(c.env.R2_BUCKET, versionPath, updatedEntity, ability);
+        
+        // Update latest pointer - CASL verifies superadmin can write entities
+        const latestPointer: EntityLatestPointer = {
+          version: newVersion,
+          status: validated.existingEntity.status, // Keep existing status
+          visibility: validated.visibility,
+          updatedAt: now
+        };
+        
+        const latestPath = getEntityLatestPath(storageVisibility, entityId, validated.organizationId || undefined);
+        await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer, ability);
+      }
       
-      const latestPath = getEntityLatestPath(storageVisibility, validated.entityId!, validated.organizationId || undefined);
-      await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
-      
-      updatedIds.push(validated.entityId!);
+      updatedIds.push(entityId);
     } else {
       // Create new entity (with generated ID or specific ID)
       const entityId = validated.entityId || createEntityId();
@@ -656,14 +1023,15 @@ superEntityRoutes.post('/entities/bulk-import',
         createdAt: now
       };
       
-      await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub);
+      // CASL verifies superadmin can write entities
+      await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub, ability);
       
-      // Write entity version
+      // Write entity version - CASL verifies superadmin can write entities
       const storageVisibility: VisibilityScope = validated.organizationId === null ? validated.visibility : 'members';
       const versionPath = getEntityVersionPath(storageVisibility, entityId, 1, validated.organizationId || undefined);
-      await writeJSON(c.env.R2_BUCKET, versionPath, entity);
+      await writeJSON(c.env.R2_BUCKET, versionPath, entity, ability);
       
-      // Write latest pointer
+      // Write latest pointer - CASL verifies superadmin can write entities
       const latestPointer: EntityLatestPointer = {
         version: 1,
         status: 'draft',
@@ -672,7 +1040,7 @@ superEntityRoutes.post('/entities/bulk-import',
       };
       
       const latestPath = getEntityLatestPath(storageVisibility, entityId, validated.organizationId || undefined);
-      await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
+      await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer, ability);
       
       createdIds.push(entityId);
     }
@@ -723,6 +1091,7 @@ superEntityRoutes.post('/entities/bulk-import',
  * - organizationId: string | null (optional) - null for global entities
  */
 superEntityRoutes.post('/entities',
+  requireAbility('create', 'Entity'),
   zValidator('json', createEntityRequestSchema),
   async (c) => {
   const { entityTypeId, name, slug, data, visibility, organizationId: requestedOrgId } = c.req.valid('json');
@@ -733,8 +1102,14 @@ superEntityRoutes.post('/entities',
   // Superadmins can create global entities (null orgId) or entities in any org
   const targetOrgId: string | null = requestedOrgId ?? null;
   
-  // Get entity type
-  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entityTypeId));
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity type - CASL verifies superadmin can read entity types
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entityTypeId), ability, 'read', 'EntityType');
   if (!entityType || !entityType.isActive) {
     throw new NotFoundError('Entity Type', entityTypeId);
   }
@@ -755,12 +1130,13 @@ superEntityRoutes.post('/entities',
   
   const entityId = createEntityId();
   
-  // Check slug uniqueness
+  // Check slug uniqueness (uses slug index - O(1) check)
   await checkSlugUniqueness(
     c.env.R2_BUCKET,
     entityTypeId,
     targetOrgId,
-    slug.trim()
+    slug.trim(),
+    ability
   );
   
   const now = new Date().toISOString();
@@ -789,12 +1165,13 @@ superEntityRoutes.post('/entities',
     createdAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub);
+  // CASL verifies superadmin can write entities
+  await writeJSON(c.env.R2_BUCKET, getEntityStubPath(entityId), stub, ability);
   
   // For global entities, use visibility-based path; for org entities, use members path
   const storageVisibility: VisibilityScope = targetOrgId === null ? finalVisibility : 'members';
   const versionPath = getEntityVersionPath(storageVisibility, entityId, 1, targetOrgId || undefined);
-  await writeJSON(c.env.R2_BUCKET, versionPath, entity);
+  await writeJSON(c.env.R2_BUCKET, versionPath, entity, ability);
   
   const latestPointer = {
     version: 1,
@@ -804,7 +1181,7 @@ superEntityRoutes.post('/entities',
   };
   
   const latestPath = getEntityLatestPath(storageVisibility, entityId, targetOrgId || undefined);
-  await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer);
+  await writeJSON(c.env.R2_BUCKET, latestPath, latestPointer, ability);
   
   // Create slug index for public entities
   if (finalVisibility === 'public') {
@@ -833,16 +1210,22 @@ superEntityRoutes.post('/entities',
  * Get any entity by ID (superadmin can access global and org-scoped entities)
  * Falls back to searching bundles if stub lookup fails
  */
-superEntityRoutes.get('/entities/:id', async (c) => {
+superEntityRoutes.get('/entities/:id', requireAbility('read', 'Entity'), async (c) => {
   const entityId = c.req.param('id');
   
   console.log('[SuperEntities] GET /entities/:id handler called for entity:', entityId);
   console.log('[SuperEntities] Request path:', c.req.path);
   
-  // Get entity stub to determine organization
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity stub to determine organization - CASL verifies superadmin can read entities
   const stubPath = getEntityStubPath(entityId);
   console.log('[SuperEntities] Checking stub at path:', stubPath);
-  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath, ability, 'read', 'Entity');
   
   if (!stub) {
     console.error('[SuperEntities] Entity stub not found at path:', stubPath, 'for entity:', entityId);
@@ -857,16 +1240,17 @@ superEntityRoutes.get('/entities/:id', async (c) => {
   
   if (orgId === null) {
     // Global entity - try authenticated (platform/) path first, then public/
+    // CASL verifies superadmin can read entities
     console.log('[SuperEntities] Checking global entity paths for:', entityId);
     for (const visibility of ['authenticated', 'public'] as const) {
       const latestPath = getEntityLatestPath(visibility, entityId, undefined);
       console.log('[SuperEntities] Checking global path:', latestPath);
-      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
       
       if (latestPointer) {
         const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
         console.log('[SuperEntities] Loading entity from version path:', versionPath);
-        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
         
         if (entity) {
           console.log('[SuperEntities] Global entity found in', visibility, 'path');
@@ -876,14 +1260,15 @@ superEntityRoutes.get('/entities/:id', async (c) => {
     }
   } else {
     // Org-scoped entity - try members path (most common for org entities)
+    // CASL verifies superadmin can read org entities
     const latestPath = getEntityLatestPath('members', entityId, orgId!);
     console.log('[SuperEntities] Checking org entity path:', latestPath, 'for org:', orgId);
-    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
     
     if (latestPointer) {
       const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
       console.log('[SuperEntities] Loading org entity from version path:', versionPath);
-      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
       if (entity) {
         console.log('[SuperEntities] Org entity found for org:', orgId);
       } else {
@@ -917,6 +1302,7 @@ superEntityRoutes.get('/entities/:id', async (c) => {
  * Update any entity by ID (superadmin can update global and org-scoped entities)
  */
 superEntityRoutes.patch('/entities/:id',
+  requireAbility('update', 'Entity'),
   zValidator('json', updateEntityRequestSchema),
   async (c) => {
   const entityId = c.req.param('id');
@@ -925,9 +1311,15 @@ superEntityRoutes.patch('/entities/:id',
   
   console.log('[SuperEntities] PATCH /entities/:id -', entityId);
   
-  // Get entity stub to determine organization
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity stub to determine organization - CASL verifies superadmin can read entities
   const stubPath = getEntityStubPath(entityId);
-  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath, ability, 'read', 'Entity');
   
   if (!stub) {
     console.log('[SuperEntities] Entity stub not found:', entityId);
@@ -942,13 +1334,14 @@ superEntityRoutes.patch('/entities/:id',
   
   if (orgId === null) {
     // Global entity - try authenticated (platform/) path first, then public/
+    // CASL verifies superadmin can read entities
     for (const visibility of ['authenticated', 'public'] as const) {
       latestPath = getEntityLatestPath(visibility, entityId, undefined);
-      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
       
       if (latestPointer) {
         const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
-        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
         
         if (entity) {
           storageVisibility = visibility;
@@ -960,13 +1353,13 @@ superEntityRoutes.patch('/entities/:id',
     // Re-set latestPath for global entity updates
     latestPath = getEntityLatestPath(storageVisibility, entityId, undefined);
   } else {
-    // Org-scoped entity - try members path
+    // Org-scoped entity - try members path - CASL verifies superadmin can read org entities
     latestPath = getEntityLatestPath('members', entityId, orgId);
-    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
     
     if (latestPointer) {
       const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
-      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
       storageVisibility = 'members';
       console.log('[SuperEntities] Org entity found for org:', orgId);
     }
@@ -982,8 +1375,8 @@ superEntityRoutes.patch('/entities/:id',
     throw new AppError('INVALID_STATUS', 'Only draft entities can be edited', 400);
   }
   
-  // Get entity type for validation
-  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entity.entityTypeId));
+  // Get entity type for validation - CASL verifies superadmin can read entity types
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(entity.entityTypeId), ability, 'read', 'EntityType');
   
   if (!entityType) {
     throw new NotFoundError('Entity Type', entity.entityTypeId);
@@ -1020,11 +1413,11 @@ superEntityRoutes.patch('/entities/:id',
     updatedBy: userId
   };
   
-  // Write new version
+  // Write new version - CASL verifies superadmin can update entities
   const newVersionPath = getEntityVersionPath(storageVisibility, entityId, newVersion, orgId || undefined);
-  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
+  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity, ability);
   
-  // Update latest pointer
+  // Update latest pointer - CASL verifies superadmin can update entities
   const newPointer: EntityLatestPointer = {
     version: newVersion,
     status: updatedEntity.status,
@@ -1032,7 +1425,7 @@ superEntityRoutes.patch('/entities/:id',
     updatedAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer, ability);
   
   // Update slug index if visibility is public and slug changed
   const currentSlug = entity.slug;
@@ -1085,6 +1478,7 @@ superEntityRoutes.patch('/entities/:id',
  *   Removes ALL entity files from R2: stub, latest pointer, all versions, slug index
  */
 superEntityRoutes.post('/entities/:id/transition',
+  requireAbility('approve', 'Entity'),
   zValidator('json', entityTransitionRequestSchema),
   async (c) => {
   const entityId = c.req.param('id');
@@ -1093,9 +1487,15 @@ superEntityRoutes.post('/entities/:id/transition',
   
   console.log('[SuperEntities] POST /entities/:id/transition -', entityId, 'action:', action);
   
-  // Get entity stub to determine organization
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get entity stub to determine organization - CASL verifies superadmin can read entities
   const stubPath = getEntityStubPath(entityId);
-  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath);
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubPath, ability, 'read', 'Entity');
   
   if (!stub) {
     console.log('[SuperEntities] Entity stub not found:', entityId);
@@ -1110,13 +1510,14 @@ superEntityRoutes.post('/entities/:id/transition',
   
   if (orgId === null) {
     // Global entity - try authenticated (platform/) path first, then public/
+    // CASL verifies superadmin can read entities
     for (const visibility of ['authenticated', 'public'] as const) {
       latestPath = getEntityLatestPath(visibility, entityId, undefined);
-      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
       
       if (latestPointer) {
         const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
-        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+        entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
         
         if (entity) {
           storageVisibility = visibility;
@@ -1128,13 +1529,13 @@ superEntityRoutes.post('/entities/:id/transition',
     // Re-set latestPath for global entity updates
     latestPath = getEntityLatestPath(storageVisibility, entityId, undefined);
   } else {
-    // Org-scoped entity - try members path
+    // Org-scoped entity - try members path - CASL verifies superadmin can read org entities
     latestPath = getEntityLatestPath('members', entityId, orgId);
-    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+    latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
     
     if (latestPointer) {
       const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
-      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath);
+      entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
       storageVisibility = 'members';
       console.log('[SuperEntities] Org entity found for org:', orgId);
     }
@@ -1152,26 +1553,27 @@ superEntityRoutes.post('/entities/:id/transition',
   if (action === 'superDelete') {
     console.log('[SuperEntities] SUPER DELETE - Hard deleting entity:', entityId);
     
-    // Get entity type for slug index deletion
-    const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(stub.entityTypeId));
+    // Get entity type for slug index deletion - CASL verifies superadmin can read entity types
+    const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(stub.entityTypeId), ability, 'read', 'EntityType');
     
     // 1. Delete all version files
-    // List all files in the entity directory
+    // List all files in the entity directory - CASL verifies superadmin can list files
     const entityDir = orgId === null
       ? `${storageVisibility === 'public' ? 'public/' : 'platform/'}entities/${entityId}/`
       : `private/orgs/${orgId}/entities/${entityId}/`;
     
     console.log('[SuperEntities] Listing entity files in:', entityDir);
-    const entityFiles = await listFiles(c.env.R2_BUCKET, entityDir);
+    const entityFiles = await listFiles(c.env.R2_BUCKET, entityDir, ability);
     
     for (const filePath of entityFiles) {
       console.log('[SuperEntities] Deleting version file:', filePath);
-      await deleteFile(c.env.R2_BUCKET, filePath);
+      // CASL verifies superadmin can delete entities
+      await deleteFile(c.env.R2_BUCKET, filePath, ability);
     }
     
-    // 2. Delete the entity stub
+    // 2. Delete the entity stub - CASL verifies superadmin can delete entities
     console.log('[SuperEntities] Deleting entity stub:', stubPath);
-    await deleteFile(c.env.R2_BUCKET, stubPath);
+    await deleteFile(c.env.R2_BUCKET, stubPath, ability);
     
     // 3. Delete slug index if entity was public
     if (entity.visibility === 'public' && entityType) {
@@ -1242,11 +1644,11 @@ superEntityRoutes.post('/entities/:id/transition',
     })
   };
   
-  // Write new version
+  // Write new version - CASL verifies superadmin can update entities
   const newVersionPath = getEntityVersionPath(storageVisibility, entityId, newVersion, orgId || undefined);
-  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity);
+  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity, ability);
   
-  // Update latest pointer
+  // Update latest pointer - CASL verifies superadmin can update entities
   const newPointer: EntityLatestPointer = {
     version: newVersion,
     status: newStatus,
@@ -1254,7 +1656,7 @@ superEntityRoutes.post('/entities/:id/transition',
     updatedAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer);
+  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer, ability);
   
   console.log('[SuperEntities] Transitioned entity:', entityId, currentStatus, '->', newStatus);
   
@@ -1291,6 +1693,7 @@ superEntityRoutes.post('/entities/:id/transition',
  * Supports filtering by organizationId, typeId, status, visibility, search
  */
 superEntityRoutes.get('/entities',
+  requireAbility('read', 'Entity'),
   zValidator('query', entityQueryParamsSchema),
   async (c) => {
   const query = c.req.valid('query');
@@ -1302,6 +1705,12 @@ superEntityRoutes.get('/entities',
       success: false,
       error: { code: 'VALIDATION_ERROR', message: 'typeId is required' }
     }, 400);
+  }
+  
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
   }
   
   const items: EntityListItem[] = [];
@@ -1328,11 +1737,11 @@ superEntityRoutes.get('/entities',
     };
   }
   
-  // 1. Load global bundles (public and platform)
+  // 1. Load global bundles (public and platform) - CASL verifies superadmin can read bundles
   console.log('[SuperEntities] Loading global bundles for type:', query.typeId);
   
   const publicBundlePath = getBundlePath('public', query.typeId);
-  const publicBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicBundlePath);
+  const publicBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicBundlePath, ability, 'read', 'Entity');
   if (publicBundle) {
     console.log('[SuperEntities] Loaded public bundle with', publicBundle.entities.length, 'entities');
     for (const entity of publicBundle.entities) {
@@ -1346,7 +1755,7 @@ superEntityRoutes.get('/entities',
   }
   
   const platformBundlePath = getBundlePath('platform', query.typeId);
-  const platformBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformBundlePath);
+  const platformBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformBundlePath, ability, 'read', 'Entity');
   if (platformBundle) {
     console.log('[SuperEntities] Loaded platform bundle with', platformBundle.entities.length, 'entities');
     for (const entity of platformBundle.entities) {
@@ -1364,7 +1773,7 @@ superEntityRoutes.get('/entities',
   console.log('[SuperEntities] Loading global admin bundles for type:', query.typeId);
   
   const publicAdminBundlePath = getGlobalAdminBundlePath('public', query.typeId);
-  const publicAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicAdminBundlePath);
+  const publicAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, publicAdminBundlePath, ability, 'read', 'Entity');
   if (publicAdminBundle) {
     console.log('[SuperEntities] Loaded public admin bundle with', publicAdminBundle.entities.length, 'entities');
     for (const entity of publicAdminBundle.entities) {
@@ -1380,7 +1789,7 @@ superEntityRoutes.get('/entities',
   }
   
   const platformAdminBundlePath = getGlobalAdminBundlePath('platform', query.typeId);
-  const platformAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformAdminBundlePath);
+  const platformAdminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, platformAdminBundlePath, ability, 'read', 'Entity');
   if (platformAdminBundle) {
     console.log('[SuperEntities] Loaded platform admin bundle with', platformAdminBundle.entities.length, 'entities');
     for (const entity of platformAdminBundle.entities) {
@@ -1396,7 +1805,8 @@ superEntityRoutes.get('/entities',
   // 2. Load all organization bundles
   console.log('[SuperEntities] Loading organization bundles for type:', query.typeId);
   
-  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+  // CASL verifies superadmin can list orgs
+  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`, ability);
   const orgIds = new Set<string>();
   
   // Extract organization IDs from file paths
@@ -1416,9 +1826,9 @@ superEntityRoutes.get('/entities',
       if (query.organizationId !== orgId) continue; // Skip if not matching org
     }
     
-    // Load member bundle (published entities)
+    // Load member bundle (published entities) - CASL verifies superadmin can read org bundles
     const memberBundlePath = getOrgMemberBundlePath(orgId, query.typeId);
-    const memberBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, memberBundlePath);
+    const memberBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, memberBundlePath, ability, 'read', 'Entity');
     if (memberBundle) {
       console.log('[SuperEntities] Loaded member bundle for org', orgId, 'with', memberBundle.entities.length, 'entities');
       for (const entity of memberBundle.entities) {
@@ -1432,8 +1842,9 @@ superEntityRoutes.get('/entities',
     }
     
     // Load admin bundle (draft + deleted entities) - superadmins can see these
+    // CASL verifies superadmin can read org bundles
     const adminBundlePath = getOrgAdminBundlePath(orgId, query.typeId);
-    const adminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, adminBundlePath);
+    const adminBundle = await readJSON<EntityBundle>(c.env.R2_BUCKET, adminBundlePath, ability, 'read', 'Entity');
     if (adminBundle) {
       console.log('[SuperEntities] Loaded admin bundle for org', orgId, 'with', adminBundle.entities.length, 'entities');
       for (const entity of adminBundle.entities) {

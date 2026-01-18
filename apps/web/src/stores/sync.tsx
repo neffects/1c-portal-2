@@ -15,8 +15,9 @@ import { createContext } from 'preact';
 import { useContext, useEffect, useRef } from 'preact/hooks';
 import { signal, computed } from '@preact/signals';
 import type { SiteManifest, EntityBundle, ManifestEntityType, BundleEntity } from '@1cc/shared';
-import { api } from '../lib/api';
-import { useAuth } from './auth';
+import { api, type ApiResponseWithHeaders } from '../lib/api';
+import { useAuth, getAuthToken } from './auth';
+import { syncManifest, syncBundle, getBundleEtag, getManifestEtag, getManifest } from './db';
 
 // Sync state signals
 const manifest = signal<SiteManifest | null>(null);
@@ -28,14 +29,26 @@ const lastSyncedAt = signal<Date | null>(null);
 const syncError = signal<string | null>(null);
 
 // Computed values
+/**
+ * @deprecated Use useEntityTypes hook from hooks/useDB.ts instead
+ * This computed value is kept for backward compatibility but will be removed in a future version.
+ */
 const entityTypes = computed(() => manifest.value?.entityTypes || []);
+/**
+ * @deprecated Use useEntityTypes hook from hooks/useDB.ts with org manifest ID instead
+ * This computed value is kept for backward compatibility but will be removed in a future version.
+ */
 const orgEntityTypes = computed(() => orgManifest.value?.entityTypes || []);
+const config = computed(() => manifest.value?.config || null);
 const isOffline = signal(!navigator.onLine);
 
 /**
  * Get entity type by ID or slug
+ * @deprecated Use useEntityType hook from hooks/useDB.ts instead
+ * This function will be removed in a future version.
  */
 function getEntityType(idOrSlug: string): ManifestEntityType | undefined {
+  console.warn('[Sync] getEntityType() is deprecated. Use useEntityType() hook from hooks/useDB.ts instead.');
   return entityTypes.value.find(
     t => t.id === idOrSlug || t.slug === idOrSlug
   );
@@ -43,22 +56,31 @@ function getEntityType(idOrSlug: string): ManifestEntityType | undefined {
 
 /**
  * Get bundle for entity type (platform bundle)
+ * @deprecated Use useBundle hook from hooks/useDB.ts instead
+ * This function will be removed in a future version.
  */
 function getBundle(typeId: string): EntityBundle | undefined {
+  console.warn('[Sync] getBundle() is deprecated. Use useBundle() hook from hooks/useDB.ts instead.');
   return bundles.value.get(typeId);
 }
 
 /**
  * Get org-specific bundle for entity type (admin work queue - draft/deleted entities)
+ * @deprecated Use useBundle hook from hooks/useDB.ts with org manifest ID instead
+ * This function will be removed in a future version.
  */
 function getOrgBundle(typeId: string): EntityBundle | undefined {
+  console.warn('[Sync] getOrgBundle() is deprecated. Use useBundle() hook from hooks/useDB.ts with org manifest ID instead.');
   return orgBundles.value.get(typeId);
 }
 
 /**
  * Get entity by ID from bundles
+ * @deprecated Use useEntity hook from hooks/useDB.ts instead
+ * This function will be removed in a future version.
  */
 function getEntity(entityId: string): BundleEntity | undefined {
+  console.warn('[Sync] getEntity() is deprecated. Use useEntity() hook from hooks/useDB.ts instead.');
   for (const bundle of bundles.value.values()) {
     const entity = bundle.entities.find(e => e.id === entityId);
     if (entity) return entity;
@@ -68,8 +90,11 @@ function getEntity(entityId: string): BundleEntity | undefined {
 
 /**
  * Get entity by slug from a specific type
+ * @deprecated Use useEntityBySlug hook from hooks/useDB.ts instead
+ * This function will be removed in a future version.
  */
 function getEntityBySlug(typeId: string, slug: string): BundleEntity | undefined {
+  console.warn('[Sync] getEntityBySlug() is deprecated. Use useEntityBySlug() hook from hooks/useDB.ts instead.');
   const bundle = bundles.value.get(typeId);
   return bundle?.entities.find(e => e.slug === slug);
 }
@@ -88,8 +113,8 @@ async function sync(force: boolean = false) {
   syncError.value = null;
   
   try {
-    // Check auth state from localStorage (token presence indicates auth)
-    const token = localStorage.getItem('auth_token');
+    // Check auth state using auth store's getAuthToken (more reliable than localStorage check)
+    const token = getAuthToken();
     const isAuthenticated = !!token;
     
     // Determine which manifest to fetch based on auth state
@@ -106,29 +131,151 @@ async function sync(force: boolean = false) {
       bundleBasePath = '/api/bundles';
     }
     
-    // Fetch manifest
-    const manifestResponse = await api.get(manifestPath) as { success: boolean; data: SiteManifest };
+    // Determine manifest ID for DB storage
+    // For unauthenticated: 'public', for authenticated: 'platform' (user's highest key)
+    const manifestId = isAuthenticated ? 'platform' : 'public';
     
-    if (!manifestResponse.success || !manifestResponse.data) {
-      throw new Error('Failed to fetch manifest');
+    // Get stored ETag from TanStack DB for conditional request
+    let storedManifestEtag: string | null = null;
+    try {
+      storedManifestEtag = await getManifestEtag(manifestId);
+    } catch (e) {
+      // DB might not have the manifest yet, that's okay
+      console.log('[Sync] No ETag found in DB for manifest:', manifestId);
     }
     
-    const newManifest = manifestResponse.data;
-    console.log('[Sync] Manifest loaded:', newManifest.entityTypes.length, 'types');
+    // Fetch manifest with ETag (API client handles conditional requests)
+    const manifestResponse = await api.get(manifestPath, storedManifestEtag) as ApiResponseWithHeaders<SiteManifest>;
     
-    // Check which bundles need updating
-    const currentBundles = bundles.value;
+    // Handle 304 Not Modified (use existing manifest from DB)
+    let newManifest: SiteManifest;
+    let manifestEtag: string | null = null;
+    
+    if (manifestResponse.notModified) {
+      console.log('[Sync] Manifest 304 Not Modified, loading from DB:', manifestId);
+      // Load from DB
+      try {
+        const existingManifest = await getManifest(manifestId);
+        if (existingManifest) {
+          // Convert ManifestRow to SiteManifest format
+          newManifest = {
+            version: existingManifest.version,
+            generatedAt: existingManifest.generatedAt,
+            entityTypes: existingManifest.entityTypes,
+            config: existingManifest.config || undefined,
+          };
+          manifestEtag = existingManifest.etag; // Use stored ETag
+          console.log('[Sync] Using manifest from DB:', manifestId, 'version:', newManifest.version, 'ETag:', manifestEtag);
+        } else {
+          // If not in DB and we got 304, we have a problem - can't fetch without making another request
+          // This shouldn't happen, but if it does, we need to make a new request without ETag
+          console.warn('[Sync] Manifest 304 but not in DB, making new request without ETag');
+          const fallbackResponse = await api.get(manifestPath) as ApiResponseWithHeaders<SiteManifest>;
+          if (!fallbackResponse.success || !fallbackResponse.data) {
+            throw new Error('Failed to fetch manifest');
+          }
+          newManifest = fallbackResponse.data;
+          manifestEtag = fallbackResponse.etag || null;
+        }
+      } catch (dbErr) {
+        console.error('[Sync] Error loading manifest from DB:', dbErr);
+        // Fallback: make new request without ETag
+        console.warn('[Sync] Making fallback request without ETag');
+        const fallbackResponse = await api.get(manifestPath) as ApiResponseWithHeaders<SiteManifest>;
+        if (!fallbackResponse.success || !fallbackResponse.data) {
+          throw new Error('Failed to fetch manifest');
+        }
+        newManifest = fallbackResponse.data;
+        manifestEtag = fallbackResponse.etag || null;
+      }
+    } else {
+      if (!manifestResponse.success || !manifestResponse.data) {
+        throw new Error('Failed to fetch manifest');
+      }
+      newManifest = manifestResponse.data;
+      manifestEtag = manifestResponse.etag || null;
+    }
+    console.log('[Sync] Manifest loaded:', newManifest.entityTypes.length, 'types', manifestEtag ? `(ETag: ${manifestEtag})` : '');
+    
+    // Sync manifest to TanStack DB (even if 304, we still sync entity types to ensure they're correct)
+    // Initialize DB early to ensure collections are ready
+    try {
+      // Import getDatabase to ensure DB is initialized
+      const { getDatabase } = await import('./db');
+      getDatabase(); // Initialize DB if not already done
+      
+      await syncManifest(manifestId, newManifest, manifestEtag);
+      console.log('[Sync] Manifest synced to DB:', manifestId);
+    } catch (dbErr) {
+      console.error('[Sync] Failed to sync manifest to DB:', dbErr);
+      console.error('[Sync] DB error details:', dbErr instanceof Error ? dbErr.stack : dbErr);
+      // Continue even if DB sync fails
+    }
+    
+    // For authenticated users, also sync public manifest (needed for home page)
+    // Public manifest contains entity types visible to everyone
+    if (isAuthenticated) {
+      try {
+        console.log('[Sync] Also syncing public manifest for authenticated user...');
+        
+        // Get stored ETag for public manifest
+        let storedPublicEtag: string | null = null;
+        try {
+          storedPublicEtag = await getManifestEtag('public');
+        } catch (e) {
+          console.log('[Sync] No ETag found in DB for public manifest');
+        }
+        
+        const publicManifestResponse = await api.get('/public/manifests/site', storedPublicEtag) as ApiResponseWithHeaders<SiteManifest>;
+        
+        // Handle 304 Not Modified
+        let publicManifest: SiteManifest | null = null;
+        let publicManifestEtag: string | null = null;
+        
+        if (publicManifestResponse.notModified) {
+          console.log('[Sync] Public manifest 304 Not Modified, loading from DB');
+          // Load from DB
+          const existingPublicManifest = await getManifest('public');
+          if (existingPublicManifest) {
+            publicManifest = {
+              version: existingPublicManifest.version,
+              generatedAt: existingPublicManifest.generatedAt,
+              entityTypes: existingPublicManifest.entityTypes,
+              config: existingPublicManifest.config || undefined,
+            };
+            publicManifestEtag = existingPublicManifest.etag;
+            console.log('[Sync] Using public manifest from DB');
+          } else {
+            console.warn('[Sync] Public manifest 304 but not in DB, skipping');
+          }
+        } else if (publicManifestResponse.success && publicManifestResponse.data) {
+          publicManifest = publicManifestResponse.data;
+          publicManifestEtag = publicManifestResponse.etag || null;
+        }
+        
+        if (publicManifest) {
+          // Sync public manifest to TanStack DB (even if 304, we still sync entity types)
+          await syncManifest('public', publicManifest, publicManifestEtag);
+          console.log('[Sync] Public manifest synced to DB');
+        }
+      } catch (publicErr) {
+        console.warn('[Sync] Failed to sync public manifest (non-critical):', publicErr);
+        // Non-critical - continue even if this fails
+      }
+    }
+    
+    // Bundles don't have versions - use ETag-based conditional requests
+    // Always fetch bundles, but API client will handle conditional requests via ETags
     const bundlesToFetch: string[] = [];
     
     // Collect type IDs that are in the new manifest
     const manifestTypeIds = new Set(newManifest.entityTypes.map(t => t.id));
     
+    // Fetch all bundles in manifest (ETag checks happen in API client)
+    // If force is false, API client will send If-None-Match headers for conditional requests
     for (const type of newManifest.entityTypes) {
-      const currentBundle = currentBundles.get(type.id);
-      
-      if (!currentBundle || currentBundle.version < type.bundleVersion || force) {
-        bundlesToFetch.push(type.id);
-      }
+      // Always fetch - API client handles 304 Not Modified responses
+      bundlesToFetch.push(type.id);
     }
     
     // Fetch updated bundles - only include bundles for types in the manifest
@@ -145,11 +292,42 @@ async function sync(force: boolean = false) {
       console.log('[Sync] Fetching bundle:', typeId);
       
       try {
-        const bundleResponse = await api.get(`${bundleBasePath}/${typeId}`) as { success: boolean; data: EntityBundle };
+        // Get stored ETag from TanStack DB for conditional request
+        let storedEtag: string | null = null;
+        try {
+          storedEtag = await getBundleEtag(manifestId, typeId);
+        } catch (e) {
+          // DB might not have the bundle yet, that's okay
+          console.log('[Sync] No ETag found in DB for bundle:', typeId);
+        }
+        
+        // Fetch with ETag (API client handles conditional requests)
+        const bundleResponse = await api.get(`${bundleBasePath}/${typeId}`, storedEtag) as ApiResponseWithHeaders<EntityBundle>;
+        
+        // Handle 304 Not Modified (use existing bundle)
+        if (bundleResponse.notModified) {
+          const currentBundle = bundles.value.get(typeId);
+          if (currentBundle) {
+            newBundles.set(typeId, currentBundle);
+            console.log('[Sync] Bundle 304 Not Modified, using cached:', typeId);
+            continue;
+          }
+        }
         
         if (bundleResponse.success && bundleResponse.data) {
-          newBundles.set(typeId, bundleResponse.data);
-          console.log('[Sync] Bundle loaded:', typeId, bundleResponse.data.entityCount, 'entities');
+          const bundle = bundleResponse.data;
+          newBundles.set(typeId, bundle);
+          console.log('[Sync] Bundle loaded:', typeId, bundle.entityCount, 'entities', bundleResponse.etag ? `(ETag: ${bundleResponse.etag})` : '');
+          
+          // Sync bundle to TanStack DB
+          try {
+            const bundleId = `${manifestId}:${typeId}`;
+            await syncBundle(bundleId, bundle, manifestId, bundleResponse.etag || null);
+            console.log('[Sync] Bundle synced to DB:', bundleId);
+          } catch (dbErr) {
+            console.warn('[Sync] Failed to sync bundle to DB:', typeId, dbErr);
+            // Continue even if DB sync fails
+          }
         } else {
           // Bundle not found or error - this can happen if type was deleted
           console.warn('[Sync] Bundle not found or error for type:', typeId, 'This may indicate the type was deleted');
@@ -163,6 +341,7 @@ async function sync(force: boolean = false) {
     
     // Keep existing bundles for types that are still in the manifest and don't need updating
     // Only keep bundles for types that are actually in the new manifest (removes deleted types)
+    const currentBundles = bundles.value;
     for (const type of newManifest.entityTypes) {
       if (!bundlesToFetch.includes(type.id)) {
         const existingBundle = currentBundles.get(type.id);
@@ -193,31 +372,105 @@ async function sync(force: boolean = false) {
         console.log('[Sync] Fetching org-specific bundles for:', currentOrgIdStr);
         
         try {
+          // Determine org manifest ID for DB storage
+          // Format: 'org:${orgId}:${role}' where role is 'member' or 'admin'
+          const orgRole = userRole === 'org_admin' ? 'admin' : 'member';
+          const orgManifestId = `org:${currentOrgIdStr}:${orgRole}`;
+          
+          // Get stored ETag for org manifest
+          let storedOrgEtag: string | null = null;
+          try {
+            storedOrgEtag = await getManifestEtag(orgManifestId);
+          } catch (e) {
+            console.log('[Sync] No ETag found in DB for org manifest:', orgManifestId);
+          }
+          
           // Fetch org manifest (returns admin or member manifest based on user role)
           const orgManifestPath = `/api/orgs/${currentOrgIdStr}/manifests/site`;
-          const orgManifestResponse = await api.get(orgManifestPath) as { success: boolean; data: SiteManifest };
+          const orgManifestResponse = await api.get(orgManifestPath, storedOrgEtag) as ApiResponseWithHeaders<SiteManifest>;
           
-          if (orgManifestResponse.success && orgManifestResponse.data) {
-            const newOrgManifest = orgManifestResponse.data;
-            console.log('[Sync] Org manifest loaded:', newOrgManifest.entityTypes.length, 'types');
+          // Handle 304 Not Modified
+          let newOrgManifest: SiteManifest | null = null;
+          let orgManifestEtag: string | null = null;
+          
+          if (orgManifestResponse.notModified) {
+            console.log('[Sync] Org manifest 304 Not Modified, loading from DB:', orgManifestId);
+            // Load from DB
+            const existingOrgManifest = await getManifest(orgManifestId);
+            if (existingOrgManifest) {
+              newOrgManifest = {
+                version: existingOrgManifest.version,
+                generatedAt: existingOrgManifest.generatedAt,
+                entityTypes: existingOrgManifest.entityTypes,
+                config: existingOrgManifest.config || undefined,
+              };
+              orgManifestEtag = existingOrgManifest.etag;
+              console.log('[Sync] Using org manifest from DB:', orgManifestId);
+            } else {
+              console.warn('[Sync] Org manifest 304 but not in DB, skipping');
+            }
+          } else if (orgManifestResponse.success && orgManifestResponse.data) {
+            newOrgManifest = orgManifestResponse.data;
+            orgManifestEtag = orgManifestResponse.etag || null;
+            console.log('[Sync] Org manifest loaded:', newOrgManifest.entityTypes.length, 'types', orgManifestEtag ? `(ETag: ${orgManifestEtag})` : '');
+          }
+          
+          if (newOrgManifest) {
+            // Sync org manifest to TanStack DB (even if 304, we still sync entity types)
+            try {
+              await syncManifest(orgManifestId, newOrgManifest, orgManifestEtag);
+              console.log('[Sync] Org manifest synced to DB:', orgManifestId);
+            } catch (dbErr) {
+              console.warn('[Sync] Failed to sync org manifest to DB:', dbErr);
+              // Continue even if DB sync fails
+            }
+          }
             
             // Fetch org bundles for each type
             const currentOrgBundles = orgBundles.value;
             const newOrgBundles = new Map(currentOrgBundles);
             
             for (const type of newOrgManifest.entityTypes) {
-              const currentOrgBundle = currentOrgBundles.get(type.id);
+              // Bundles don't have versions - always fetch (API client handles ETag conditional requests)
+              console.log('[Sync] Fetching org bundle:', type.id);
               
-              // Fetch if missing, outdated, or forced
-              if (!currentOrgBundle || currentOrgBundle.version < type.bundleVersion || force) {
-                console.log('[Sync] Fetching org bundle:', type.id);
+              const orgBundlePath = `/api/orgs/${currentOrgIdStr}/bundles/${type.id}`;
+              
+              // Get stored ETag from TanStack DB
+              let storedEtag: string | null = null;
+              try {
+                storedEtag = await getBundleEtag(orgManifestId, type.id);
+              } catch (e) {
+                // DB might not have the bundle yet, that's okay
+                console.log('[Sync] No ETag found in DB for org bundle:', type.id);
+              }
+              
+              // Fetch with ETag (API client handles conditional requests)
+              const orgBundleResponse = await api.get(orgBundlePath, storedEtag) as ApiResponseWithHeaders<EntityBundle>;
+              
+              // Handle 304 Not Modified (use existing bundle)
+              if (orgBundleResponse.notModified) {
+                const currentOrgBundle = currentOrgBundles.get(type.id);
+                if (currentOrgBundle) {
+                  newOrgBundles.set(type.id, currentOrgBundle);
+                  console.log('[Sync] Org bundle 304 Not Modified, using cached:', type.id);
+                  continue;
+                }
+              }
+              
+              if (orgBundleResponse.success && orgBundleResponse.data) {
+                const orgBundle = orgBundleResponse.data;
+                newOrgBundles.set(type.id, orgBundle);
+                console.log('[Sync] Org bundle loaded:', type.id, orgBundle.entityCount, 'entities', orgBundleResponse.etag ? `(ETag: ${orgBundleResponse.etag})` : '');
                 
-                const orgBundlePath = `/api/orgs/${currentOrgIdStr}/bundles/${type.id}`;
-                const orgBundleResponse = await api.get(orgBundlePath) as { success: boolean; data: EntityBundle };
-                
-                if (orgBundleResponse.success && orgBundleResponse.data) {
-                  newOrgBundles.set(type.id, orgBundleResponse.data);
-                  console.log('[Sync] Org bundle loaded:', type.id, orgBundleResponse.data.entityCount, 'entities');
+                // Sync org bundle to TanStack DB
+                try {
+                  const orgBundleId = `${orgManifestId}:${type.id}`;
+                  await syncBundle(orgBundleId, orgBundle, orgManifestId, orgBundleResponse.etag || null);
+                  console.log('[Sync] Org bundle synced to DB:', orgBundleId);
+                } catch (dbErr) {
+                  console.warn('[Sync] Failed to sync org bundle to DB:', type.id, dbErr);
+                  // Continue even if DB sync fails
                 }
               }
             }
@@ -337,25 +590,47 @@ function clearCache() {
 }
 
 // Sync context value
+// Note: Data access functions (getEntityType, getBundle, etc.) and computed values (entityTypes, bundles)
+// are deprecated. Use DB hooks from hooks/useDB.ts instead.
+// Only sync status/actions should be used from this store.
 const syncValue = {
-  manifest,
-  bundles,
-  orgManifest,
-  orgBundles,
+  // Sync status (keep these)
   syncing,
   lastSyncedAt,
   syncError,
-  entityTypes,
-  orgEntityTypes,
   isOffline,
-  getEntityType,
-  getBundle,
-  getOrgBundle,
-  getEntity,
-  getEntityBySlug,
+  config, // Config is OK to keep as it's not entity data
+  
+  // Sync actions (keep these)
   sync,
   loadFromCache,
-  clearCache
+  clearCache,
+  
+  // Deprecated data access - kept for backward compatibility only
+  /** @deprecated Use useEntityTypes hook from hooks/useDB.ts instead */
+  entityTypes,
+  /** @deprecated Use useEntityTypes hook from hooks/useDB.ts with org manifest ID instead */
+  orgEntityTypes,
+  /** @deprecated Use useEntityType hook from hooks/useDB.ts instead */
+  getEntityType,
+  /** @deprecated Use useBundle hook from hooks/useDB.ts instead */
+  getBundle,
+  /** @deprecated Use useBundle hook from hooks/useDB.ts with org manifest ID instead */
+  getOrgBundle,
+  /** @deprecated Use useEntity hook from hooks/useDB.ts instead */
+  getEntity,
+  /** @deprecated Use useEntityBySlug hook from hooks/useDB.ts instead */
+  getEntityBySlug,
+  
+  // Internal signals (kept for sync store internal use, but deprecated for external access)
+  /** @deprecated Internal use only - do not access directly */
+  manifest,
+  /** @deprecated Internal use only - do not access directly. Use useBundle hook from hooks/useDB.ts instead */
+  bundles,
+  /** @deprecated Internal use only - do not access directly */
+  orgManifest,
+  /** @deprecated Internal use only - do not access directly. Use useBundle hook from hooks/useDB.ts instead */
+  orgBundles,
 };
 
 // Create context
@@ -372,6 +647,15 @@ export function SyncProvider({ children }: { children: preact.ComponentChildren 
   
   // Initial sync on mount
   useEffect(() => {
+    // Initialize DB early to ensure collections are hydrated
+    import('./db').then(({ getDatabase, hydrateDatabase }) => {
+      getDatabase(); // Initialize DB
+      // Try manual hydration if auto-hydration didn't work
+      setTimeout(() => {
+        hydrateDatabase();
+      }, 100);
+    });
+    
     // Load from cache first for fast initial render
     loadFromCache();
     

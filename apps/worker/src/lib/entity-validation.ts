@@ -7,8 +7,9 @@
 
 import type { FieldDefinition, EntityType, EntityBundle, BundleEntity, Entity, EntityLatestPointer, EntityStub } from '@1cc/shared';
 import { ValidationError, ConflictError } from '../middleware/error';
-import { readJSON, getBundlePath, listFiles, getEntityLatestPath, getEntityVersionPath, getEntityStubPath } from './r2';
-import { R2_PATHS } from '@1cc/shared';
+import { readJSON, getEntityTypePath } from './r2';
+import { slugIndexExists } from './slug-index';
+import type { AppAbility } from './abilities';
 
 /**
  * Validate a single field value against its field definition
@@ -326,270 +327,44 @@ export function validateEntityFields(
 
 /**
  * Check if a slug is unique for the given entity type and organization
- * Uses bundles for efficient checking
+ * Uses slug index for efficient checking (O(1) file existence check)
  * 
  * @param bucket - R2 bucket instance
  * @param entityTypeId - The entity type ID
  * @param organizationId - The organization ID (null for global entities)
  * @param slug - The slug to check
+ * @param ability - User's CASL ability (required for R2 access)
  * @throws ConflictError if slug already exists
  */
 export async function checkSlugUniqueness(
   bucket: R2Bucket,
   entityTypeId: string,
   organizationId: string | null,
-  slug: string
+  slug: string,
+  ability: AppAbility | null
 ): Promise<void> {
-  console.log('[SlugValidation] ===== START checkSlugUniqueness =====');
-  console.log('[SlugValidation] Parameters:', {
-    entityTypeId,
-    organizationId,
-    slug,
-    slugType: typeof slug,
-    slugLength: slug?.length
-  });
-
-  if (organizationId !== null) {
-    // For org entities: load 'members' bundle (includes all statuses)
-    const bundlePath = getBundlePath('members', entityTypeId, organizationId);
-    const bundle = await readJSON<EntityBundle>(bucket, bundlePath);
-    
-    // Check bundle first if it exists (fast path)
-    if (bundle && bundle.entities) {
-      console.log('[SlugValidation] Bundle exists with', bundle.entities.length, 'entities');
-      console.log('[SlugValidation] Checking bundle for slug:', slug);
-      console.log('[SlugValidation] All slugs in bundle:', bundle.entities.map(e => e.slug));
-      
-      const existingEntity = bundle.entities.find(
-        (entity: BundleEntity) => entity.slug === slug
-      );
-      
-      if (existingEntity) {
-        console.log('[SlugValidation] Slug conflict detected in org bundle:', slug, 'entity:', existingEntity.id);
-        throw new ConflictError(
-          `Slug '${slug}' already exists for this entity type in this organization`
-        );
-      }
-      console.log('[SlugValidation] Slug not found in bundle, proceeding to file scan');
-    } else {
-      console.log('[SlugValidation] Bundle does not exist or is empty, proceeding to file scan');
-    }
-    
-    // Always fallback to scanning entity files to ensure we catch duplicates
-    // This is necessary because:
-    // - Bundle might not exist yet
-    // - Bundle might be stale or incomplete
-    // - Race conditions: entity created but bundle not regenerated yet
-    // Scanning ensures we catch duplicates even if bundle is missing or outdated
-    console.log('[SlugValidation] Scanning entity files as fallback to ensure no duplicates');
-    const entityPrefix = `${R2_PATHS.PRIVATE}orgs/${organizationId}/entities/`;
-    
-    // Use pagination to handle large numbers of entities
-    let cursor: string | undefined;
-    let hasMore = true;
-    
-    while (hasMore) {
-      const result = await bucket.list({
-        prefix: entityPrefix,
-        limit: 1000,
-        cursor
-      });
-      
-      const latestFiles = result.objects
-        .map(obj => obj.key)
-        .filter(f => f.endsWith('/latest.json'));
-      
-      console.log('[SlugValidation] Checking', latestFiles.length, 'entity files (cursor:', cursor || 'none', ')');
-      
-      const foundSlugs: string[] = [];
-      const matchingTypeEntities: Array<{ id: string; slug: string; typeId: string }> = [];
-      
-      for (const latestFile of latestFiles) {
-        // Extract entity ID from path
-        const entityIdMatch = latestFile.match(/entities\/([^\/]+)\/latest\.json/);
-        if (!entityIdMatch) {
-          console.log('[SlugValidation] Skipping file (no entity ID match):', latestFile);
-          continue;
-        }
-        
-        const entityId = entityIdMatch[1];
-        
-        // Read latest pointer
-        const latestPointer = await readJSON<EntityLatestPointer>(bucket, latestFile);
-        if (!latestPointer) {
-          console.log('[SlugValidation] Skipping file (no latest pointer):', latestFile);
-          continue;
-        }
-        
-        // Read actual entity
-        const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
-        const existingEntity = await readJSON<Entity>(bucket, versionPath);
-        
-        if (!existingEntity) {
-          console.log('[SlugValidation] Skipping file (entity not found):', versionPath);
-          continue;
-        }
-        
-        // Slug is stored at top-level (common property)
-        const existingSlug = existingEntity.slug || '';
-        
-        // Track all slugs found
-        if (existingSlug) {
-          foundSlugs.push(existingSlug);
-        }
-        
-        // Skip if different entity type
-        if (existingEntity.entityTypeId !== entityTypeId) {
-          continue;
-        }
-        
-        // Track entities of matching type
-        matchingTypeEntities.push({
-          id: existingEntity.id,
-          slug: existingSlug || '(no slug)',
-          typeId: existingEntity.entityTypeId
-        });
-        
-        // Skip if entity doesn't have a slug (shouldn't happen, but be defensive)
-        if (!existingSlug || typeof existingSlug !== 'string') {
-          console.warn('[SlugValidation] Entity missing slug:', existingEntity.id, 'file:', latestFile);
-          continue;
-        }
-        
-        // Check slug match (case-sensitive exact match)
-        console.log('[SlugValidation] Comparing:', {
-          requested: slug,
-          existing: existingSlug,
-          match: existingSlug === slug,
-          entityId: existingEntity.id
-        });
-        
-        if (existingSlug === slug) {
-          console.log('[SlugValidation] Slug conflict detected in entity files:', {
-            slug,
-            existingEntityId: existingEntity.id,
-            existingEntitySlug: existingSlug,
-            entityTypeId: existingEntity.entityTypeId,
-            organizationId: existingEntity.organizationId,
-            filePath: latestFile
-          });
-          throw new ConflictError(
-            `Slug '${slug}' already exists for this entity type in this organization`
-          );
-        }
-        
-        // Debug log for similar slugs (help identify issues)
-        if (existingSlug.toLowerCase() === slug.toLowerCase() && existingSlug !== slug) {
-          console.log('[SlugValidation] Warning: Similar slug found (case difference):', {
-            requested: slug,
-            existing: existingSlug,
-            entityId: existingEntity.id
-          });
-        }
-      }
-      
-      console.log('[SlugValidation] File scan complete. Found', foundSlugs.length, 'total slugs,', matchingTypeEntities.length, 'entities of type', entityTypeId);
-      console.log('[SlugValidation] All slugs found:', foundSlugs);
-      console.log('[SlugValidation] Entities of matching type:', matchingTypeEntities);
-      
-      // Check if there are more results
-      hasMore = result.truncated || false;
-      cursor = result.cursor;
-    }
-  } else {
-    // For global entities: load both 'public' and 'authenticated' bundles
-    // Check public bundle first
-    const publicBundlePath = getBundlePath('public', entityTypeId);
-    const publicBundle = await readJSON<EntityBundle>(bucket, publicBundlePath);
-    
-    if (publicBundle && publicBundle.entities) {
-      const existingEntity = publicBundle.entities.find(
-        (entity: BundleEntity) => entity.slug === slug
-      );
-      
-      if (existingEntity) {
-        console.log('[SlugValidation] Slug conflict detected in public bundle:', slug);
-        throw new ConflictError(
-          `Slug '${slug}' already exists for this entity type`
-        );
-      }
-    }
-    
-    // Check authenticated bundle
-    const authenticatedBundlePath = getBundlePath('authenticated', entityTypeId);
-    const authenticatedBundle = await readJSON<EntityBundle>(bucket, authenticatedBundlePath);
-    
-    if (authenticatedBundle && authenticatedBundle.entities) {
-      const existingEntity = authenticatedBundle.entities.find(
-        (entity: BundleEntity) => entity.slug === slug
-      );
-      
-      if (existingEntity) {
-        console.log('[SlugValidation] Slug conflict detected in authenticated bundle:', slug);
-        throw new ConflictError(
-          `Slug '${slug}' already exists for this entity type`
-        );
-      }
-    }
-    
-    // If bundles don't exist or don't contain the entity, fallback to scanning entity stubs
-    // This ensures we catch duplicates even if:
-    // - Bundles haven't been generated yet
-    // - Entities are in draft/pending status (not in bundles)
-    // - Bundles are stale
-    const bundleExists = publicBundle !== null || authenticatedBundle !== null;
-    const bundleHasEntity = (publicBundle?.entities?.some(e => e.slug === slug)) ||
-                            (authenticatedBundle?.entities?.some(e => e.slug === slug));
-    
-    // Only scan if bundles don't exist OR if entity not found in bundles
-    // (if bundles exist and have the entity, we already checked above)
-    if (!bundleExists || !bundleHasEntity) {
-      console.log('[SlugValidation] Scanning entity stubs for global entities (bundles missing or entity not found)');
-      const stubFiles = await listFiles(bucket, R2_PATHS.STUBS);
-      
-      for (const stubFile of stubFiles) {
-        if (!stubFile.endsWith('.json')) continue;
-        
-        const stub = await readJSON<EntityStub>(bucket, stubFile);
-        if (!stub || stub.organizationId !== null || stub.entityTypeId !== entityTypeId) {
-          continue;
-        }
-        
-        // Global entity - check both public and authenticated paths
-        let latestPointer: EntityLatestPointer | null = null;
-        for (const visibility of ['public', 'authenticated'] as const) {
-          const latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
-          latestPointer = await readJSON<EntityLatestPointer>(bucket, latestPath);
-          if (latestPointer) break;
-        }
-        
-        if (!latestPointer) continue;
-        
-        // Read actual entity
-        const storageVisibility = latestPointer.visibility || 'authenticated';
-        const versionPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, undefined);
-        const existingEntity = await readJSON<Entity>(bucket, versionPath);
-        
-        if (!existingEntity) continue;
-        
-        // Slug is stored at top-level (common property)
-        const existingSlug = existingEntity.slug || '';
-        
-        // Check slug match
-        if (existingSlug === slug) {
-          console.log('[SlugValidation] Slug conflict detected in global entity files:', {
-            slug,
-            existingSlug,
-            entityId: existingEntity.id
-          });
-          throw new ConflictError(
-            `Slug '${slug}' already exists for this entity type`
-          );
-        }
-      }
-    }
+  console.log('[SlugValidation] Checking slug uniqueness:', { entityTypeId, organizationId, slug });
+  
+  // Get entity type to get typeSlug for slug index path
+  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(entityTypeId), ability, 'read', 'EntityType');
+  if (!entityType) {
+    throw new ValidationError(`Entity type ${entityTypeId} not found`);
   }
-
+  
+  const typeSlug = entityType.slug;
+  
+  // Check slug index - if file exists, slug is already taken
+  const exists = await slugIndexExists(bucket, organizationId, typeSlug, slug, ability);
+  
+  if (exists) {
+    console.log('[SlugValidation] Slug conflict detected via slug index:', slug);
+    const orgContext = organizationId 
+      ? `in this organization` 
+      : `for this entity type`;
+    throw new ConflictError(
+      `Slug '${slug}' already exists ${orgContext}`
+    );
+  }
+  
   console.log('[SlugValidation] Slug is unique:', slug);
-  console.log('[SlugValidation] ===== END checkSlugUniqueness (SUCCESS) =====');
 }

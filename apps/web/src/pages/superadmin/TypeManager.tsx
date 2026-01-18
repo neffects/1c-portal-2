@@ -7,7 +7,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useAuth } from '../../stores/auth';
-import { useSync } from '../../stores/sync';
 import { api } from '../../lib/api';
 import type { EntityType, EntityTypeListItem } from '@1cc/shared';
 
@@ -17,7 +16,6 @@ interface TypeManagerProps {
 
 export function TypeManager({ id }: TypeManagerProps) {
   const { isAuthenticated, isSuperadmin, loading: authLoading } = useAuth();
-  const { entityTypes: syncedTypes } = useSync();
   
   const [types, setTypes] = useState<EntityTypeListItem[]>([]);
   const [loading, setLoading] = useState(true);

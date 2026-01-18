@@ -26,7 +26,8 @@ import { readJSON, writeJSON, listFiles, deleteFile, getOrgProfilePath, getOrgPe
 import { regenerateOrgManifest, regenerateOrgBundles, loadAppConfig, validateMembershipKeyIds, regenerateEntityBundles } from '../lib/bundle-invalidation';
 import { createOrgId, createSlug, createInvitationToken } from '../lib/id';
 import { requireSuperadmin, requireOrgAdmin, requireOrgMembership } from '../middleware/auth';
-import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
+import { requireAbility } from '../middleware/casl';
+import { NotFoundError, ConflictError, ValidationError, ForbiddenError } from '../middleware/error';
 import { sendInvitationEmail } from '../lib/email';
 import { createUserOrgStub, deleteUserOrgStub, updateUserOrgStubRole } from '../lib/user-stubs';
 import { R2_PATHS } from '@1cc/shared';
@@ -40,6 +41,7 @@ export const organizationRoutes = new Hono<{ Bindings: Env; Variables: Variables
  */
 organizationRoutes.post('/',
   requireSuperadmin(),
+  requireAbility('create', 'Organization'),
   zValidator('json', createOrganizationRequestSchema),
   async (c) => {
   console.log('[Orgs] Creating organization');
@@ -93,20 +95,26 @@ organizationRoutes.post('/',
     isActive: true
   };
   
-  // Save organization profile
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Save organization profile - CASL verifies org admin can write their own org
   const profilePath = getOrgProfilePath(orgId);
   console.log('[Orgs] Saving organization profile to:', profilePath);
-  await writeJSON(c.env.R2_BUCKET, profilePath, organization);
+  await writeJSON(c.env.R2_BUCKET, profilePath, organization, ability);
   
-  // Verify the file was written by reading it back
-  const verifyOrg = await readJSON<Organization>(c.env.R2_BUCKET, profilePath);
+  // Verify the file was written by reading it back - CASL verifies org admin can read their own org
+  const verifyOrg = await readJSON<Organization>(c.env.R2_BUCKET, profilePath, ability, 'read', 'Organization');
   if (verifyOrg) {
     console.log('[Orgs] Verified organization file exists:', verifyOrg.id, verifyOrg.name);
   } else {
     console.error('[Orgs] WARNING: Organization file was not found after write!');
   }
   
-  // Initialize empty entity type permissions
+  // Initialize empty entity type permissions - CASL verifies org admin can write org permissions
   const permissions: EntityTypePermissions = {
     organizationId: orgId,
     viewable: [],
@@ -117,7 +125,7 @@ organizationRoutes.post('/',
   
   const permissionsPath = getOrgPermissionsPath(orgId);
   console.log('[Orgs] Saving permissions to:', permissionsPath);
-  await writeJSON(c.env.R2_BUCKET, permissionsPath, permissions);
+  await writeJSON(c.env.R2_BUCKET, permissionsPath, permissions, ability);
   
   console.log('[Orgs] Created organization:', orgId, 'at path:', profilePath);
   
@@ -156,7 +164,7 @@ organizationRoutes.post('/',
  * List all organizations
  * Query param: adminOnly - if true, only return orgs where user is an admin
  */
-organizationRoutes.get('/', async (c) => {
+organizationRoutes.get('/', requireAbility('read', 'Organization'), async (c) => {
   console.log('[Orgs] Listing organizations');
   
   const userRole = c.get('userRole');
@@ -294,7 +302,7 @@ organizationRoutes.get('/', async (c) => {
  * GET /:id
  * Get organization details
  */
-organizationRoutes.get('/:id', requireOrgMembership('id'), async (c) => {
+organizationRoutes.get('/:id', requireAbility('read', 'Organization'), requireOrgMembership('id'), async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Getting organization:', orgId);
   
@@ -315,6 +323,7 @@ organizationRoutes.get('/:id', requireOrgMembership('id'), async (c) => {
  * Update organization
  */
 organizationRoutes.patch('/:id',
+  requireAbility('update', 'Organization'),
   requireOrgAdmin('id'),
   zValidator('json', updateOrganizationRequestSchema),
   async (c) => {
@@ -378,7 +387,7 @@ organizationRoutes.patch('/:id',
  * DELETE /:id
  * Soft delete organization (superadmin only)
  */
-organizationRoutes.delete('/:id', requireSuperadmin(), async (c) => {
+organizationRoutes.delete('/:id', requireSuperadmin(), requireAbility('delete', 'Organization'), async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Deleting organization:', orgId);
   
@@ -409,7 +418,7 @@ organizationRoutes.delete('/:id', requireSuperadmin(), async (c) => {
  * GET /:id/permissions
  * Get entity type permissions for organization
  */
-organizationRoutes.get('/:id/permissions', requireOrgMembership('id'), async (c) => {
+organizationRoutes.get('/:id/permissions', requireAbility('read', 'Organization'), requireOrgMembership('id'), async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Getting permissions for:', orgId);
   
@@ -444,6 +453,7 @@ organizationRoutes.get('/:id/permissions', requireOrgMembership('id'), async (c)
  */
 organizationRoutes.patch('/:id/permissions',
   requireSuperadmin(),
+  requireAbility('update', 'Organization'),
   zValidator('json', updateEntityTypePermissionsRequestSchema),
   async (c) => {
   const orgId = c.req.param('id');
@@ -502,6 +512,7 @@ organizationRoutes.patch('/:id/permissions',
  */
 organizationRoutes.post('/:id/users/invite',
   requireSuperadmin(),
+  requireAbility('create', 'User'),
   zValidator('json', inviteUserRequestSchema),
   async (c) => {
   const orgId = c.req.param('id');
@@ -635,6 +646,7 @@ organizationRoutes.post('/:id/users/invite',
  */
 organizationRoutes.post('/:id/users/add',
   requireSuperadmin(),
+  requireAbility('create', 'User'),
   zValidator('json', addUserToOrgRequestSchema),
   async (c) => {
   const orgId = c.req.param('id');
@@ -701,7 +713,7 @@ organizationRoutes.post('/:id/users/add',
  * GET /:id/users
  * List all users in an organization (superadmin only for any org)
  */
-organizationRoutes.get('/:id/users', requireSuperadmin(), async (c) => {
+organizationRoutes.get('/:id/users', requireSuperadmin(), requireAbility('read', 'User'), async (c) => {
   const orgId = c.req.param('id');
   console.log('[Orgs] Listing users for org:', orgId);
   

@@ -12,6 +12,8 @@ import type { MembershipKeyId } from '@1cc/shared';
 
 /**
  * Middleware that requires a specific ability
+ * 
+ * SECURITY: Explicitly checks for undefined ability to prevent silent failures
  */
 export function requireAbility(action: Actions, subject: Subjects) {
   return async (
@@ -20,7 +22,19 @@ export function requireAbility(action: Actions, subject: Subjects) {
   ) => {
     const ability = c.get('ability');
     
-    if (!ability?.can(action, subject)) {
+    // Explicit check for undefined ability (should not happen if authMiddleware ran)
+    if (!ability) {
+      console.error('[CASL] Ability not found in context - authMiddleware may have failed');
+      return c.json({
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Authentication required - ability not found'
+        }
+      }, 401);
+    }
+    
+    if (!ability.can(action, subject)) {
       console.log('[CASL] Permission denied:', { action, subject, userId: c.get('userId') });
       return c.json({
         success: false,

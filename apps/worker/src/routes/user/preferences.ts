@@ -11,6 +11,7 @@ import type { Env, Variables } from '../../types';
 import { readJSON, writeJSON, getUserPreferencesPath } from '../../lib/r2';
 import { updateUserPreferencesRequestSchema } from '@1cc/shared';
 import type { UserPreferences } from '@1cc/shared';
+import { ForbiddenError } from '../../middleware/error';
 
 export const userPreferencesRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -22,9 +23,19 @@ userPreferencesRoutes.get('/preferences', async (c) => {
   const userId = c.get('userId')!;
   console.log('[User] Getting preferences for:', userId);
   
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // CASL verifies user can only read their own preferences
   const preferences = await readJSON<UserPreferences>(
     c.env.R2_BUCKET,
-    getUserPreferencesPath(userId)
+    getUserPreferencesPath(userId),
+    ability,
+    'read',
+    'User'
   );
   
   // Return defaults if not set
@@ -59,9 +70,15 @@ userPreferencesRoutes.patch('/preferences',
   
   const updates = c.req.valid('json');
   
-  // Get current preferences
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Get current preferences - CASL verifies user can read their own preferences
   const prefsPath = getUserPreferencesPath(userId);
-  const currentPrefs = await readJSON<UserPreferences>(c.env.R2_BUCKET, prefsPath);
+  const currentPrefs = await readJSON<UserPreferences>(c.env.R2_BUCKET, prefsPath, ability, 'read', 'User');
   
   const updatedPrefs: UserPreferences = {
     userId,
@@ -77,7 +94,8 @@ userPreferencesRoutes.patch('/preferences',
     updatedAt: new Date().toISOString()
   };
   
-  await writeJSON(c.env.R2_BUCKET, prefsPath, updatedPrefs);
+  // CASL verifies user can write their own preferences
+  await writeJSON(c.env.R2_BUCKET, prefsPath, updatedPrefs, ability);
   
   console.log('[User] Updated preferences for:', userId);
   

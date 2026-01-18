@@ -23,6 +23,7 @@ import { deleteSlugIndex } from '../lib/slug-index';
 import { regenerateManifestsForType, regenerateAllManifests, loadAppConfig, validateVisibleTo, validateFieldVisibility } from '../lib/bundle-invalidation';
 import { createEntityTypeId, createSlug } from '../lib/id';
 import { requireSuperadmin } from '../middleware/auth';
+import { requireAbility } from '../middleware/casl';
 import { NotFoundError, ConflictError, ValidationError } from '../middleware/error';
 import { R2_PATHS } from '@1cc/shared';
 import type { EntityType, EntityTypeListItem, FieldDefinition, FieldSection, EntityTypePermissions, EntityStub, EntityLatestPointer, VisibilityScope, Entity, Organization } from '@1cc/shared';
@@ -35,6 +36,7 @@ export const entityTypeRoutes = new Hono<{ Bindings: Env; Variables: Variables }
  */
 entityTypeRoutes.post('/',
   requireSuperadmin(),
+  requireAbility('create', 'EntityType'),
   zValidator('json', createEntityTypeRequestSchema),
   async (c) => {
   console.log('[EntityTypes] Creating entity type');
@@ -175,6 +177,8 @@ entityTypeRoutes.post('/',
  *   - creatable: types the org can create (for entity creation forms)
  */
 entityTypeRoutes.get('/',
+  requireAbility('read', 'EntityType'),
+  requireAbility('read', 'EntityType'),
   zValidator('query', entityTypeQueryParamsSchema),
   async (c) => {
   console.log('[EntityTypes] Listing entity types');
@@ -324,11 +328,18 @@ entityTypeRoutes.get('/',
  * GET /:id
  * Get entity type definition
  */
-entityTypeRoutes.get('/:id', async (c) => {
+entityTypeRoutes.get('/:id', requireAbility('read', 'EntityType'), async (c) => {
   const typeId = c.req.param('id');
   console.log('[EntityTypes] Getting entity type:', typeId);
   
-  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId));
+  // Get CASL ability for file-level permission checks
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // CASL verifies user can read entity types
+  const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId), ability, 'read', 'EntityType');
   
   if (!entityType) {
     throw new NotFoundError('Entity Type', typeId);
@@ -340,9 +351,13 @@ entityTypeRoutes.get('/:id', async (c) => {
   const userOrgId = c.get('organizationId');
   
   if (userRole !== 'superadmin' && userOrgId) {
+    // CASL verifies user can read their org's permissions
     const permissions = await readJSON<EntityTypePermissions>(
       c.env.R2_BUCKET,
-      getOrgPermissionsPath(userOrgId)
+      getOrgPermissionsPath(userOrgId),
+      ability,
+      'read',
+      'Organization'
     );
     
     const canView = permissions?.viewable?.includes(typeId) || false;
@@ -365,6 +380,7 @@ entityTypeRoutes.get('/:id', async (c) => {
  */
 entityTypeRoutes.patch('/:id',
   requireSuperadmin(),
+  requireAbility('update', 'EntityType'),
   zValidator('json', updateEntityTypeRequestSchema),
   async (c) => {
   const typeId = c.req.param('id');
@@ -533,7 +549,7 @@ entityTypeRoutes.post('/migrate-permissions', requireSuperadmin(), async (c) => 
  * DELETE /:id
  * Archive entity type (superadmin only)
  */
-entityTypeRoutes.delete('/:id', requireSuperadmin(), async (c) => {
+entityTypeRoutes.delete('/:id', requireSuperadmin(), requireAbility('delete', 'EntityType'), async (c) => {
   const typeId = c.req.param('id');
   console.log('[EntityTypes] Archiving entity type:', typeId);
   
@@ -581,7 +597,7 @@ entityTypeRoutes.delete('/:id', requireSuperadmin(), async (c) => {
  * - Removes the type from all organization permissions
  * - Regenerates manifests to reflect the deletion
  */
-entityTypeRoutes.delete('/:id/hard', requireSuperadmin(), async (c) => {
+entityTypeRoutes.delete('/:id/hard', requireSuperadmin(), requireAbility('delete', 'EntityType'), async (c) => {
   const typeId = c.req.param('id');
   const deleteEntities = c.req.query('deleteEntities') === 'true';
   console.log('[EntityTypes] HARD DELETE - Starting permanent deletion of entity type:', typeId, 'deleteEntities:', deleteEntities);

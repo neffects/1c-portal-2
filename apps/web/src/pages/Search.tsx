@@ -7,6 +7,7 @@
 import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
 import { useSync } from '../stores/sync';
+import { useEntityTypes } from '../hooks/useDB';
 import { api } from '../lib/api';
 import { EntityCard } from '../components/EntityCard';
 import type { ManifestEntry, ManifestEntityType } from '@1cc/shared';
@@ -27,7 +28,8 @@ interface SearchResult {
 }
 
 export function Search() {
-  const { entityTypes, manifest, loading: syncLoading } = useSync();
+  const { syncing } = useSync();
+  const { data: types, loading: typesLoading } = useEntityTypes();
   
   const [filters, setFilters] = useState<SearchFilters>({
     query: '',
@@ -44,8 +46,6 @@ export function Search() {
   const [page, setPage] = useState(1);
   const [totalResults, setTotalResults] = useState(0);
   const pageSize = 20;
-  
-  const types = entityTypes.value;
   
   // Parse URL params on mount
   useEffect(() => {

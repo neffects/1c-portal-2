@@ -6,14 +6,16 @@
 
 import { useSync } from '../stores/sync';
 import { useAuth } from '../stores/auth';
+import { useEntityTypes } from '../hooks/useDB';
 import { TypeCard, TypeCardSkeleton } from '../components/TypeCard';
 
 export function HomePage() {
-  const { entityTypes, syncing } = useSync();
+  const { syncing } = useSync();
   const { isAuthenticated } = useAuth();
+  // Home page always shows public entity types (landing page)
+  const { data: types, loading } = useEntityTypes('public');
   
-  const types = entityTypes.value;
-  const isLoading = syncing.value && types.length === 0;
+  const isLoading = loading || (syncing.value && types.length === 0);
   
   return (
     <div class="min-h-[80vh]">

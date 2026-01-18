@@ -6,14 +6,55 @@
 
 import { useEffect, useState } from 'preact/hooks';
 import { useAuth } from '../stores/auth';
-import { useSync } from '../stores/sync';
+import { useEntity, useEntityType } from '../hooks/useDB';
 import { api } from '../lib/api';
 import { route } from 'preact-router';
 import type { EntityFlag } from '@1cc/shared';
 
+/**
+ * Flag Item Component
+ * Displays a single flagged entity with data from DB
+ */
+function FlagItem({ flag, onUnflag }: { flag: EntityFlag; onUnflag: (entityId: string) => void }) {
+  const { data: entity } = useEntity(flag.entityId);
+  const { data: entityType } = useEntityType(flag.entityTypeId);
+  
+  const name = entity?.name || `Entity ${flag.entityId}`;
+  
+  return (
+    <div class="card p-4 flex items-center justify-between">
+      <div>
+        <a 
+          href={entity && entityType ? `/browse/${entityType.slug}/${entity.slug || ''}` : '#'}
+          class="font-medium text-surface-900 dark:text-surface-100 hover:text-primary-600 dark:hover:text-primary-400"
+        >
+          {name}
+        </a>
+        <div class="flex items-center gap-3 mt-1 text-sm text-surface-500 dark:text-surface-400">
+          <span>{entityType?.name || 'Unknown type'}</span>
+          <span>·</span>
+          <span>Flagged {new Date(flag.flaggedAt).toLocaleDateString()}</span>
+        </div>
+        {flag.note && (
+          <p class="mt-2 text-sm text-surface-600 dark:text-surface-400 italic">
+            {flag.note}
+          </p>
+        )}
+      </div>
+      
+      <button
+        onClick={() => onUnflag(flag.entityId)}
+        class="btn-ghost text-sm text-surface-500 hover:text-red-600"
+      >
+        <span class="i-lucide-bell-off mr-1"></span>
+        Unwatch
+      </button>
+    </div>
+  );
+}
+
 export function AlertsPage() {
   const { isAuthenticated, loading: authLoading } = useAuth();
-  const { getEntity, getEntityType } = useSync();
   
   const [flags, setFlags] = useState<EntityFlag[]>([]);
   const [loading, setLoading] = useState(true);
@@ -119,43 +160,9 @@ export function AlertsPage() {
             </div>
           ) : flags.length > 0 ? (
             <div class="space-y-4">
-              {flags.map(flag => {
-                const entity = getEntity(flag.entityId);
-                const entityType = getEntityType(flag.entityTypeId);
-                // Entity name is a top-level property, not inside data
-                const name = entity?.name || `Entity ${flag.entityId}`;
-                
-                return (
-                  <div key={flag.entityId} class="card p-4 flex items-center justify-between">
-                    <div>
-                      <a 
-                        href={entity && entityType ? `/browse/${entityType.slug}/${entity.slug || ''}` : '#'}
-                        class="font-medium text-surface-900 dark:text-surface-100 hover:text-primary-600 dark:hover:text-primary-400"
-                      >
-                        {name}
-                      </a>
-                      <div class="flex items-center gap-3 mt-1 text-sm text-surface-500 dark:text-surface-400">
-                        <span>{entityType?.name || 'Unknown type'}</span>
-                        <span>·</span>
-                        <span>Flagged {new Date(flag.flaggedAt).toLocaleDateString()}</span>
-                      </div>
-                      {flag.note && (
-                        <p class="mt-2 text-sm text-surface-600 dark:text-surface-400 italic">
-                          {flag.note}
-                        </p>
-                      )}
-                    </div>
-                    
-                    <button
-                      onClick={() => handleUnflag(flag.entityId)}
-                      class="btn-ghost text-sm text-surface-500 hover:text-red-600"
-                    >
-                      <span class="i-lucide-bell-off mr-1"></span>
-                      Unwatch
-                    </button>
-                  </div>
-                );
-              })}
+              {flags.map(flag => (
+                <FlagItem key={flag.entityId} flag={flag} onUnflag={handleUnflag} />
+              ))}
             </div>
           ) : (
             <div class="card p-8 text-center">

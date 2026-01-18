@@ -12,7 +12,8 @@ import { readJSON, writeJSON, listFiles, getOrgProfilePath, getOrgPermissionsPat
 import { createOrgId, createSlug } from '../../lib/id';
 import { findOrgBySlug } from '../../lib/organizations';
 import { regenerateEntityBundles, loadAppConfig } from '../../lib/bundle-invalidation';
-import { ConflictError, NotFoundError } from '../../middleware/error';
+import { requireAbility } from '../../middleware/casl';
+import { ConflictError, NotFoundError, ForbiddenError } from '../../middleware/error';
 import { R2_PATHS } from '@1cc/shared';
 import type { Organization, EntityTypePermissions, EntityType } from '@1cc/shared';
 
@@ -23,6 +24,7 @@ export const superOrgRoutes = new Hono<{ Bindings: Env; Variables: Variables }>(
  * Create organization
  */
 superOrgRoutes.post('/organizations',
+  requireAbility('create', 'Organization'),
   zValidator('json', createOrganizationRequestSchema),
   async (c) => {
   const { name, slug, description, domainWhitelist, allowSelfSignup } = c.req.valid('json');
@@ -31,6 +33,12 @@ superOrgRoutes.post('/organizations',
   const existingOrg = await findOrgBySlug(c.env.R2_BUCKET, slug);
   if (existingOrg) {
     throw new ConflictError(`Organization with slug '${slug}' already exists`);
+  }
+  
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
   }
   
   const orgId = createOrgId();
@@ -50,9 +58,10 @@ superOrgRoutes.post('/organizations',
     isActive: true
   };
   
-  await writeJSON(c.env.R2_BUCKET, getOrgProfilePath(orgId), organization);
+  // CASL verifies superadmin can write organizations
+  await writeJSON(c.env.R2_BUCKET, getOrgProfilePath(orgId), organization, ability);
   
-  // Initialize permissions
+  // Initialize permissions - CASL verifies superadmin can write org permissions
   const permissions: EntityTypePermissions = {
     organizationId: orgId,
     viewable: [],
@@ -61,18 +70,20 @@ superOrgRoutes.post('/organizations',
     updatedBy: c.get('userId')!
   };
   
-  await writeJSON(c.env.R2_BUCKET, getOrgPermissionsPath(orgId), permissions);
+  await writeJSON(c.env.R2_BUCKET, getOrgPermissionsPath(orgId), permissions, ability);
   
   // Generate bundles for all entity types for this new organization (even if empty)
   // This ensures bundles exist immediately when the organization is created
   console.log('[SuperOrgs] Generating bundles for all entity types for new organization:', orgId);
   try {
-    const config = await loadAppConfig(c.env.R2_BUCKET);
-    const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`);
+    const config = await loadAppConfig(c.env.R2_BUCKET, ability);
+    // CASL verifies superadmin can list entity types
+    const typeFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PUBLIC}entity-types/`, ability);
     const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
     
     for (const file of definitionFiles) {
-      const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, file);
+      // CASL verifies superadmin can read entity types
+      const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, file, ability);
       if (entityType && entityType.isActive) {
         try {
           await regenerateEntityBundles(c.env.R2_BUCKET, entityType.id, orgId, config);
@@ -95,13 +106,20 @@ superOrgRoutes.post('/organizations',
  * GET /organizations
  * List all organizations
  */
-superOrgRoutes.get('/organizations', async (c) => {
-  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+superOrgRoutes.get('/organizations', requireAbility('read', 'Organization'), async (c) => {
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // CASL verifies superadmin can list and read organizations
+  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`, ability);
   const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
   
   const items = [];
   for (const file of profileFiles) {
-    const org = await readJSON<Organization>(c.env.R2_BUCKET, file);
+    const org = await readJSON<Organization>(c.env.R2_BUCKET, file, ability, 'read', 'Organization');
     if (org) {
       items.push(org);
     }

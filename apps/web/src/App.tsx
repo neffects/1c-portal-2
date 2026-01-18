@@ -6,7 +6,6 @@
 
 import { Router, Route } from 'preact-router';
 import { useEffect } from 'preact/hooks';
-import { loadBranding } from './stores/branding';
 
 // Layout
 import { Layout } from './components/Layout';
@@ -66,10 +65,7 @@ export function App() {
     console.log('[App] Theme initialized:', savedTheme || (prefersDark ? 'dark' : 'light'));
   }, []);
   
-  // Load branding configuration
-  useEffect(() => {
-    loadBranding();
-  }, []);
+  // Branding is now loaded automatically via manifest config in sync store
   
   return (
     <AuthProvider>

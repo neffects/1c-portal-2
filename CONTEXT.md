@@ -13,7 +13,7 @@
 | Backend | Cloudflare Workers | Stateless API endpoints, XState workflows |
 | Storage | Cloudflare R2 | Versioned JSON files, manifests, bundles |
 | Frontend | Preact + UnoCSS | Lightweight, fast UI with utility-first CSS |
-| Client Data | Local caching via signals | Reactive data management |
+| Client Data | TanStack DB + Query (ETag-based sync) | Offline-first local storage with reactive queries |
 | Auth | Magic Links + JWT | Passwordless authentication |
 | Workflows | XState | State machines for entity/user/org flows |
 
@@ -151,6 +151,51 @@ manifests/
     ├── member/site.json           # Org member manifest
     └── admin/site.json            # Org admin manifest
 ```
+
+### R2 Access Security (CASL-Protected)
+
+**CRITICAL**: All R2 storage access is CASL-protected. There is no way to bypass CASL authorization when accessing R2.
+
+**Single-Function Access Layer:**
+- All R2 operations go through CASL-aware functions in `lib/r2-casl.ts`
+- Routes and helpers import from `lib/r2.ts`, which re-exports CASL-aware functions
+- Direct `bucket.get()`, `bucket.put()`, `bucket.delete()`, `bucket.head()`, or `bucket.list()` calls are **forbidden** outside of `lib/r2-casl.ts`
+- The CASL layer enforces permissions before any R2 operation executes
+
+**CASL-Aware Functions:**
+- `readJSON()` - Read JSON files with CASL permission check
+- `readJSONWithEtag()` - Read JSON with ETag for conditional requests
+- `writeJSON()` - Write JSON files with CASL permission check + automatic bundle invalidation
+- `deleteFile()` - Delete files with CASL permission check
+- `fileExists()` - Check file existence with CASL permission check
+- `headFile()` - Get file metadata with CASL permission check
+- `listFiles()` - List files with CASL permission check
+- `listFilesPaginated()` - List files with pagination and CASL permission check
+- `writeFile()` - Write binary files (uploads) with CASL permission check
+- `readFile()` - Read binary files with CASL permission check
+- `checkETag()` - Low-cost ETag check with CASL permission check
+
+**Path-to-Permission Mapping:**
+- `entities/` and `stubs/` paths → `Entity` subject
+- `entity-types/` paths → `EntityType` subject
+- `orgs/*/profile.json` paths → `Organization` subject
+- `orgs/*/users/*` paths → `User` subject
+- `bundles/` paths → `Entity` subject (bundles contain entities)
+- `manifests/` paths → `Platform` subject
+- `uploads/` paths → `Platform` subject (file management)
+- `config/` and `secret/` paths → `Platform` subject (system config)
+- `public/` paths → `Entity` subject (public entities, but still CASL-checked)
+
+**Defense in Depth:**
+1. **Route Level**: `requireAbility()` middleware checks permissions before route handlers execute
+2. **R2 Level**: CASL-aware functions verify permissions again before R2 operations
+3. **Automatic Bundle Invalidation**: `writeJSON()` automatically triggers bundle regeneration when entities change
+
+**Security Guarantee:**
+- No route or helper function can bypass CASL
+- All R2 access requires a valid `AppAbility` object (from JWT context)
+- Permission checks happen at the data access layer, not just route level
+- Even if route middleware is bypassed, R2 operations are still protected
 
 ## API Endpoints
 
@@ -473,7 +518,7 @@ The project includes automated security testing with:
 
 ### Pending
 - 🔲 R2 bucket initialization
-- 🔲 TanStack DB integration for true offline
+- ✅ TanStack DB integration for true offline (completed - uses LocalStorageCollection for persistence with ETag-based bundle sync)
 - 🔲 Alert notification system (email digests)
 - 🔲 Performance optimization
 
@@ -843,9 +888,11 @@ The project includes automated security testing with:
     - **Solution**: Centralized bundle-invalidation.ts service for synchronous regeneration
     - **Location**: `apps/worker/src/lib/bundle-invalidation.ts`
     - **Key functions**:
-      - `regenerateEntityBundles(bucket, typeId, orgId, config)` - Regenerate bundles when entity changes
+      - `invalidateBundlesForFile(bucket, filePath, ability, entityMetadata?)` - Main entry point: analyzes file path and regenerates affected bundles/manifests
+      - `regenerateEntityBundles(bucket, typeId, orgId, config, ability)` - Regenerate bundles when entity changes (called automatically by `invalidateBundlesForFile()`)
       - `regenerateManifestsForType(bucket, typeId, config)` - Regenerate manifests when entity type changes
       - `regenerateOrgManifest(bucket, orgId)` - Regenerate org manifest
+      - **Automatic Bundle Invalidation**: `writeJSON()` automatically calls `invalidateBundlesForFile()` after successful entity writes
     - **Bundle creation triggers** (2026-01-XX):
       - Bundles are automatically created when they logically should exist, even if empty:
         - When entity types are created (if they have `visibleTo` configured)
@@ -888,7 +935,6 @@ interface EntityBundle {
   typeId: string;        // Entity type ID (NOT entityTypeId)
   typeName: string;
   generatedAt: string;
-  version: number;
   entityCount: number;
   entities: BundleEntity[];
 }
@@ -908,6 +954,66 @@ interface BundleEntity {
 - `EntityBundle` uses `typeId` at the bundle level (not `entityTypeId`)
 - `BundleEntity` does NOT include `entityTypeId` - the type is identified by the parent bundle's `typeId` field
 - This keeps bundle entities compact and avoids redundancy
+- **Bundles do NOT have versions** - change detection uses HTTP ETags instead (see Client Data Sync section below)
+
+### Client Data Sync (ETag-Based)
+
+Client data synchronization uses HTTP ETags for efficient bundle change detection and TanStack DB for offline-first local storage:
+
+**ETag-Based Bundle Sync:**
+- Bundles do NOT have version numbers - change detection uses HTTP ETags
+- Server returns `ETag` header in bundle responses (generated from R2 object MD5 hash)
+- Client sends `If-None-Match` header with stored ETag on bundle requests
+- Server returns `304 Not Modified` if ETag matches (no body transfer)
+- Client stores ETags in TanStack DB for conditional requests
+- Entities retain version numbers for historical tracking
+
+**TanStack DB + Query Integration:**
+- **TanStack DB**: Client-side database for offline-first local persistence
+  - Uses `LocalStorageCollection` for persistence (via `localStorageCollectionOptions`)
+  - Collections: `manifests`, `entityTypes`, `bundles`, `entities`
+  - Storage keys: `1cc-portal-manifests`, `1cc-portal-entity-types`, `1cc-portal-bundles`, `1cc-portal-entities`
+  - Bundle rows store ETags: `{ id, manifestId, typeId, etag, ... }`
+  - Data persists across page reloads and syncs across browser tabs automatically
+  - Location: `apps/web/src/stores/db.ts`
+  - Sync functions: `syncManifest()`, `syncBundle()`, `getBundleEtag()`, `getManifest()`, `getBundle()`
+- **TanStack Query**: Server state management with reactive queries (optional, currently using custom sync)
+  - Uses `@preact-signals/query` for Preact compatibility
+  - Automatic refetch on window focus/reconnect
+  - Stale-while-revalidate caching strategy
+  - `placeholderData` from DB for instant offline access
+- **Query Sync Store** (`apps/web/src/stores/query-sync.ts`): 
+  - ETag-based conditional requests via `useQuery$` hooks
+  - Automatic DB sync on successful API responses
+  - Manual refresh via `queryClient.invalidateQueries()`
+- **Sync Store** (`apps/web/src/stores/sync.tsx`):
+  - Updated to sync bundles to TanStack DB when loaded
+  - Uses `getBundleEtag()` from DB for conditional requests
+  - Calls `syncManifest()` and `syncBundle()` after fetching data
+
+**Initial Deeplink Load:**
+- TanStack Query and TanStack DB are NOT available on initial deeplink render
+- Initial load uses standard fetch/API calls without Query/DB dependencies
+- Query/DB are loaded client-side after initial render for SEO/fast initial load
+
+**Sync Store** (`apps/web/src/stores/sync.tsx`):
+- Uses localStorage and Preact signals for backward compatibility
+- Updated to use ETag-based API requests (removed version checks)
+- Automatically syncs all loaded bundles to TanStack DB via `syncBundle()`
+- Automatically syncs manifests to TanStack DB via `syncManifest()`
+- Uses `getBundleEtag()` from DB for conditional requests instead of localStorage
+- **Data access functions deprecated**: `getEntityType()`, `getBundle()`, `getEntity()`, `getEntityBySlug()`, `entityTypes`, `bundles` are deprecated
+- **Migration complete**: All UI components now use DB hooks from `hooks/useDB.ts` instead of sync store data access
+
+**DB Hooks** (`apps/web/src/hooks/useDB.ts`):
+- `useEntityType(idOrSlug)` - Get entity type by ID or slug
+- `useEntityTypes(manifestId?)` - Get all entity types for a manifest (uses `useManifestId()` if not provided)
+- `useBundle(manifestId, typeId)` - Get bundle by manifest ID and type ID
+- `useEntity(entityId)` - Get entity by ID
+- `useEntityBySlug(typeId, slug)` - Get entity by type ID and slug
+- `useManifestId()` - Helper hook to determine correct manifest ID based on auth state
+- All hooks return `{ data, loading, error }` for reactive state management
+- All hooks query TanStack DB (LocalStorageCollection) for offline-first access
 
 ### Entity Data Structure
 

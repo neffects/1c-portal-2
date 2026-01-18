@@ -11,6 +11,7 @@ import { entityQueryParamsSchema } from '@1cc/shared';
 import { readJSON, listFiles, getEntityLatestPath, getEntityVersionPath, getEntityStubPath, getEntityTypePath } from '../../lib/r2';
 import { R2_PATHS } from '@1cc/shared';
 import { projectFieldsForKey, getUserHighestMembershipKey, loadAppConfig } from '../../lib/bundle-invalidation';
+import { requireAbility } from '../../middleware/casl';
 import { NotFoundError } from '../../middleware/error';
 import type { Entity, EntityStub, EntityLatestPointer, EntityListItem, EntityType, VisibilityScope } from '@1cc/shared';
 
@@ -21,6 +22,7 @@ export const apiEntityRoutes = new Hono<{ Bindings: Env; Variables: Variables }>
  * List entities (authenticated platform content)
  */
 apiEntityRoutes.get('/entities',
+  requireAbility('read', 'Entity'),
   zValidator('query', entityQueryParamsSchema),
   async (c) => {
   console.log('[API] Listing entities');
@@ -37,19 +39,25 @@ apiEntityRoutes.get('/entities',
   // Cache entity types
   const entityTypeCache = new Map<string, EntityType>();
   
+  // Get CASL ability for file-level permission checks
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
   async function getEntityType(typeId: string): Promise<EntityType | null> {
     if (entityTypeCache.has(typeId)) {
       return entityTypeCache.get(typeId)!;
     }
-    const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId));
+    const entityType = await readJSON<EntityType>(c.env.R2_BUCKET, getEntityTypePath(typeId), ability);
     if (entityType) {
       entityTypeCache.set(typeId, entityType);
     }
     return entityType;
   }
   
-  // Get all entity stubs
-  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`);
+  // Get all entity stubs - CASL verifies user can list entities
+  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`, ability);
   console.log('[API] Found', stubFiles.length, 'entity stubs');
   console.log('[API] Listing entities - filters:', {
     typeId: query.typeId,
@@ -68,7 +76,7 @@ apiEntityRoutes.get('/entities',
   for (const stubFile of stubFiles) {
     if (!stubFile.endsWith('.json')) continue;
     
-    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile);
+    const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile, ability, 'read', 'Entity');
     if (!stub) {
       skippedCount++;
       continue;
@@ -103,10 +111,10 @@ apiEntityRoutes.get('/entities',
     let latestPointer: EntityLatestPointer | null = null;
     
     if (stub.organizationId === null) {
-      // Global entity - try public and authenticated paths
+      // Global entity - try public and authenticated paths - CASL verifies access
       for (const visibility of ['public', 'authenticated'] as const) {
         latestPath = getEntityLatestPath(visibility, stub.entityId, undefined);
-        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
         if (latestPointer) break;
       }
     } else {
@@ -118,9 +126,10 @@ apiEntityRoutes.get('/entities',
         continue;
       }
       // For superadmins viewing org entities, check members path for that organization
+      // CASL verifies user can access this org's entities
       latestPath = getEntityLatestPath('members', stub.entityId, stub.organizationId);
       console.log('[API] Checking latest pointer for org entity:', stub.entityId, 'in org:', stub.organizationId, 'at path:', latestPath);
-      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath);
+      latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
     }
     
     if (!latestPointer) {
@@ -164,12 +173,12 @@ apiEntityRoutes.get('/entities',
       console.log('[API] Superadmin access - including entity:', stub.entityId, 'status:', latestPointer.status, 'visibility:', latestPointer.visibility);
     }
     
-    // Get full entity
+    // Get full entity - CASL verifies user can access this entity file
     const storageVisibility: VisibilityScope = stub.organizationId === null 
       ? latestPointer.visibility 
       : 'members';
     const entityPath = getEntityVersionPath(storageVisibility, stub.entityId, latestPointer.version, stub.organizationId || undefined);
-    const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath);
+    const entity = await readJSON<Entity>(c.env.R2_BUCKET, entityPath, ability, 'read', 'Entity');
     
     if (!entity) {
       skippedCount++;
@@ -263,7 +272,7 @@ apiEntityRoutes.get('/entities',
  * This endpoint handles global entities (organizationId: null) stored in platform/ or public/ paths.
  * For org-scoped entities, use /api/orgs/:orgId/entities/:id instead.
  */
-apiEntityRoutes.get('/entities/:id', async (c) => {
+apiEntityRoutes.get('/entities/:id', requireAbility('read', 'Entity'), async (c) => {
   const entityId = c.req.param('id');
   const userRole = c.get('userRole');
   

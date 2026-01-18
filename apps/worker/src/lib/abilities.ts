@@ -36,13 +36,18 @@ export function defineAbilityFor(user: {
     const membership = user.orgMemberships.find(m => m.orgId === user.currentOrgId);
     
     if (membership?.role === 'org_admin') {
-      // Org admins can manage entities in their org
-      can('manage', 'Entity');
+      // Org admins can create, read, update, delete entities in their org
+      // Note: 'approve' action is reserved for superadmins only
+      can('create', 'Entity');
+      can('read', 'Entity');
+      can('update', 'Entity');
+      can('delete', 'Entity');
+      // Org admins can also manage users in their org
       can('read', 'User');
       can('create', 'User'); // Invite users
       can('update', 'User'); // Change roles
     } else if (membership?.role === 'org_member') {
-      // Org members can only read
+      // Org members can only read entities and users
       can('read', 'Entity');
       can('read', 'User');
     }

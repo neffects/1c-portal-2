@@ -18,12 +18,14 @@
 
 import { R2_PATHS } from '@1cc/shared';
 import { 
-  readJSON, writeJSON, listFiles,
+  readJSON, writeJSON, listFiles, headFile,
   getBundlePath, getManifestPath, getEntityTypePath, getOrgPermissionsPath,
   getOrgMemberBundlePath, getOrgAdminBundlePath, getGlobalAdminBundlePath,
   getOrgMemberManifestPath, getOrgAdminManifestPath,
-  getAppConfigPath
+  getAppConfigPath,
+  getEntityStubPath
 } from './r2';
+import type { AppAbility } from './abilities';
 import type { 
   Entity, EntityType, EntityBundle, BundleEntity,
   SiteManifest, ManifestEntityType, EntityTypePermissions,
@@ -39,20 +41,21 @@ import type {
  */
 let cachedConfig: AppConfig | null = null;
 
-export async function loadAppConfig(bucket: R2Bucket): Promise<AppConfig> {
+export async function loadAppConfig(bucket: R2Bucket, ability: AppAbility | null = null): Promise<AppConfig> {
   if (cachedConfig) {
     // Ensure public key exists in cached config too
     return ensurePublicKeyPresent(cachedConfig);
   }
   
-  let config = await readJSON<AppConfig>(bucket, getAppConfigPath());
+  // Config paths are system paths - allow null ability (with warning in r2-casl)
+  let config = await readJSON<AppConfig>(bucket, getAppConfigPath(), ability);
   
   if (!config) {
     // Auto-initialize default config if missing
     console.warn('[Config] App config not found in R2, auto-creating default config');
     console.warn('[Config] This is expected on first run but should not happen in production');
     config = createDefaultAppConfig();
-    await writeJSON(bucket, getAppConfigPath(), config);
+    await writeJSON(bucket, getAppConfigPath(), config, ability);
     console.log('[Config] Default app config created at:', getAppConfigPath());
   }
   
@@ -368,12 +371,14 @@ function getLegacyVisibility(entity: Entity): LegacyVisibility {
  * @param entityTypeId - The entity type ID
  * @param organizationId - The organization ID (null for global entities)
  * @param config - App config with membership keys
+ * @param ability - User's CASL ability (required for R2 access)
  */
 export async function regenerateEntityBundles(
   bucket: R2Bucket,
   entityTypeId: string,
   organizationId: string | null,
-  config: AppConfig
+  config: AppConfig,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Regenerating bundles for entity change:', {
     entityTypeId,
@@ -382,7 +387,8 @@ export async function regenerateEntityBundles(
 
   try {
     // Load entity type to get visibility config
-    const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(entityTypeId));
+    // Entity types are system/public paths - allow null ability (with warning)
+    const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(entityTypeId), ability);
     if (!entityType) {
       throw new Error(`Entity type ${entityTypeId} not found`);
     }
@@ -468,11 +474,11 @@ async function regenerateGlobalBundle(
   }
   
   // Create bundle - NOTE: Use typeId (NOT entityTypeId) to identify the entity type
+  // Bundles don't have versions - change detection uses HTTP ETags
   const bundle: EntityBundle = {
     typeId, // Bundle-level type identifier (NOT entityTypeId)
     typeName: entityType.pluralName,
     generatedAt: new Date().toISOString(),
-    version: Date.now(),
     entityCount: entities.length,
     entities
   };
@@ -629,11 +635,11 @@ async function regenerateGlobalAdminBundle(
   }
   
   // Create bundle - NOTE: Use typeId (NOT entityTypeId) to identify the entity type
+  // Bundles don't have versions - change detection uses HTTP ETags
   const bundle: EntityBundle = {
     typeId, // Bundle-level type identifier (NOT entityTypeId)
     typeName: entityType.pluralName,
     generatedAt: new Date().toISOString(),
-    version: Date.now(),
     entityCount: adminEntities.length,
     entities: adminEntities
   };
@@ -702,11 +708,11 @@ async function regenerateOrgBundlesForType(
   }
   
   // Save member bundle - NOTE: Use typeId (NOT entityTypeId)
+  // Bundles don't have versions - change detection uses HTTP ETags
   const memberBundle: EntityBundle = {
     typeId, // Bundle-level type identifier (NOT entityTypeId)
     typeName: entityType.pluralName,
     generatedAt: new Date().toISOString(),
-    version: Date.now(),
     entityCount: memberEntities.length,
     entities: memberEntities
   };
@@ -714,11 +720,11 @@ async function regenerateOrgBundlesForType(
   console.log('[BundleInvalidation] Generated org member bundle with', memberEntities.length, 'entities');
   
   // Save admin bundle - NOTE: Use typeId (NOT entityTypeId)
+  // Bundles don't have versions - change detection uses HTTP ETags
   const adminBundle: EntityBundle = {
     typeId, // Bundle-level type identifier (NOT entityTypeId)
     typeName: entityType.pluralName,
     generatedAt: new Date().toISOString(),
-    version: Date.now(),
     entityCount: adminEntities.length,
     entities: adminEntities
   };
@@ -728,6 +734,81 @@ async function regenerateOrgBundlesForType(
   // Update org manifests
   await updateOrgManifestForBundle(bucket, orgId, typeId, memberBundle, 'member');
   await updateOrgManifestForBundle(bucket, orgId, typeId, adminBundle, 'admin');
+}
+
+/**
+ * Update global manifest for a specific entity type (works without bundles)
+ * Used when entity types are created/updated - directly updates manifest using known typeId
+ */
+async function updateGlobalManifestForType(
+  bucket: R2Bucket,
+  keyId: MembershipKeyId,
+  typeId: string,
+  config: AppConfig
+): Promise<void> {
+  console.log('[BundleInvalidation] Updating global manifest for type:', keyId, typeId);
+  
+  const manifestPath = getManifestPath(keyId);
+  let manifest = await readJSON<SiteManifest>(bucket, manifestPath);
+  
+  if (!manifest) {
+    manifest = {
+      generatedAt: new Date().toISOString(),
+      version: Date.now(),
+      entityTypes: []
+    };
+  }
+  
+  // Read entity type directly (strongly consistent read after write)
+  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+  if (!entityType) {
+    console.error('[BundleInvalidation] Entity type not found for manifest update:', typeId);
+    return;
+  }
+  
+  // Try to get bundle for count/version info (optional - use defaults if not exists)
+  const bundlePath = getBundlePath(keyId, typeId);
+  const bundle = await readJSON<EntityBundle>(bucket, bundlePath);
+  
+  // Only include if this type is visible to this key and is active
+  if (!entityType.isActive || !entityType.visibleTo?.includes(keyId)) {
+    // Remove from manifest if it exists
+    manifest.entityTypes = manifest.entityTypes.filter(t => t.id !== typeId);
+  } else {
+    // Update or add the entity type entry
+    const existingIndex = manifest.entityTypes.findIndex(t => t.id === typeId);
+    const typeEntry: ManifestEntityType = {
+      id: entityType.id,
+      name: entityType.name,
+      pluralName: entityType.pluralName,
+      slug: entityType.slug,
+      description: entityType.description,
+      entityCount: bundle?.entityCount || 0,
+      lastUpdated: bundle?.generatedAt || new Date().toISOString()
+    };
+    
+    if (existingIndex >= 0) {
+      manifest.entityTypes[existingIndex] = typeEntry;
+    } else {
+      manifest.entityTypes.push(typeEntry);
+    }
+  }
+  
+  // Include config in manifest
+  manifest.config = {
+    branding: config.branding,
+    features: config.features,
+    sync: config.sync,
+    auth: config.auth,
+    apiBaseUrl: config.apiBaseUrl,
+    r2PublicUrl: config.r2PublicUrl
+  };
+  
+  manifest.generatedAt = new Date().toISOString();
+  manifest.version = Date.now();
+  
+  await writeJSON(bucket, manifestPath, manifest);
+  console.log('[BundleInvalidation] Global manifest updated at:', manifestPath);
 }
 
 /**
@@ -773,7 +854,6 @@ async function updateGlobalManifestForBundle(
       slug: entityType.slug,
       description: entityType.description,
       entityCount: bundle.entityCount,
-      bundleVersion: bundle.version,
       lastUpdated: bundle.generatedAt
     };
     
@@ -783,6 +863,16 @@ async function updateGlobalManifestForBundle(
       manifest.entityTypes.push(typeEntry);
     }
   }
+  
+  // Include config in manifest
+  manifest.config = {
+    branding: config.branding,
+    features: config.features,
+    sync: config.sync,
+    auth: config.auth,
+    apiBaseUrl: config.apiBaseUrl,
+    r2PublicUrl: config.r2PublicUrl
+  };
   
   manifest.generatedAt = new Date().toISOString();
   manifest.version = Date.now();
@@ -842,7 +932,6 @@ async function updateOrgManifestForBundle(
       slug: entityType.slug,
       description: entityType.description,
       entityCount: bundle.entityCount,
-      bundleVersion: bundle.version,
       lastUpdated: bundle.generatedAt
     };
     
@@ -883,11 +972,18 @@ export async function regenerateManifestsForType(
     
     console.log('[BundleInvalidation] Entity type visibleTo:', entityType.visibleTo, 'isActive:', entityType.isActive);
     
-    // Regenerate global manifests for each membership key
-    console.log('[BundleInvalidation] Regenerating global manifests for', config.membershipKeys.keys.length, 'membership keys');
+    // FIRST: Directly update manifests for the known entityTypeId (avoids listFiles eventual consistency)
+    // This ensures immediate updates using strongly consistent reads
+    console.log('[BundleInvalidation] Directly updating manifests for type:', entityTypeId);
+    for (const keyDef of config.membershipKeys.keys) {
+      await updateGlobalManifestForType(bucket, keyDef.id, entityTypeId, config);
+    }
+    
+    // THEN: Regenerate global manifests for full synchronization (ensures all types are in sync)
+    console.log('[BundleInvalidation] Regenerating global manifests for full sync:', config.membershipKeys.keys.length, 'membership keys');
     for (const keyDef of config.membershipKeys.keys) {
       console.log('[BundleInvalidation] Regenerating manifest for key:', keyDef.id);
-      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config);
+      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config, null);
       const typeInManifest = manifest.entityTypes.find(t => t.id === entityTypeId);
       if (typeInManifest) {
         console.log('[BundleInvalidation] Type', entityTypeId, 'is included in', keyDef.id, 'manifest');
@@ -913,7 +1009,8 @@ export async function regenerateManifestsForType(
 async function regenerateGlobalManifest(
   bucket: R2Bucket,
   keyId: MembershipKeyId,
-  config: AppConfig
+  config: AppConfig,
+  ability: AppAbility | null = null
 ): Promise<SiteManifest> {
   console.log('[BundleInvalidation] Generating global manifest for key:', keyId);
   
@@ -927,13 +1024,13 @@ async function regenerateGlobalManifest(
     try {
       // Verify file actually exists before trying to read it
       // This handles R2 eventual consistency where listFiles might return deleted files
-      const fileHead = await bucket.head(file);
+      const fileHead = await headFile(bucket, file, ability);
       if (!fileHead) {
         console.log('[BundleInvalidation] File no longer exists (was deleted), skipping:', file);
         continue;
       }
       
-      const entityType = await readJSON<EntityType>(bucket, file);
+      const entityType = await readJSON<EntityType>(bucket, file, ability, 'read', 'EntityType');
       // Skip if file doesn't exist, is null, or is inactive
       if (!entityType || !entityType.isActive) {
         console.log('[BundleInvalidation] Skipping entity type (missing or inactive):', file);
@@ -945,7 +1042,7 @@ async function regenerateGlobalManifest(
       
       // Get bundle for count and version info
       const bundlePath = getBundlePath(keyId, entityType.id);
-      const bundle = await readJSON<EntityBundle>(bucket, bundlePath);
+      const bundle = await readJSON<EntityBundle>(bucket, bundlePath, ability, 'read', 'Entity');
       
       entityTypes.push({
         id: entityType.id,
@@ -954,7 +1051,6 @@ async function regenerateGlobalManifest(
         slug: entityType.slug,
         description: entityType.description,
         entityCount: bundle?.entityCount || 0,
-        bundleVersion: bundle?.version || 0,
         lastUpdated: bundle?.generatedAt || new Date().toISOString()
       });
     } catch (err) {
@@ -967,7 +1063,16 @@ async function regenerateGlobalManifest(
   const manifest: SiteManifest = {
     generatedAt: new Date().toISOString(),
     version: Date.now(),
-    entityTypes
+    entityTypes,
+    // Include app config for frontend consumption
+    config: {
+      branding: config.branding,
+      features: config.features,
+      sync: config.sync,
+      auth: config.auth,
+      apiBaseUrl: config.apiBaseUrl,
+      r2PublicUrl: config.r2PublicUrl
+    }
   };
   
   const manifestPath = getManifestPath(keyId);
@@ -1015,8 +1120,8 @@ export async function regenerateOrgManifest(
   
   try {
     // Regenerate both member and admin manifests
-    await regenerateOrgManifestForRole(bucket, orgId, 'member');
-    await regenerateOrgManifestForRole(bucket, orgId, 'admin');
+    await regenerateOrgManifestForRole(bucket, orgId, 'member', null);
+    await regenerateOrgManifestForRole(bucket, orgId, 'admin', null);
     console.log('[BundleInvalidation] Org manifests regenerated:', orgId);
   } catch (error) {
     console.error('[BundleInvalidation] Error regenerating org manifest:', error);
@@ -1025,12 +1130,201 @@ export async function regenerateOrgManifest(
 }
 
 /**
+ * Invalidate and regenerate bundles/manifests based on which file was updated
+ * 
+ * This is the main entry point for bundle invalidation - it analyzes the file path
+ * and determines which bundles/manifests need to be regenerated.
+ * 
+ * @param bucket - R2 bucket instance
+ * @param filePath - The R2 path of the file that was updated
+ * @param ability - User's CASL ability (required for R2 access)
+ * @param entityMetadata - Optional entity metadata to avoid R2 stub read (entityTypeId, organizationId)
+ */
+export async function invalidateBundlesForFile(
+  bucket: R2Bucket,
+  filePath: string,
+  ability: AppAbility | null = null,
+  entityMetadata?: { entityTypeId: string; organizationId: string | null }
+): Promise<void> {
+  console.log('[BundleInvalidation] Invalidating bundles for file:', filePath);
+  
+  try {
+    const config = await loadAppConfig(bucket, ability);
+    
+    // Check if this is an entity file
+    const entityInfo = extractEntityInfoFromPath(filePath);
+    if (entityInfo) {
+      // Entity file or stub was updated - use provided metadata or read stub
+      let entityTypeId: string;
+      let organizationId: string | null;
+      
+      if (entityMetadata) {
+        // Use provided metadata to avoid R2 stub read (optimization)
+        entityTypeId = entityMetadata.entityTypeId;
+        organizationId = entityMetadata.organizationId;
+        console.log('[BundleInvalidation] Using provided entity metadata, avoiding stub read');
+      } else if ('entityId' in entityInfo) {
+        // Read stub to get entityTypeId (fallback if metadata not provided)
+        const stubPath = getEntityStubPath(entityInfo.entityId);
+        const stub = await readJSON<{ entityTypeId: string; organizationId: string | null }>(
+          bucket,
+          stubPath,
+          ability,
+          'read',
+          'Entity'
+        );
+        
+        if (!stub) {
+          console.warn('[BundleInvalidation] Entity stub not found for bundle invalidation:', entityInfo.entityId);
+          return;
+        }
+        
+        entityTypeId = stub.entityTypeId;
+        organizationId = entityInfo.organizationId !== undefined ? entityInfo.organizationId : stub.organizationId;
+      } else {
+        // Already have entityTypeId (shouldn't happen with current path patterns, but handle it)
+        entityTypeId = entityInfo.entityTypeId;
+        organizationId = entityInfo.organizationId;
+      }
+      
+      // Regenerate bundles for this entity's type and org
+      console.log('[BundleInvalidation] Entity file updated, regenerating bundles for type:', entityTypeId, 'org:', organizationId);
+      await regenerateEntityBundles(
+        bucket,
+        entityTypeId,
+        organizationId,
+        config,
+        ability
+      );
+      return;
+    }
+    
+    // Check if this is an entity type file
+    const entityTypeMatch = filePath.match(/entity-types\/([^\/]+)\/definition\.json$/);
+    if (entityTypeMatch) {
+      const typeId = entityTypeMatch[1];
+      console.log('[BundleInvalidation] Entity type updated, regenerating bundles for all entities of type:', typeId);
+      
+      // Entity type definition changed - regenerate global bundles
+      await regenerateEntityBundles(bucket, typeId, null, config, ability);
+      
+      // Also regenerate for all organizations that have this type
+      // List all orgs and regenerate their bundles for this type
+      const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+      for (const orgDir of orgDirs) {
+        // Extract org ID from path like "orgs/{orgId}/"
+        const orgMatch = orgDir.match(/orgs\/([^\/]+)\//);
+        if (orgMatch) {
+          const orgId = orgMatch[1];
+          console.log('[BundleInvalidation] Regenerating org bundles for org:', orgId, 'type:', typeId);
+          try {
+            await regenerateEntityBundles(bucket, typeId, orgId, config, ability);
+          } catch (error) {
+            // Log but continue with other orgs
+            console.error('[BundleInvalidation] Failed to regenerate bundles for org:', orgId, error);
+          }
+        }
+      }
+      return;
+    }
+    
+    // Check if this is an organization profile file
+    const orgProfileMatch = filePath.match(/orgs\/([^\/]+)\/profile\.json$/);
+    if (orgProfileMatch) {
+      const orgId = orgProfileMatch[1];
+      console.log('[BundleInvalidation] Organization profile updated, regenerating org manifests:', orgId);
+      
+      // Organization profile changed - regenerate org manifests
+      await regenerateOrgManifest(bucket, orgId);
+      return;
+    }
+    
+    // Check if this is an organization permissions file
+    const orgPermissionsMatch = filePath.match(/policies\/organizations\/([^\/]+)\/entity-type-permissions\.json$/);
+    if (orgPermissionsMatch) {
+      const orgId = orgPermissionsMatch[1];
+      console.log('[BundleInvalidation] Organization permissions updated, regenerating org manifests:', orgId);
+      
+      // Organization permissions changed - regenerate org manifests
+      // Note: This might also require regenerating bundles if permissions affect which entities are visible
+      // For now, just regenerate manifests; bundle regeneration happens when entities change
+      await regenerateOrgManifest(bucket, orgId);
+      
+      // Also regenerate bundles for all entity types that this org has access to
+      // This ensures bundles reflect the updated permissions
+      const permissions = await readJSON<EntityTypePermissions>(
+        bucket,
+        getOrgPermissionsPath(orgId),
+        ability
+      );
+      
+      if (permissions?.viewable) {
+        for (const typeId of permissions.viewable) {
+          console.log('[BundleInvalidation] Regenerating bundles for org:', orgId, 'type:', typeId, 'due to permission change');
+          try {
+            await regenerateEntityBundles(bucket, typeId, orgId, config, ability);
+          } catch (error) {
+            console.error('[BundleInvalidation] Failed to regenerate bundles for org:', orgId, 'type:', typeId, error);
+          }
+        }
+      }
+      return;
+    }
+    
+    // Unknown file type - no bundle invalidation needed
+    console.log('[BundleInvalidation] File type not recognized for bundle invalidation:', filePath);
+    
+  } catch (error) {
+    console.error('[BundleInvalidation] Error invalidating bundles for file:', filePath, error);
+    throw error;
+  }
+}
+
+/**
+ * Extract entity information from R2 path
+ * Returns entityTypeId and organizationId if path is an entity file or stub
+ * Note: For stubs, returns entityId only - caller must read stub to get entityTypeId
+ */
+function extractEntityInfoFromPath(filePath: string): { entityId: string; organizationId: string | null; entityTypeId?: never } | { entityTypeId: string; organizationId: string | null; entityId?: never } | null {
+  // Check for entity stub: stubs/{entityId}.json
+  const stubMatch = filePath.match(/^stubs\/([^\/]+)\.json$/);
+  if (stubMatch) {
+    const entityId = stubMatch[1];
+    // Return entityId only - caller will need to read stub to get entityTypeId
+    return { entityId, organizationId: null };
+  }
+  
+  // Check for entity version or latest file:
+  // - public/entities/{entityId}/v{version}.json
+  // - platform/entities/{entityId}/v{version}.json  
+  // - private/orgs/{orgId}/entities/{entityId}/v{version}.json
+  // - public/entities/{entityId}/latest.json
+  // - platform/entities/{entityId}/latest.json
+  // - private/orgs/{orgId}/entities/{entityId}/latest.json
+  const orgEntityMatch = filePath.match(/private\/orgs\/([^\/]+)\/entities\/([^\/]+)\//);
+  if (orgEntityMatch) {
+    const orgId = orgEntityMatch[1];
+    const entityId = orgEntityMatch[2];
+    return { entityId, organizationId: orgId };
+  }
+  
+  const globalEntityMatch = filePath.match(/\/(?:public|platform)\/entities\/([^\/]+)\//);
+  if (globalEntityMatch) {
+    const entityId = globalEntityMatch[1];
+    return { entityId, organizationId: null };
+  }
+  
+  return null;
+}
+
+/**
  * Regenerate org manifest for a specific role (member or admin)
  */
 async function regenerateOrgManifestForRole(
   bucket: R2Bucket,
   orgId: string,
-  role: 'member' | 'admin'
+  role: 'member' | 'admin',
+  ability: AppAbility | null = null
 ): Promise<SiteManifest> {
   console.log('[BundleInvalidation] Generating org manifest:', orgId, role);
   
@@ -1051,13 +1345,13 @@ async function regenerateOrgManifestForRole(
     try {
       // Verify file actually exists before trying to read it
       // This handles R2 eventual consistency where listFiles might return deleted files
-      const fileHead = await bucket.head(file);
+      const fileHead = await headFile(bucket, file, ability);
       if (!fileHead) {
         console.log('[BundleInvalidation] File no longer exists (was deleted), skipping:', file);
         continue;
       }
       
-      const entityType = await readJSON<EntityType>(bucket, file);
+      const entityType = await readJSON<EntityType>(bucket, file, ability, 'read', 'EntityType');
       // Skip if file doesn't exist, is null, or is inactive
       if (!entityType || !entityType.isActive) {
         console.log('[BundleInvalidation] Skipping entity type (missing or inactive):', file);
@@ -1071,7 +1365,7 @@ async function regenerateOrgManifestForRole(
       const bundlePath = role === 'admin'
         ? getOrgAdminBundlePath(orgId, entityType.id)
         : getOrgMemberBundlePath(orgId, entityType.id);
-      const bundle = await readJSON<EntityBundle>(bucket, bundlePath);
+      const bundle = await readJSON<EntityBundle>(bucket, bundlePath, ability, 'read', 'Entity');
       
       entityTypes.push({
         id: entityType.id,
@@ -1080,7 +1374,6 @@ async function regenerateOrgManifestForRole(
         slug: entityType.slug,
         description: entityType.description,
         entityCount: bundle?.entityCount || 0,
-        bundleVersion: bundle?.version || 0,
         lastUpdated: bundle?.generatedAt || new Date().toISOString()
       });
     } catch (err) {
@@ -1161,7 +1454,7 @@ export async function regenerateAllManifests(
     // but readJSON will return null for non-existent files and they'll be skipped
     for (const keyDef of config.membershipKeys.keys) {
       console.log('[BundleInvalidation] Regenerating global manifest for key:', keyDef.id);
-      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config);
+      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config, null);
       console.log('[BundleInvalidation] Regenerated manifest for key', keyDef.id, 'with', manifest.entityTypes.length, 'types:', manifest.entityTypes.map(t => t.id).join(', '));
     }
     

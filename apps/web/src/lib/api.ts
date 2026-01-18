@@ -41,21 +41,55 @@ function getHeaders(): HeadersInit {
 }
 
 /**
- * Make a GET request
+ * API response with headers (for ETag support)
  */
-async function get<T>(path: string): Promise<ApiResponse<T>> {
-  console.log('[API] GET', path);
+export interface ApiResponseWithHeaders<T = unknown> extends ApiResponse<T> {
+  /** HTTP ETag from response header */
+  etag?: string | null;
+  /** Response status code */
+  status: number;
+  /** Whether response was 304 Not Modified */
+  notModified: boolean;
+}
+
+/**
+ * Make a GET request
+ * @param path - API path
+ * @param etag - Optional ETag for conditional request (If-None-Match header)
+ * @returns API response with ETag support
+ */
+async function get<T>(path: string, etag?: string | null): Promise<ApiResponseWithHeaders<T>> {
+  console.log('[API] GET', path, etag ? `(ETag: ${etag})` : '');
   
   try {
     const headers = getHeaders();
+    
+    // Add If-None-Match header if ETag provided
+    if (etag) {
+      headers['If-None-Match'] = etag;
+    }
     
     const response = await fetch(`${API_BASE}${path}`, {
       method: 'GET',
       headers
     });
     
+    // Handle 304 Not Modified (ETag matched, no body)
+    if (response.status === 304) {
+      console.log('[API] GET 304 Not Modified:', path);
+      return {
+        success: true,
+        etag: etag || null,
+        status: 304,
+        notModified: true
+      };
+    }
+    
     // Read response as text first (can only read body once)
     const text = await response.text();
+    
+    // Get ETag from response header
+    const responseEtag = response.headers.get('ETag');
     
     // Try to parse as JSON
     let data: ApiResponse<T>;
@@ -68,7 +102,10 @@ async function get<T>(path: string): Promise<ApiResponse<T>> {
           error: {
             code: 'PARSE_ERROR',
             message: 'Server returned empty response'
-          }
+          },
+          etag: responseEtag,
+          status: response.status,
+          notModified: false
         };
       }
       
@@ -84,7 +121,10 @@ async function get<T>(path: string): Promise<ApiResponse<T>> {
         error: {
           code: 'PARSE_ERROR',
           message: `Server returned non-JSON response (${response.status} ${response.statusText}). Check console for details.`
-        }
+        },
+        etag: responseEtag,
+        status: response.status,
+        notModified: false
       };
     }
     
@@ -92,7 +132,12 @@ async function get<T>(path: string): Promise<ApiResponse<T>> {
       console.error('[API] GET error:', path, response.status, data);
     }
     
-    return data;
+    return {
+      ...data,
+      etag: responseEtag,
+      status: response.status,
+      notModified: false
+    };
   } catch (error) {
     console.error('[API] GET fetch error:', path, error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -101,7 +146,9 @@ async function get<T>(path: string): Promise<ApiResponse<T>> {
       error: {
         code: 'NETWORK_ERROR',
         message: `Network request failed: ${errorMessage}`
-      }
+      },
+      status: 0,
+      notModified: false
     };
   }
 }

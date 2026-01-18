@@ -42,11 +42,26 @@ export function EntityImportExport() {
   // Import state
   const [importTypeId, setImportTypeId] = useState<string>('');
   const [importFile, setImportFile] = useState<File | null>(null);
-  const [importData, setImportData] = useState<Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; organizationId?: string | null; id?: string }>>([]);
+  const [importData, setImportData] = useState<Array<{ data: Record<string, unknown>; visibility?: string; slug?: string; organizationId?: string | null; organizationSlug?: string; id?: string }>>([]);
   const [importErrors, setImportErrors] = useState<ImportError[]>([]);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ success: boolean; count?: number; message?: string } | null>(null);
   const [entityTypeSchema, setEntityTypeSchema] = useState<EntityType | null>(null);
+  
+  // Import mode and update mode
+  const [importMode, setImportMode] = useState<'add-new' | 'update' | 'mixed'>('add-new');
+  const [globalUpdateMode, setGlobalUpdateMode] = useState<'in-place' | 'increment-version'>('increment-version');
+  
+  // Entity status tracking
+  interface EntityImportStatus {
+    rowIndex: number;
+    exists: boolean;
+    existingEntityId?: string;
+    status: 'new' | 'exists' | 'error';
+    shouldUpdate: boolean; // Checkbox state
+    updateMode: 'in-place' | 'increment-version'; // Per-entity update mode
+  }
+  const [entityStatuses, setEntityStatuses] = useState<EntityImportStatus[]>([]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   
@@ -247,6 +262,16 @@ export function EntityImportExport() {
         
         setImportData(entities);
         setImportErrors(validationErrors);
+        
+        // Initialize entity statuses (will be checked later or set by user interaction)
+        const initialStatuses: EntityImportStatus[] = entities.map((_, index) => ({
+          rowIndex: index,
+          exists: false, // Will be determined by backend or user marking
+          status: 'new',
+          shouldUpdate: false,
+          updateMode: globalUpdateMode
+        }));
+        setEntityStatuses(initialStatuses);
       } catch (err) {
         setImportErrors([{
           rowIndex: 0,
@@ -276,6 +301,16 @@ export function EntityImportExport() {
       
       setImportData(entities);
       setImportErrors([...conversionErrors, ...validationErrors]);
+      
+      // Initialize entity statuses (will be checked later or set by user interaction)
+      const initialStatuses: EntityImportStatus[] = entities.map((_, index) => ({
+        rowIndex: index,
+        exists: false, // Will be determined by backend or user marking
+        status: 'new',
+        shouldUpdate: false,
+        updateMode: globalUpdateMode
+      }));
+      setEntityStatuses(initialStatuses);
     }
   }
   
@@ -288,10 +323,31 @@ export function EntityImportExport() {
     setImportResult(null);
     
     try {
+      // Map entity statuses to shouldUpdate and updateMode flags
+      const entitiesWithFlags = importData.map((entity, index) => {
+        const status = entityStatuses[index];
+        return {
+          ...entity,
+          shouldUpdate: status?.shouldUpdate || false,
+          updateMode: status?.updateMode || globalUpdateMode
+        };
+      });
+      
+      console.log('[EntityImportExport] Importing with mode:', importMode, 'update mode:', globalUpdateMode);
+      console.log('[EntityImportExport] Entities with flags:', entitiesWithFlags.map((e, i) => ({
+        id: e.id,
+        slug: e.slug,
+        shouldUpdate: e.shouldUpdate,
+        updateMode: e.updateMode,
+        status: entityStatuses[i]?.status
+      })));
+      
       const response = await api.post('/api/super/entities/bulk-import', {
         entityTypeId: importTypeId,
         organizationId: null, // Global entities for superadmin
-        entities: importData
+        importMode,
+        updateMode: globalUpdateMode,
+        entities: entitiesWithFlags
       }) as {
         success: boolean;
         data?: { created: string[]; count: number };
@@ -333,6 +389,7 @@ export function EntityImportExport() {
       setImportFile(null);
       setImportData([]);
       setImportErrors([]);
+      setEntityStatuses([]);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -551,6 +608,7 @@ export function EntityImportExport() {
                   setImportData([]);
                   setImportErrors([]);
                   setImportResult(null);
+                  setEntityStatuses([]);
                 }}
                 class="input w-full max-w-md"
               >
@@ -562,6 +620,68 @@ export function EntityImportExport() {
                 ))}
               </select>
             </div>
+            
+            {/* Import Mode Selector */}
+            {importTypeId && (
+              <div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                    Import Mode
+                  </label>
+                  <select
+                    value={importMode}
+                    onChange={(e) => {
+                      const mode = (e.target as HTMLSelectElement).value as 'add-new' | 'update' | 'mixed';
+                      setImportMode(mode);
+                      // Reset entity statuses when mode changes
+                      if (importData.length > 0) {
+                        const newStatuses = entityStatuses.map(s => ({
+                          ...s,
+                          shouldUpdate: mode === 'update' ? true : (mode === 'mixed' ? s.shouldUpdate : false)
+                        }));
+                        setEntityStatuses(newStatuses);
+                      }
+                    }}
+                    class="input w-full"
+                  >
+                    <option value="add-new">Add New Only</option>
+                    <option value="update">Update Existing Only</option>
+                    <option value="mixed">Mixed (per entity)</option>
+                  </select>
+                </div>
+                
+                {/* Update Mode Selector (only visible when import mode allows updates) */}
+                {(importMode === 'update' || importMode === 'mixed') && (
+                  <div>
+                    <label class="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                      Update Mode (Default)
+                    </label>
+                    <select
+                      value={globalUpdateMode}
+                      onChange={(e) => {
+                        const mode = (e.target as HTMLSelectElement).value as 'in-place' | 'increment-version';
+                        setGlobalUpdateMode(mode);
+                        // Update all entity statuses that don't have per-entity override
+                        if (importData.length > 0) {
+                          const newStatuses = entityStatuses.map(s => ({
+                            ...s,
+                            updateMode: s.updateMode || mode // Only update if not set per-entity
+                          }));
+                          setEntityStatuses(newStatuses);
+                        }
+                      }}
+                      class="input w-full"
+                    >
+                      <option value="increment-version">Increment Version</option>
+                      <option value="in-place">Update In Place</option>
+                    </select>
+                    <p class="text-xs text-surface-500 dark:text-surface-400 mt-1">
+                      Per-entity settings can override this default
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
             
             {/* File Drop Zone */}
             {importTypeId && (
@@ -592,6 +712,7 @@ export function EntityImportExport() {
                         setImportData([]);
                         setImportErrors([]);
                         setImportResult(null);
+                        setEntityStatuses([]);
                         if (fileInputRef.current) {
                           fileInputRef.current.value = '';
                         }
@@ -669,13 +790,26 @@ export function EntityImportExport() {
                             {field.name}
                           </th>
                         ))}
-                      <th class="text-left px-4 py-2 font-medium text-surface-500 w-20">Status</th>
+                      <th class="text-left px-4 py-2 font-medium text-surface-500 w-24">Status</th>
+                      {(importMode === 'mixed' || importMode === 'update') && (
+                        <>
+                          <th class="text-left px-4 py-2 font-medium text-surface-500 w-32">Action</th>
+                          <th class="text-left px-4 py-2 font-medium text-surface-500 w-40">Update Mode</th>
+                        </>
+                      )}
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-surface-100 dark:divide-surface-700">
                     {importData.map((entity, index) => {
                       const rowErrors = importErrors.filter(e => e.rowIndex === index);
                       const hasErrors = rowErrors.length > 0;
+                      const entityStatus = entityStatuses[index] || {
+                        rowIndex: index,
+                        exists: false,
+                        status: 'new' as const,
+                        shouldUpdate: false,
+                        updateMode: globalUpdateMode
+                      };
                       const name = (entity.data.name as string) || `Entity ${index + 1}`;
                       const slug = (entity.slug || entity.data.slug) as string || '(auto-generated)';
                       const previewFields = entityTypeSchema.fields
@@ -702,7 +836,8 @@ export function EntityImportExport() {
                         <tr
                           key={index}
                           class={`hover:bg-surface-50 dark:hover:bg-surface-800/50 ${
-                            hasErrors ? 'bg-red-50/50 dark:bg-red-900/10' : ''
+                            hasErrors ? 'bg-red-50/50 dark:bg-red-900/10' : 
+                            entityStatus.exists ? 'bg-amber-50/50 dark:bg-amber-900/10' : ''
                           }`}
                         >
                           <td class="px-4 py-2 text-surface-700 dark:text-surface-300 font-mono text-xs">
@@ -728,13 +863,67 @@ export function EntityImportExport() {
                                 <span class="i-lucide-alert-circle text-xs"></span>
                                 Error
                               </span>
+                            ) : entityStatus.exists ? (
+                              <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                                <span class="i-lucide-info text-xs"></span>
+                                Exists
+                              </span>
                             ) : (
                               <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
-                                <span class="i-lucide-check-circle text-xs"></span>
-                                Ready
+                                <span class="i-lucide-plus-circle text-xs"></span>
+                                New
                               </span>
                             )}
                           </td>
+                          {(importMode === 'mixed' || importMode === 'update') && (
+                            <>
+                              <td class="px-4 py-2">
+                                {entityStatus.exists || importMode === 'mixed' ? (
+                                  <label class="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={entityStatus.shouldUpdate}
+                                      onChange={(e) => {
+                                        const newStatuses = [...entityStatuses];
+                                        if (!newStatuses[index]) {
+                                          newStatuses[index] = { ...entityStatus, rowIndex: index };
+                                        }
+                                        newStatuses[index].shouldUpdate = (e.target as HTMLInputElement).checked;
+                                        setEntityStatuses(newStatuses);
+                                      }}
+                                      class="w-4 h-4 text-primary-600 border-surface-300 rounded focus:ring-primary-500"
+                                    />
+                                    <span class="text-xs text-surface-600 dark:text-surface-400">
+                                      {entityStatus.shouldUpdate ? 'Update' : 'Create'}
+                                    </span>
+                                  </label>
+                                ) : (
+                                  <span class="text-xs text-surface-500">—</span>
+                                )}
+                              </td>
+                              <td class="px-4 py-2">
+                                {entityStatus.shouldUpdate && (entityStatus.exists || importMode === 'update') ? (
+                                  <select
+                                    value={entityStatus.updateMode}
+                                    onChange={(e) => {
+                                      const newStatuses = [...entityStatuses];
+                                      if (!newStatuses[index]) {
+                                        newStatuses[index] = { ...entityStatus, rowIndex: index };
+                                      }
+                                      newStatuses[index].updateMode = (e.target as HTMLSelectElement).value as 'in-place' | 'increment-version';
+                                      setEntityStatuses(newStatuses);
+                                    }}
+                                    class="input text-xs py-1 px-2 h-8"
+                                  >
+                                    <option value="increment-version">Increment Version</option>
+                                    <option value="in-place">In Place</option>
+                                  </select>
+                                ) : (
+                                  <span class="text-xs text-surface-500">—</span>
+                                )}
+                              </td>
+                            </>
+                          )}
                         </tr>
                       );
                     })}

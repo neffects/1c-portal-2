@@ -11,7 +11,7 @@ import { zValidator } from '@hono/zod-validator';
 import type { Env, Variables } from '../../types';
 import { readJSON, writeJSON, deleteFile, listFiles, getUserFlagsPath, getEntityStubPath } from '../../lib/r2';
 import { flagEntityRequestSchema } from '@1cc/shared';
-import { NotFoundError } from '../../middleware/error';
+import { NotFoundError, ForbiddenError } from '../../middleware/error';
 import { R2_PATHS } from '@1cc/shared';
 import type { EntityFlag, EntityStub } from '@1cc/shared';
 
@@ -25,13 +25,21 @@ userFlagsRoutes.get('/flags', async (c) => {
   const userId = c.get('userId')!;
   console.log('[User] Getting flags for:', userId);
   
-  const flagFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}users/${userId}/flags/`);
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // CASL verifies user can only list their own flags
+  const flagFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}users/${userId}/flags/`, ability);
   const jsonFiles = flagFiles.filter(f => f.endsWith('.json'));
   
   const flags: EntityFlag[] = [];
   
   for (const file of jsonFiles) {
-    const flag = await readJSON<EntityFlag>(c.env.R2_BUCKET, file);
+    // CASL verifies user can only read their own flags
+    const flag = await readJSON<EntityFlag>(c.env.R2_BUCKET, file, ability, 'read', 'Entity');
     if (flag) {
       flags.push(flag);
     }
@@ -63,15 +71,21 @@ userFlagsRoutes.post('/flags',
   
   console.log('[User] Flagging entity:', entityId, 'by user:', userId);
   
-  // Verify entity exists
-  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId));
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // Verify entity exists - CASL verifies user can read entities
+  const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, getEntityStubPath(entityId), ability, 'read', 'Entity');
   if (!stub) {
     throw new NotFoundError('Entity', entityId);
   }
   
-  // Check if already flagged
+  // Check if already flagged - CASL verifies user can read their own flags
   const flagPath = getUserFlagsPath(userId, entityId);
-  const existingFlag = await readJSON<EntityFlag>(c.env.R2_BUCKET, flagPath);
+  const existingFlag = await readJSON<EntityFlag>(c.env.R2_BUCKET, flagPath, ability, 'read', 'Entity');
   
   if (existingFlag) {
     return c.json({
@@ -80,7 +94,7 @@ userFlagsRoutes.post('/flags',
     });
   }
   
-  // Create flag
+  // Create flag - CASL verifies user can write their own flags
   const flag: EntityFlag = {
     userId,
     entityId,
@@ -88,7 +102,7 @@ userFlagsRoutes.post('/flags',
     flaggedAt: new Date().toISOString()
   };
   
-  await writeJSON(c.env.R2_BUCKET, flagPath, flag);
+  await writeJSON(c.env.R2_BUCKET, flagPath, flag, ability);
   
   console.log('[User] Flagged entity:', entityId);
   
@@ -108,14 +122,22 @@ userFlagsRoutes.delete('/flags/:entityId', async (c) => {
   
   console.log('[User] Unflagging entity:', entityId, 'by user:', userId);
   
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
   const flagPath = getUserFlagsPath(userId, entityId);
-  const flag = await readJSON<EntityFlag>(c.env.R2_BUCKET, flagPath);
+  // CASL verifies user can read their own flags
+  const flag = await readJSON<EntityFlag>(c.env.R2_BUCKET, flagPath, ability, 'read', 'Entity');
   
   if (!flag) {
     throw new NotFoundError('Flag', entityId);
   }
   
-  await deleteFile(c.env.R2_BUCKET, flagPath);
+  // CASL verifies user can delete their own flags
+  await deleteFile(c.env.R2_BUCKET, flagPath, ability);
   
   console.log('[User] Unflagged entity:', entityId);
   

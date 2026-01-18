@@ -1,149 +1,36 @@
 /**
  * R2 Storage Utilities
  * 
- * Helper functions for reading and writing JSON files to Cloudflare R2.
- * Handles serialization, error handling, and path management.
+ * IMPORTANT: All R2 operations now require CASL ability for security.
+ * This ensures CASL enforcement at the data layer - no R2 access can bypass authorization.
+ * 
+ * Re-exports CASL-aware functions from r2-casl.ts
+ * Path builders remain here for convenience.
  */
 
 import { R2_PATHS } from '@1cc/shared';
+import type { AppAbility } from './abilities';
+import type { Actions, Subjects } from './abilities';
+
+// Re-export CASL-aware functions from r2-casl
+export {
+  readJSON,
+  readJSONWithEtag,
+  writeJSON,
+  deleteFile,
+  fileExists,
+  headFile,
+  listFiles,
+  listFilesPaginated,
+  checkETag,
+  writeFile,
+  readFile
+} from './r2-casl';
 
 /**
- * Read a JSON file from R2
+ * Legacy type for backward compatibility
  */
-export async function readJSON<T>(
-  bucket: R2Bucket,
-  path: string
-): Promise<T | null> {
-  console.log('[R2] Reading:', path);
-  
-  try {
-    const object = await bucket.get(path);
-    
-    if (!object) {
-      console.log('[R2] File not found:', path);
-      return null;
-    }
-    
-    const text = await object.text();
-    const data = JSON.parse(text) as T;
-    
-    console.log('[R2] Read successful:', path);
-    return data;
-    
-  } catch (error) {
-    console.error('[R2] Read error:', path, error);
-    throw error;
-  }
-}
-
-/**
- * Write a JSON file to R2
- */
-export async function writeJSON<T>(
-  bucket: R2Bucket,
-  path: string,
-  data: T,
-  metadata?: Record<string, string>
-): Promise<void> {
-  console.log('[R2] Writing:', path);
-  
-  try {
-    const json = JSON.stringify(data, null, 2);
-    
-    await bucket.put(path, json, {
-      httpMetadata: {
-        contentType: 'application/json'
-      },
-      customMetadata: metadata
-    });
-    
-    console.log('[R2] Write successful:', path);
-    
-  } catch (error) {
-    console.error('[R2] Write error:', path, error);
-    throw error;
-  }
-}
-
-/**
- * Delete a file from R2
- */
-export async function deleteFile(
-  bucket: R2Bucket,
-  path: string
-): Promise<void> {
-  console.log('[R2] Deleting:', path);
-  
-  try {
-    await bucket.delete(path);
-    console.log('[R2] Delete successful:', path);
-  } catch (error) {
-    console.error('[R2] Delete error:', path, error);
-    throw error;
-  }
-}
-
-/**
- * Check if a file exists in R2
- */
-export async function fileExists(
-  bucket: R2Bucket,
-  path: string
-): Promise<boolean> {
-  const object = await bucket.head(path);
-  return object !== null;
-}
-
-/**
- * List files in a directory
- */
-export async function listFiles(
-  bucket: R2Bucket,
-  prefix: string,
-  limit: number = 1000
-): Promise<string[]> {
-  console.log('[R2] Listing:', prefix);
-  
-  const listed = await bucket.list({
-    prefix,
-    limit
-  });
-  
-  const paths = listed.objects.map(obj => obj.key);
-  console.log('[R2] Found', paths.length, 'files');
-  
-  return paths;
-}
-
-/**
- * List files with pagination
- */
-export async function listFilesPaginated(
-  bucket: R2Bucket,
-  prefix: string,
-  options: {
-    limit?: number;
-    cursor?: string;
-  } = {}
-): Promise<{
-  files: string[];
-  cursor?: string;
-  hasMore: boolean;
-}> {
-  const { limit = 100, cursor } = options;
-  
-  const listed = await bucket.list({
-    prefix,
-    limit,
-    cursor
-  });
-  
-  return {
-    files: listed.objects.map(obj => obj.key),
-    cursor: listed.truncated ? listed.cursor : undefined,
-    hasMore: listed.truncated
-  };
-}
+export type MembershipKeyId = string;
 
 // Path builders for different storage locations
 

@@ -59,7 +59,8 @@ authRoutes.post('/magic-link',
   };
   
   // Store token in R2
-  await writeJSON(c.env.R2_BUCKET, getMagicLinkPath(token), magicLinkData);
+  // Pass null ability - auth paths are allowed during authentication flows
+  await writeJSON(c.env.R2_BUCKET, getMagicLinkPath(token), magicLinkData, null);
   
   // Build magic link URL
   const baseUrl = c.env.API_BASE_URL || 'http://localhost:8787';
@@ -122,9 +123,11 @@ authRoutes.get('/verify', async (c) => {
   }
   
   // Read token from R2
+  // Pass null ability - auth paths are allowed during authentication flows
   const tokenData = await readJSON<MagicLinkToken>(
     c.env.R2_BUCKET, 
-    getMagicLinkPath(token)
+    getMagicLinkPath(token),
+    null
   );
   
   if (!tokenData) {
@@ -138,15 +141,17 @@ authRoutes.get('/verify', async (c) => {
   
   // Check if expired
   if (new Date(tokenData.expiresAt) < new Date()) {
-    await deleteFile(c.env.R2_BUCKET, getMagicLinkPath(token));
+    // Pass null ability - auth paths are allowed during authentication flows
+    await deleteFile(c.env.R2_BUCKET, getMagicLinkPath(token), null);
     return redirectWithError('This magic link has expired');
   }
   
   // Mark token as used
+  // Pass null ability - auth paths are allowed during authentication flows
   await writeJSON(c.env.R2_BUCKET, getMagicLinkPath(token), {
     ...tokenData,
     used: true
-  });
+  }, null);
   
   // Find or create user
   let user = await findUserByEmail(c.env.R2_BUCKET, tokenData.email, c.env.SUPERADMIN_EMAILS);
@@ -177,14 +182,16 @@ authRoutes.get('/verify', async (c) => {
     // Superadmins get access to ALL organizations
     console.log('[Auth] Verify - Superadmin user, listing all organizations');
     const prefix = `${R2_PATHS.PRIVATE}orgs/`;
-    const orgFiles = await listFiles(c.env.R2_BUCKET, prefix);
+    // Pass null ability - auth paths are allowed during authentication flows
+    const orgFiles = await listFiles(c.env.R2_BUCKET, prefix, null);
     
     // Filter for profile.json files only
     const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
     console.log('[Auth] Verify - Found', profileFiles.length, 'organization profiles');
     
     for (const profilePath of profileFiles) {
-      const org = await readJSON<Organization>(c.env.R2_BUCKET, profilePath);
+      // Pass null ability - auth paths are allowed during authentication flows
+      const org = await readJSON<Organization>(c.env.R2_BUCKET, profilePath, null);
       if (org && org.isActive) {
         organizations.push({
           id: org.id,
@@ -215,7 +222,8 @@ authRoutes.get('/verify', async (c) => {
   }
   
   // Clean up used token
-  await deleteFile(c.env.R2_BUCKET, getMagicLinkPath(token));
+  // Pass null ability - auth paths are allowed during authentication flows
+  await deleteFile(c.env.R2_BUCKET, getMagicLinkPath(token), null);
   
   console.log('[Auth] User authenticated:', user.id, isNewUser ? '(new)' : '(existing)', 'isSuperadmin:', isSuperadmin, 'orgs:', organizations.length);
   
@@ -336,14 +344,16 @@ authRoutes.get('/me', async (c) => {
     // Superadmins get access to ALL organizations
     console.log('[Auth] /me - Superadmin user, listing all organizations');
     const prefix = `${R2_PATHS.PRIVATE}orgs/`;
-    const orgFiles = await listFiles(c.env.R2_BUCKET, prefix);
+    // Pass null ability - auth paths are allowed during authentication flows
+    const orgFiles = await listFiles(c.env.R2_BUCKET, prefix, null);
     
     // Filter for profile.json files only
     const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
     console.log('[Auth] /me - Found', profileFiles.length, 'organization profiles');
     
     for (const profilePath of profileFiles) {
-      const org = await readJSON<Organization>(c.env.R2_BUCKET, profilePath);
+      // Pass null ability - auth paths are allowed during authentication flows
+      const org = await readJSON<Organization>(c.env.R2_BUCKET, profilePath, null);
       if (org && org.isActive) {
         organizations.push({
           id: org.id,
@@ -358,9 +368,11 @@ authRoutes.get('/me', async (c) => {
     const userOrgs = await listUserOrganizations(c.env.R2_BUCKET, payload.email, payload.sub);
     
     for (const userOrg of userOrgs) {
+      // Pass null ability - auth paths are allowed during authentication flows
       const org = await readJSON<Organization>(
         c.env.R2_BUCKET,
-        getOrgProfilePath(userOrg.orgId)
+        getOrgProfilePath(userOrg.orgId),
+        null
       );
       if (org) {
         organizations.push({
@@ -412,13 +424,15 @@ async function findUserByEmail(bucket: R2Bucket, email: string, superadminEmails
   
   // Check for superadmin in R2 (legacy support)
   const superadminPath = `${R2_PATHS.SECRET}superadmins/${email.toLowerCase()}.json`;
-  const superadmin = await readJSON<User>(bucket, superadminPath);
+  // Pass null ability - system paths are allowed during authentication flows
+  const superadmin = await readJSON<User>(bucket, superadminPath, null);
   if (superadmin) {
     return superadmin;
   }
   
   // List all organizations and search for user
-  const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+  // Pass null ability - auth paths are allowed during authentication flows
+  const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`, null);
   
   for (const orgDir of orgDirs) {
     // Extract org ID from path
@@ -426,10 +440,10 @@ async function findUserByEmail(bucket: R2Bucket, email: string, superadminEmails
     if (!match) continue;
     
     const orgId = match[1];
-    const userFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+    const userFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`, null);
     
     for (const userFile of userFiles) {
-      const user = await readJSON<OrganizationMembership>(bucket, userFile);
+      const user = await readJSON<OrganizationMembership>(bucket, userFile, null);
       if (user && user.email.toLowerCase() === email.toLowerCase()) {
         return {
           id: user.userId,
@@ -455,11 +469,12 @@ async function checkDomainWhitelist(bucket: R2Bucket, email: string): Promise<bo
   if (!domain) return false;
   
   // List all organizations
-  const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+  // Pass null ability - auth paths are allowed during authentication flows
+  const orgFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`, null);
   
   for (const file of orgFiles) {
     if (file.endsWith('/profile.json')) {
-      const org = await readJSON<Organization>(bucket, file);
+      const org = await readJSON<Organization>(bucket, file, null);
       if (org?.settings.allowSelfSignup && org.settings.domainWhitelist.includes(domain)) {
         return true;
       }
@@ -489,7 +504,8 @@ async function createNewUser(bucket: R2Bucket, email: string): Promise<User> {
   };
   
   // Store user in pending users
-  await writeJSON(bucket, `${R2_PATHS.PRIVATE}pending-users/${userId}.json`, user);
+  // Pass null ability - auth paths are allowed during authentication flows
+  await writeJSON(bucket, `${R2_PATHS.PRIVATE}pending-users/${userId}.json`, user, null);
   
   console.log('[Auth] Created new user:', userId);
   return user;
@@ -503,7 +519,8 @@ async function updateUserLastLogin(bucket: R2Bucket, user: User): Promise<void> 
   
   if (user.organizationId) {
     const membershipPath = getUserMembershipPath(user.organizationId, user.id);
-    const membership = await readJSON<OrganizationMembership>(bucket, membershipPath);
+    // Pass null ability - auth paths are allowed during authentication flows
+    const membership = await readJSON<OrganizationMembership>(bucket, membershipPath, null);
     
     if (membership) {
       // We don't have lastLogin in membership, could add it

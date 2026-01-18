@@ -79,14 +79,20 @@ userRoutes.get('/all', requireSuperadmin(), async (c) => {
     }
   }
   
-  // List all organizations and their users
-  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`);
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
+  // List all organizations and their users - CASL verifies superadmin can list orgs
+  const orgFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/`, ability);
   const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
   
-  // Build org name lookup
+  // Build org name lookup - CASL verifies superadmin can read orgs
   const orgNames = new Map<string, string>();
   for (const file of profileFiles) {
-    const org = await readJSON<Organization>(c.env.R2_BUCKET, file);
+    const org = await readJSON<Organization>(c.env.R2_BUCKET, file, ability, 'read', 'Organization');
     if (org) {
       orgNames.set(org.id, org.name);
     }
@@ -100,13 +106,14 @@ userRoutes.get('/all', requireSuperadmin(), async (c) => {
     const orgId = match[1];
     const orgName = orgNames.get(orgId);
     
-    // List users in this org
-    const userFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`);
+    // List users in this org - CASL verifies superadmin can list users
+    const userFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.PRIVATE}orgs/${orgId}/users/`, ability);
     
     for (const userFile of userFiles) {
       if (!userFile.endsWith('.json')) continue;
       
-      const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, userFile);
+      // CASL verifies superadmin can read user memberships
+      const membership = await readJSON<OrganizationMembership>(c.env.R2_BUCKET, userFile, ability, 'read', 'User');
       if (membership && !seenEmails.has(membership.email.toLowerCase())) {
         seenEmails.add(membership.email.toLowerCase());
         users.push({

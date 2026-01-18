@@ -62,12 +62,6 @@ export function StringField({ field, value, onChange, error, disabled, readOnly 
     onChange(inputValue);
   };
   
-  // #region agent log
-  if (constraints.pattern && field.id === 'slug') {
-    fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'StringField.tsx:30',message:'Setting pattern on slug field',data:{fieldId:field.id,originalPattern:constraints.pattern,htmlPattern,hasHyphen:constraints.pattern.includes('-'),hyphenPosition:constraints.pattern.indexOf('-')},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'H'})}).catch(()=>{});
-  }
-  // #endregion
-  
   return (
     <input
       type="text"
@@ -81,11 +75,6 @@ export function StringField({ field, value, onChange, error, disabled, readOnly 
       required={field.required}
       disabled={disabled}
       readOnly={readOnly}
-      onInvalid={(e) => {
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/c431055f-f878-4642-bb59-8869e38c7e8b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'StringField.tsx:45',message:'Pattern validation failed',data:{fieldId:field.id,pattern:htmlPattern,value:(e.target as HTMLInputElement).value,validityState:(e.target as HTMLInputElement).validity},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'I'})}).catch(()=>{});
-        // #endregion
-      }}
     />
   );
 }

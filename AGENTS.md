@@ -415,6 +415,14 @@ RESPONSIBILITIES:
 • Include robust error handling, input validation, and logging
 • NEVER hardcode secrets — use environment variables
 • Sanitize all user inputs, implement rate limiting
+• **CRITICAL: All R2 access MUST use CASL-aware functions** - Direct bucket operations are forbidden
+• **R2 Access Rules:**
+  - ALL R2 operations must go through `lib/r2.ts` (which re-exports CASL-aware functions)
+  - NEVER use direct `bucket.get()`, `bucket.put()`, `bucket.delete()`, `bucket.head()`, or `bucket.list()` calls
+  - All CASL-aware functions require `ability` parameter (from `c.get('ability')`)
+  - Route-level `requireAbility()` middleware provides defense in depth
+  - R2-level CASL checks provide second layer of security
+  - See `lib/r2-casl.ts` for implementation - this is the ONLY place direct bucket operations are allowed
 
 6. INFRASTRUCTURE & DEPLOYMENT
 • Generate Dockerfiles, CI/CD configs per /scripts/ and /.github/ conventions

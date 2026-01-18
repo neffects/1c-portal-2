@@ -17,6 +17,8 @@ import { signal } from '@preact/signals';
 import { useAuth } from '../stores/auth';
 import { useSync } from '../stores/sync';
 import { useBranding } from '../stores/branding';
+import { refreshAll as refreshQueryQueries, getQueryClient } from '../stores/query-sync';
+import { getDatabase } from '../stores/db';
 import type { SiteManifest, EntityBundle } from '@1cc/shared';
 
 // Debug panel visibility signal (persists across renders)
@@ -214,6 +216,22 @@ export function DebugPanel() {
     orgBundles: 0
   });
   
+  const [dbStats, setDbStats] = useState<{
+    initialized: boolean;
+    manifestCount: number;
+    entityTypeCount: number;
+    bundleCount: number;
+    entityCount: number;
+    latestBundleSync: Date | null;
+  }>({
+    initialized: false,
+    manifestCount: 0,
+    entityTypeCount: 0,
+    bundleCount: 0,
+    entityCount: 0,
+    latestBundleSync: null,
+  });
+  
   // Keyboard shortcut to toggle debug panel (Ctrl+Shift+D or Cmd+Shift+D)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -228,10 +246,11 @@ export function DebugPanel() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
   
-  // Check localStorage stats when panel opens
+  // Check localStorage stats and DB stats when panel opens
   useEffect(() => {
     if (isDebugPanelOpen.value) {
       updateLocalStorageStats();
+      updateDbStats();
     }
   }, [isDebugPanelOpen.value]);
   
@@ -271,11 +290,77 @@ export function DebugPanel() {
     });
   }
   
-  // Handle force sync
+  // Update TanStack DB stats
+  function updateDbStats() {
+    try {
+      console.log('[DebugPanel] Checking TanStack DB status...');
+      const db = getDatabase();
+      
+      // Count items in each collection
+      const manifests = Array.from(db.collections.manifests.values());
+      const entityTypes = Array.from(db.collections.entityTypes.values());
+      const bundles = Array.from(db.collections.bundles.values());
+      const entities = Array.from(db.collections.entities.values());
+      
+      // Find latest bundle sync timestamp
+      let latestBundleSync: Date | null = null;
+      for (const bundle of bundles) {
+        if (bundle.syncedAt) {
+          const syncDate = new Date(bundle.syncedAt);
+          if (!latestBundleSync || syncDate > latestBundleSync) {
+            latestBundleSync = syncDate;
+          }
+        }
+      }
+      
+      setDbStats({
+        initialized: true,
+        manifestCount: manifests.length,
+        entityTypeCount: entityTypes.length,
+        bundleCount: bundles.length,
+        entityCount: entities.length,
+        latestBundleSync,
+      });
+      
+      console.log('[DebugPanel] TanStack DB stats updated:', {
+        manifests: manifests.length,
+        entityTypes: entityTypes.length,
+        bundles: bundles.length,
+        entities: entities.length,
+        latestBundleSync: latestBundleSync?.toISOString(),
+      });
+    } catch (err) {
+      console.error('[DebugPanel] Error checking DB status:', err);
+      setDbStats({
+        initialized: false,
+        manifestCount: 0,
+        entityTypeCount: 0,
+        bundleCount: 0,
+        entityCount: 0,
+        latestBundleSync: null,
+      });
+    }
+  }
+  
+  // Handle force sync / refresh
   async function handleForceSync() {
-    console.log('[DebugPanel] Force sync triggered');
+    console.log('[DebugPanel] Force sync/refresh triggered');
+    
+    // If TanStack Query is available, invalidate queries
+    try {
+      const queryClient = getQueryClient();
+      refreshQueryQueries();
+      console.log('[DebugPanel] Query queries invalidated');
+    } catch (err) {
+      // Query might not be initialized yet - fall back to sync store
+      console.log('[DebugPanel] Query not available, using sync store');
+    }
+    
+    // Also trigger sync store refresh (for backward compatibility)
     await sync(true);
     updateLocalStorageStats();
+    // Refresh DB stats after sync to show updated bundle fetch times
+    updateDbStats();
   }
   
   // Handle clear cache
@@ -423,7 +508,36 @@ export function DebugPanel() {
               Last synced: {formatRelativeTime(lastSyncedAt.value)}
               {isOffline.value && ' (Offline)'}
             </div>
+            {dbStats.latestBundleSync && (
+              <div class="mt-1 text-xs text-surface-500 dark:text-surface-400">
+                Latest bundle fetch: {formatRelativeTime(dbStats.latestBundleSync)}
+              </div>
+            )}
           </div>
+          
+          {/* TanStack DB Status */}
+          <Section 
+            title="TanStack DB" 
+            status={dbStats.initialized ? (dbStats.bundleCount > 0 ? 'ok' : 'warning') : 'error'}
+            defaultOpen={false}
+          >
+            <Row label="Initialized" value={dbStats.initialized} />
+            <Row label="Manifests" value={dbStats.manifestCount} />
+            <Row label="Entity Types" value={dbStats.entityTypeCount} />
+            <Row label="Bundles" value={dbStats.bundleCount} />
+            <Row label="Entities" value={dbStats.entityCount} />
+            {dbStats.latestBundleSync && (
+              <Row 
+                label="Latest Bundle Sync" 
+                value={formatRelativeTime(dbStats.latestBundleSync)} 
+              />
+            )}
+            {!dbStats.initialized && (
+              <div class="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                TanStack DB not initialized or not in use
+              </div>
+            )}
+          </Section>
           
           {/* Auth State */}
           <Section 

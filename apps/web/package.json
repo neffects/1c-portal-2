@@ -17,10 +17,13 @@
   },
   "dependencies": {
     "@1cc/shared": "*",
+    "@preact-signals/query": "^2.1.2",
     "@preact/signals": "^1.2.3",
+    "@tanstack/db": "^0.5.20",
+    "@tanstack/query-core": "^5.90.19",
+    "clsx": "^2.1.1",
     "preact": "^10.22.0",
-    "preact-router": "^4.1.2",
-    "clsx": "^2.1.1"
+    "preact-router": "^4.1.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.45.0",

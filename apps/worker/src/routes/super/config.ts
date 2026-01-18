@@ -11,7 +11,7 @@ import { membershipKeyDefinitionSchema } from '@1cc/shared';
 import { z } from 'zod';
 import { readJSON, writeJSON, getAppConfigPath } from '../../lib/r2';
 import { loadAppConfig, clearAppConfigCache, regenerateAllManifests } from '../../lib/bundle-invalidation';
-import { ValidationError } from '../../middleware/error';
+import { ValidationError, ForbiddenError } from '../../middleware/error';
 import type { AppConfig, MembershipKeyDefinition } from '@1cc/shared';
 import { listFiles } from '../../lib/r2';
 import type { EntityType } from '@1cc/shared';
@@ -136,6 +136,12 @@ configRoutes.patch('/config/membership-keys',
   async (c) => {
   console.log('[Config] Updating membership keys config');
   
+  // Get CASL ability for file-level permission checks (defense in depth)
+  const ability = c.get('ability');
+  if (!ability) {
+    throw new ForbiddenError('CASL ability required');
+  }
+  
   try {
     const updates = c.req.valid('json');
     
@@ -149,7 +155,7 @@ configRoutes.patch('/config/membership-keys',
     // Load current config to merge with other settings
     let currentConfig: AppConfig;
     try {
-      currentConfig = await loadAppConfig(c.env.R2_BUCKET);
+      currentConfig = await loadAppConfig(c.env.R2_BUCKET, ability);
     } catch (error) {
       // If config doesn't exist, create default config structure
       if (error instanceof Error && (error.message.includes('not found') || error.message.includes('App config not found'))) {
@@ -161,7 +167,7 @@ configRoutes.patch('/config/membership-keys',
     }
     
     // Check for keys that are in use by entity types or organizations (warn but allow)
-    const usedKeys = await findKeysInUse(c.env.R2_BUCKET);
+    const usedKeys = await findKeysInUse(c.env.R2_BUCKET, ability);
     const deletedKeys: string[] = [];
     const currentKeyIds = new Set(currentConfig.membershipKeys.keys.map(k => k.id));
     const newKeyIds = new Set(updates.keys.map(k => k.id));
@@ -188,8 +194,14 @@ configRoutes.patch('/config/membership-keys',
       }
     };
     
-    // Write updated config to R2
-    await writeJSON(c.env.R2_BUCKET, getAppConfigPath(), updatedConfig);
+    // Get CASL ability for file-level permission checks (defense in depth)
+    const ability = c.get('ability');
+    if (!ability) {
+      throw new ForbiddenError('CASL ability required');
+    }
+    
+    // Write updated config to R2 - CASL verifies superadmin can write config
+    await writeJSON(c.env.R2_BUCKET, getAppConfigPath(), updatedConfig, ability);
     
     // Clear cache so next request picks up new config
     clearAppConfigCache();
@@ -232,16 +244,16 @@ configRoutes.patch('/config/membership-keys',
 /**
  * Helper: Find which membership keys are currently in use by entity types and organizations
  */
-async function findKeysInUse(bucket: R2Bucket): Promise<Set<string>> {
+async function findKeysInUse(bucket: R2Bucket, ability: AppAbility | null): Promise<Set<string>> {
   const usedKeys = new Set<string>();
   
   try {
-    // Check entity types
-    const typeFiles = await listFiles(bucket, 'public/entity-types/');
+    // Check entity types - CASL verifies superadmin can list and read entity types
+    const typeFiles = await listFiles(bucket, 'public/entity-types/', ability);
     const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
     
     for (const file of definitionFiles) {
-      const entityType = await readJSON<EntityType>(bucket, file);
+      const entityType = await readJSON<EntityType>(bucket, file, ability);
       if (!entityType) continue;
       
       // Check visibleTo
@@ -262,12 +274,12 @@ async function findKeysInUse(bucket: R2Bucket): Promise<Set<string>> {
     }
     
     // Check organizations (they may have membershipKey or membershipTier field)
-    const { listFiles: listFilesHelper, getOrgProfilePath } = await import('../../lib/r2');
-    const orgFiles = await listFilesHelper(bucket, 'private/orgs/');
+    // CASL verifies superadmin can list and read orgs
+    const orgFiles = await listFiles(bucket, 'private/orgs/', ability);
     const profileFiles = orgFiles.filter(f => f.endsWith('/profile.json'));
     
     for (const file of profileFiles) {
-      const org = await readJSON<{ membershipKey?: string; membershipTier?: string }>(bucket, file);
+      const org = await readJSON<{ membershipKey?: string; membershipTier?: string }>(bucket, file, ability);
       if (org?.membershipKey) {
         usedKeys.add(org.membershipKey);
       }

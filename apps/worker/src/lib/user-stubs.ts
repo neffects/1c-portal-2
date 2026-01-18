@@ -229,7 +229,8 @@ export async function listUserOrganizations(
   const prefix = getUserStubPrefix(emailHash, userId);
   
   // List all stub files for this user
-  const files = await listFiles(bucket, prefix);
+  // Pass null ability - user-stubs are auth paths allowed during authentication flows
+  const files = await listFiles(bucket, prefix, null);
   
   const organizations: Array<{ orgId: string; role: UserRole }> = [];
   

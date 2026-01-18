@@ -6,6 +6,8 @@
 
 import { Hono } from 'hono';
 import { authMiddleware } from '../middleware/auth';
+import { requireAbility } from '../middleware/casl';
+import { writeFile, readFile, headFile, deleteFile } from '../lib/r2';
 import type { Env, Context } from '../types';
 
 const files = new Hono<{ Bindings: Env }>();
@@ -17,10 +19,18 @@ const files = new Hono<{ Bindings: Env }>();
  * Upload a file
  * POST /files/upload
  */
-files.post('/upload', authMiddleware, async (c: Context) => {
+files.post('/upload',
+  authMiddleware,
+  requireAbility('write', 'Platform'),
+  async (c: Context) => {
   const user = c.get('user');
   if (!user) {
     return c.json({ success: false, error: { message: 'Unauthorized' } }, 401);
+  }
+  
+  const ability = c.get('ability');
+  if (!ability) {
+    return c.json({ success: false, error: { message: 'CASL ability required' } }, 401);
   }
   
   try {
@@ -63,18 +73,20 @@ files.post('/upload', authMiddleware, async (c: Context) => {
         path = `uploads/files/${filename}`;
     }
     
-    // Upload to R2
+    // Upload to R2 using CASL-aware function
     const arrayBuffer = await file.arrayBuffer();
-    await c.env.R2_BUCKET.put(path, arrayBuffer, {
-      httpMetadata: {
-        contentType: file.type
-      },
-      customMetadata: {
+    await writeFile(
+      c.env.R2_BUCKET,
+      path,
+      arrayBuffer,
+      ability,
+      {
         originalName: file.name,
         uploadedBy: user.id,
         uploadedAt: new Date().toISOString()
-      }
-    });
+      },
+      file.type
+    );
     
     // Generate public URL
     const publicUrl = `/files/${path}`;
@@ -105,6 +117,7 @@ files.post('/upload', authMiddleware, async (c: Context) => {
  * Get a file
  * GET /files/:path+
  * Security: Only allows access to files in uploads/ prefix
+ * Public access (no auth required) but CASL still checks path
  */
 files.get('/:path{.+}', async (c: Context) => {
   const path = c.req.param('path');
@@ -119,7 +132,8 @@ files.get('/:path{.+}', async (c: Context) => {
   }
   
   try {
-    const object = await c.env.R2_BUCKET.get(path);
+    // Use CASL-aware readFile (uploads/ paths are public, so ability can be null)
+    const object = await readFile(c.env.R2_BUCKET, path, null);
     
     if (!object) {
       return c.json({ success: false, error: { message: 'File not found' } }, 404);
@@ -147,17 +161,25 @@ files.get('/:path{.+}', async (c: Context) => {
  * Delete a file
  * DELETE /files/:path+
  */
-files.delete('/:path{.+}', authMiddleware, async (c: Context) => {
+files.delete('/:path{.+}',
+  authMiddleware,
+  requireAbility('delete', 'Platform'),
+  async (c: Context) => {
   const user = c.get('user');
   if (!user) {
     return c.json({ success: false, error: { message: 'Unauthorized' } }, 401);
+  }
+  
+  const ability = c.get('ability');
+  if (!ability) {
+    return c.json({ success: false, error: { message: 'CASL ability required' } }, 401);
   }
   
   const path = c.req.param('path');
   
   try {
     // Check if file exists and user has permission
-    const object = await c.env.R2_BUCKET.head(path);
+    const object = await headFile(c.env.R2_BUCKET, path, ability);
     
     if (!object) {
       return c.json({ success: false, error: { message: 'File not found' } }, 404);
@@ -169,7 +191,8 @@ files.delete('/:path{.+}', authMiddleware, async (c: Context) => {
       return c.json({ success: false, error: { message: 'Not authorized to delete this file' } }, 403);
     }
     
-    await c.env.R2_BUCKET.delete(path);
+    // Use CASL-aware deleteFile
+    await deleteFile(c.env.R2_BUCKET, path, ability, 'delete', 'Platform');
     
     console.log(`[Files] Deleted ${path} by user ${user.id}`);
     
