@@ -7,7 +7,7 @@
  * Bundle types:
  * - Global bundles: bundles/{keyId}/{typeId}.json (published entities, field-projected)
  * - Org member bundles: bundles/org/{orgId}/member/{typeId}.json (published only, all fields)
- * - Org admin bundles: bundles/org/{orgId}/admin/{typeId}.json (draft + deleted only, all fields)
+ * - Org admin bundles: bundles/org/{orgId}/admin/{typeId}.json (draft + pending + deleted, all fields)
  * 
  * Regeneration triggers:
  * - Entity create/update/delete
@@ -412,19 +412,19 @@ export async function regenerateEntityBundles(
         }
         
         console.log('[BundleInvalidation] Regenerating global bundle for key:', keyId);
-        await regenerateGlobalBundle(bucket, keyId, entityTypeId, entityType, config);
+        await regenerateGlobalBundle(bucket, keyId, entityTypeId, entityType, config, ability);
         
-        // Also regenerate admin bundle (draft + deleted entities)
-        // Admin bundles include all draft/deleted entities regardless of visibility
+        // Also regenerate admin bundle (draft + pending + archived + deleted entities)
+        // Admin bundles include all draft/pending/archived/deleted entities regardless of visibility
         console.log('[BundleInvalidation] Regenerating global admin bundle for key:', keyId);
-        await regenerateGlobalAdminBundle(bucket, keyId, entityTypeId, entityType);
+        await regenerateGlobalAdminBundle(bucket, keyId, entityTypeId, entityType, ability);
       }
     }
 
     // Regenerate org bundles if entity is org-scoped
     if (organizationId) {
       console.log('[BundleInvalidation] Regenerating org bundles for:', organizationId);
-      await regenerateOrgBundlesForType(bucket, organizationId, entityTypeId, entityType);
+      await regenerateOrgBundlesForType(bucket, organizationId, entityTypeId, entityType, ability);
     }
 
     console.log('[BundleInvalidation] Bundle regeneration complete');
@@ -442,7 +442,8 @@ async function regenerateGlobalBundle(
   keyId: MembershipKeyId,
   typeId: string,
   entityType: EntityType,
-  config: AppConfig
+  config: AppConfig,
+  ability: AppAbility | null = null
 ): Promise<EntityBundle> {
   console.log('[BundleInvalidation] Generating global bundle:', keyId, typeId);
   
@@ -452,15 +453,15 @@ async function regenerateGlobalBundle(
   
   // Check public entities
   const publicPrefix = `${R2_PATHS.PUBLIC}entities/`;
-  await collectEntitiesFromPrefix(bucket, publicPrefix, typeId, keyId, entityType, config, entities);
+  await collectEntitiesFromPrefix(bucket, publicPrefix, typeId, keyId, entityType, config, entities, ability);
   
   // Check platform entities
   const platformPrefix = `${R2_PATHS.PLATFORM}entities/`;
-  await collectEntitiesFromPrefix(bucket, platformPrefix, typeId, keyId, entityType, config, entities);
+  await collectEntitiesFromPrefix(bucket, platformPrefix, typeId, keyId, entityType, config, entities, ability);
   
   // Check org entities (only if they have visibility that includes this key)
   if (entityType.visibleTo?.includes(keyId)) {
-    const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+    const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`, ability);
     const orgIds = new Set<string>();
     for (const dir of orgDirs) {
       const match = dir.match(/orgs\/([^\/]+)\//);
@@ -469,7 +470,7 @@ async function regenerateGlobalBundle(
     
     for (const orgId of orgIds) {
       const orgPrefix = `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/`;
-      await collectEntitiesFromPrefix(bucket, orgPrefix, typeId, keyId, entityType, config, entities);
+      await collectEntitiesFromPrefix(bucket, orgPrefix, typeId, keyId, entityType, config, entities, ability);
     }
   }
   
@@ -485,12 +486,12 @@ async function regenerateGlobalBundle(
   
   // Save bundle
   const bundlePath = getBundlePath(keyId, typeId);
-  await writeJSON(bucket, bundlePath, bundle);
+  await writeJSON(bucket, bundlePath, bundle, ability);
   
   console.log('[BundleInvalidation] Generated global bundle with', entities.length, 'entities at:', bundlePath);
   
   // Update manifest
-  await updateGlobalManifestForBundle(bucket, keyId, typeId, bundle, config);
+  await updateGlobalManifestForBundle(bucket, keyId, typeId, bundle, config, ability);
   
   return bundle;
 }
@@ -505,9 +506,10 @@ async function collectEntitiesFromPrefix(
   keyId: MembershipKeyId,
   entityType: EntityType,
   config: AppConfig,
-  output: BundleEntity[]
+  output: BundleEntity[],
+  ability: AppAbility | null = null
 ): Promise<void> {
-  const entityFiles = await listFiles(bucket, prefix);
+  const entityFiles = await listFiles(bucket, prefix, ability);
   const latestFiles = entityFiles.filter(f => f.endsWith('/latest.json'));
   
   for (const latestFile of latestFiles) {
@@ -515,7 +517,7 @@ async function collectEntitiesFromPrefix(
     if (!entityIdMatch) continue;
     
     const entityId = entityIdMatch[1];
-    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile);
+    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile, ability);
     if (!latestPointer) continue;
     
     // Global bundles only include published entities
@@ -523,7 +525,7 @@ async function collectEntitiesFromPrefix(
     
     // Read entity version
     const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
-    const entity = await readJSON<Entity>(bucket, versionPath);
+    const entity = await readJSON<Entity>(bucket, versionPath, ability);
     
     if (!entity || entity.entityTypeId !== typeId) continue;
     
@@ -544,24 +546,26 @@ async function collectEntitiesFromPrefix(
 }
 
 /**
- * Regenerate a global admin bundle for a specific membership key (draft + deleted entities)
- * Admin bundles include ALL draft/deleted entities, not filtered by membership key visibility
+ * Regenerate a global admin bundle for a specific membership key (draft + pending + archived + deleted entities)
+ * Admin bundles include ALL draft/pending/archived/deleted entities, not filtered by membership key visibility
+ * Pending entities need approval, archived entities can be restored
  */
 async function regenerateGlobalAdminBundle(
   bucket: R2Bucket,
   keyId: MembershipKeyId,
   typeId: string,
-  entityType: EntityType
+  entityType: EntityType,
+  ability: AppAbility | null = null
 ): Promise<EntityBundle> {
   console.log('[BundleInvalidation] Generating global admin bundle:', keyId, typeId);
   
-  // Collect draft and deleted entities from global storage (public/ and platform/)
-  // Admin bundles include ALL draft/deleted entities regardless of visibility
+  // Collect draft, pending, archived, and deleted entities from global storage (public/ and platform/)
+  // Admin bundles include ALL draft/pending/archived/deleted entities regardless of visibility
   const adminEntities: BundleEntity[] = [];
   
   // Check public entities
   const publicPrefix = `${R2_PATHS.PUBLIC}entities/`;
-  const publicFiles = await listFiles(bucket, publicPrefix);
+  const publicFiles = await listFiles(bucket, publicPrefix, ability);
   const publicLatestFiles = publicFiles.filter(f => f.endsWith('/latest.json'));
   
   for (const latestFile of publicLatestFiles) {
@@ -569,15 +573,15 @@ async function regenerateGlobalAdminBundle(
     if (!entityIdMatch) continue;
     
     const entityId = entityIdMatch[1];
-    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile);
+    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile, ability);
     if (!latestPointer) continue;
     
-    // Admin bundles only include draft and deleted entities
-    if (latestPointer.status !== 'draft' && latestPointer.status !== 'deleted') continue;
+    // Admin bundles include draft, pending, archived, and deleted entities (pending needs approval, archived can be restored)
+    if (latestPointer.status !== 'draft' && latestPointer.status !== 'pending' && latestPointer.status !== 'archived' && latestPointer.status !== 'deleted') continue;
     
     // Read entity version
     const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
-    const entity = await readJSON<Entity>(bucket, versionPath);
+    const entity = await readJSON<Entity>(bucket, versionPath, ability);
     
     if (!entity || entity.entityTypeId !== typeId) continue;
     
@@ -597,7 +601,7 @@ async function regenerateGlobalAdminBundle(
   
   // Check platform entities
   const platformPrefix = `${R2_PATHS.PLATFORM}entities/`;
-  const platformFiles = await listFiles(bucket, platformPrefix);
+  const platformFiles = await listFiles(bucket, platformPrefix, ability);
   const platformLatestFiles = platformFiles.filter(f => f.endsWith('/latest.json'));
   
   for (const latestFile of platformLatestFiles) {
@@ -605,7 +609,7 @@ async function regenerateGlobalAdminBundle(
     if (!entityIdMatch) continue;
     
     const entityId = entityIdMatch[1];
-    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile);
+    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile, ability);
     if (!latestPointer) continue;
     
     // Admin bundles only include draft and deleted entities
@@ -613,7 +617,7 @@ async function regenerateGlobalAdminBundle(
     
     // Read entity version
     const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
-    const entity = await readJSON<Entity>(bucket, versionPath);
+    const entity = await readJSON<Entity>(bucket, versionPath, ability);
     
     if (!entity || entity.entityTypeId !== typeId) continue;
     
@@ -646,7 +650,7 @@ async function regenerateGlobalAdminBundle(
   
   // Save bundle
   const bundlePath = getGlobalAdminBundlePath(keyId, typeId);
-  await writeJSON(bucket, bundlePath, bundle);
+  await writeJSON(bucket, bundlePath, bundle, ability);
   
   console.log('[BundleInvalidation] Generated global admin bundle with', adminEntities.length, 'entities at:', bundlePath);
   
@@ -655,54 +659,117 @@ async function regenerateGlobalAdminBundle(
 
 /**
  * Regenerate org bundles (member and admin) for a specific type
+ * Uses entity stubs to find all entities, then locates latestPointer from correct path
  */
 async function regenerateOrgBundlesForType(
   bucket: R2Bucket,
   orgId: string,
   typeId: string,
-  entityType: EntityType
+  entityType: EntityType,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Generating org bundles:', orgId, typeId);
   
-  const orgPrefix = `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/`;
-  const entityFiles = await listFiles(bucket, orgPrefix);
-  const latestFiles = entityFiles.filter(f => f.endsWith('/latest.json'));
+  // Find all entity stubs for this org and typeId (more reliable than scanning paths)
+  const stubFiles = await listFiles(bucket, `${R2_PATHS.STUBS}`, ability);
+  const relevantStubs: { entityId: string }[] = [];
+  
+  for (const stubFile of stubFiles) {
+    if (!stubFile.endsWith('.json')) continue;
+    const stub = await readJSON<{ entityId: string; organizationId: string | null; entityTypeId: string }>(bucket, stubFile, ability);
+    if (stub && stub.organizationId === orgId && stub.entityTypeId === typeId) {
+      relevantStubs.push({ entityId: stub.entityId });
+    }
+  }
+  
+  console.log('[BundleInvalidation] Found', relevantStubs.length, 'entity stubs for org', orgId, 'type', typeId);
   
   const memberEntities: BundleEntity[] = [];
   const adminEntities: BundleEntity[] = [];
   
-  for (const latestFile of latestFiles) {
-    const entityIdMatch = latestFile.match(/entities\/([^\/]+)\/latest\.json/);
-    if (!entityIdMatch) continue;
+  for (const { entityId } of relevantStubs) {
+    // Find latestPointer by checking members path first, then visibility-based paths
+    // Published org entities with public/authenticated visibility may be in visibility-based paths
+    let latestPointer: { version: number; status: string; visibility: string } | null = null;
+    let storageVisibility: 'public' | 'authenticated' | 'members' = 'members';
     
-    const entityId = entityIdMatch[1];
-    const latestPointer = await readJSON<{ version: number; status: string }>(bucket, latestFile);
-    if (!latestPointer) continue;
+    // Check members path first (always has a pointer due to dual-path write)
+    const membersLatestPath = `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/${entityId}/latest.json`;
+    latestPointer = await readJSON<{ version: number; status: string; visibility: string }>(bucket, membersLatestPath, ability);
     
-    const versionPath = latestFile.replace('latest.json', `v${latestPointer.version}.json`);
-    const entity = await readJSON<Entity>(bucket, versionPath);
+    if (latestPointer) {
+      // Determine actual storage location based on status and visibility
+      if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
+        // Drafts/pending are always in members path
+        storageVisibility = 'members';
+      } else if (latestPointer.visibility === 'members') {
+        // Published with members visibility
+        storageVisibility = 'members';
+      } else {
+        // Published with public/authenticated visibility - check visibility path
+        storageVisibility = latestPointer.visibility;
+        const visibilityLatestPath = latestPointer.visibility === 'public'
+          ? `${R2_PATHS.PUBLIC}entities/${entityId}/latest.json`
+          : `${R2_PATHS.PLATFORM}entities/${entityId}/latest.json`;
+        const visibilityPointer = await readJSON<{ version: number; status: string; visibility: string }>(bucket, visibilityLatestPath, ability);
+        if (visibilityPointer) {
+          latestPointer = visibilityPointer; // Use pointer from visibility path (more authoritative)
+        }
+      }
+    } else {
+      // Not in members path, check visibility-based paths (for published entities)
+      for (const visibility of ['public', 'authenticated'] as const) {
+        const latestPath = visibility === 'public'
+          ? `${R2_PATHS.PUBLIC}entities/${entityId}/latest.json`
+          : `${R2_PATHS.PLATFORM}entities/${entityId}/latest.json`;
+        latestPointer = await readJSON<{ version: number; status: string; visibility: string }>(bucket, latestPath, ability);
+        if (latestPointer) {
+          // Verify ownership
+          const versionPath = `${latestPath.replace('/latest.json', '')}/v${latestPointer.version}.json`;
+          const testEntity = await readJSON<Entity>(bucket, versionPath, ability);
+          if (testEntity && testEntity.organizationId === orgId) {
+            storageVisibility = visibility;
+            break;
+          }
+          latestPointer = null;
+        }
+      }
+    }
+    
+    if (!latestPointer) {
+      console.warn('[BundleInvalidation] No latestPointer found for entity:', entityId, 'org:', orgId);
+      continue;
+    }
+    
+    // Read entity from correct storage location
+    const versionPath = storageVisibility === 'members'
+      ? `${R2_PATHS.PRIVATE}orgs/${orgId}/entities/${entityId}/v${latestPointer.version}.json`
+      : storageVisibility === 'public'
+      ? `${R2_PATHS.PUBLIC}entities/${entityId}/v${latestPointer.version}.json`
+      : `${R2_PATHS.PLATFORM}entities/${entityId}/v${latestPointer.version}.json`;
+    
+    const entity = await readJSON<Entity>(bucket, versionPath, ability);
     
     if (!entity || entity.entityTypeId !== typeId) continue;
     
-    // Create bundle entity - NOTE: Do NOT include entityTypeId
-    // The entity type is identified by the parent bundle's typeId field
-    // Name and slug are top-level properties
+    // Create bundle entity - use latestPointer.status (authoritative), not entity.status
     const bundleEntity: BundleEntity = {
       id: entity.id,
-      status: entity.status,
+      status: latestPointer.status, // Use latestPointer.status (authoritative source)
       name: entity.name || `Entity ${entity.id}`,
       slug: entity.slug || '',
       data: entity.data, // Dynamic fields only (does NOT include entityTypeId)
       updatedAt: entity.updatedAt
     };
     
-    // Member bundle: Published only
-    if (entity.status === 'published') {
+    // Member bundle: Published only (check latestPointer.status)
+    if (latestPointer.status === 'published') {
       memberEntities.push(bundleEntity);
     }
     
-    // Admin bundle: Draft + Deleted only
-    if (entity.status === 'draft' || entity.status === 'deleted') {
+    // Admin bundle: Draft + Pending + Archived + Deleted (check latestPointer.status)
+    // Pending entities need approval, archived entities can be restored
+    if (latestPointer.status === 'draft' || latestPointer.status === 'pending' || latestPointer.status === 'archived' || latestPointer.status === 'deleted') {
       adminEntities.push(bundleEntity);
     }
   }
@@ -716,7 +783,7 @@ async function regenerateOrgBundlesForType(
     entityCount: memberEntities.length,
     entities: memberEntities
   };
-  await writeJSON(bucket, getOrgMemberBundlePath(orgId, typeId), memberBundle);
+  await writeJSON(bucket, getOrgMemberBundlePath(orgId, typeId), memberBundle, ability);
   console.log('[BundleInvalidation] Generated org member bundle with', memberEntities.length, 'entities');
   
   // Save admin bundle - NOTE: Use typeId (NOT entityTypeId)
@@ -728,12 +795,12 @@ async function regenerateOrgBundlesForType(
     entityCount: adminEntities.length,
     entities: adminEntities
   };
-  await writeJSON(bucket, getOrgAdminBundlePath(orgId, typeId), adminBundle);
+  await writeJSON(bucket, getOrgAdminBundlePath(orgId, typeId), adminBundle, ability);
   console.log('[BundleInvalidation] Generated org admin bundle with', adminEntities.length, 'entities');
   
   // Update org manifests
-  await updateOrgManifestForBundle(bucket, orgId, typeId, memberBundle, 'member');
-  await updateOrgManifestForBundle(bucket, orgId, typeId, adminBundle, 'admin');
+  await updateOrgManifestForBundle(bucket, orgId, typeId, memberBundle, 'member', ability);
+  await updateOrgManifestForBundle(bucket, orgId, typeId, adminBundle, 'admin', ability);
 }
 
 /**
@@ -744,12 +811,13 @@ async function updateGlobalManifestForType(
   bucket: R2Bucket,
   keyId: MembershipKeyId,
   typeId: string,
-  config: AppConfig
+  config: AppConfig,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Updating global manifest for type:', keyId, typeId);
   
   const manifestPath = getManifestPath(keyId);
-  let manifest = await readJSON<SiteManifest>(bucket, manifestPath);
+  let manifest = await readJSON<SiteManifest>(bucket, manifestPath, ability);
   
   if (!manifest) {
     manifest = {
@@ -760,7 +828,7 @@ async function updateGlobalManifestForType(
   }
   
   // Read entity type directly (strongly consistent read after write)
-  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId), ability);
   if (!entityType) {
     console.error('[BundleInvalidation] Entity type not found for manifest update:', typeId);
     return;
@@ -768,7 +836,7 @@ async function updateGlobalManifestForType(
   
   // Try to get bundle for count/version info (optional - use defaults if not exists)
   const bundlePath = getBundlePath(keyId, typeId);
-  const bundle = await readJSON<EntityBundle>(bucket, bundlePath);
+  const bundle = await readJSON<EntityBundle>(bucket, bundlePath, ability);
   
   // Only include if this type is visible to this key and is active
   if (!entityType.isActive || !entityType.visibleTo?.includes(keyId)) {
@@ -807,7 +875,7 @@ async function updateGlobalManifestForType(
   manifest.generatedAt = new Date().toISOString();
   manifest.version = Date.now();
   
-  await writeJSON(bucket, manifestPath, manifest);
+  await writeJSON(bucket, manifestPath, manifest, ability);
   console.log('[BundleInvalidation] Global manifest updated at:', manifestPath);
 }
 
@@ -819,12 +887,13 @@ async function updateGlobalManifestForBundle(
   keyId: MembershipKeyId,
   typeId: string,
   bundle: EntityBundle,
-  config: AppConfig
+  config: AppConfig,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Updating global manifest for key:', keyId);
   
   const manifestPath = getManifestPath(keyId);
-  let manifest = await readJSON<SiteManifest>(bucket, manifestPath);
+  let manifest = await readJSON<SiteManifest>(bucket, manifestPath, ability);
   
   if (!manifest) {
     manifest = {
@@ -834,7 +903,7 @@ async function updateGlobalManifestForBundle(
     };
   }
   
-  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId), ability);
   if (!entityType) {
     console.error('[BundleInvalidation] Entity type not found for manifest update:', typeId);
     return;
@@ -877,7 +946,7 @@ async function updateGlobalManifestForBundle(
   manifest.generatedAt = new Date().toISOString();
   manifest.version = Date.now();
   
-  await writeJSON(bucket, manifestPath, manifest);
+  await writeJSON(bucket, manifestPath, manifest, ability);
   console.log('[BundleInvalidation] Global manifest updated at:', manifestPath);
 }
 
@@ -889,7 +958,8 @@ async function updateOrgManifestForBundle(
   orgId: string,
   typeId: string,
   bundle: EntityBundle,
-  role: 'member' | 'admin'
+  role: 'member' | 'admin',
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Updating org manifest:', orgId, role);
   
@@ -897,7 +967,7 @@ async function updateOrgManifestForBundle(
     ? getOrgAdminManifestPath(orgId)
     : getOrgMemberManifestPath(orgId);
   
-  let manifest = await readJSON<SiteManifest>(bucket, manifestPath);
+  let manifest = await readJSON<SiteManifest>(bucket, manifestPath, ability);
   
   if (!manifest) {
     manifest = {
@@ -907,7 +977,7 @@ async function updateOrgManifestForBundle(
     };
   }
   
-  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+  const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId), ability);
   if (!entityType) {
     console.error('[BundleInvalidation] Entity type not found for manifest update:', typeId);
     return;
@@ -916,7 +986,8 @@ async function updateOrgManifestForBundle(
   // Check if org has access to this type
   const permissions = await readJSON<EntityTypePermissions>(
     bucket,
-    getOrgPermissionsPath(orgId)
+    getOrgPermissionsPath(orgId),
+    ability
   );
   
   if (!permissions?.viewable.includes(typeId)) {
@@ -945,7 +1016,7 @@ async function updateOrgManifestForBundle(
   manifest.generatedAt = new Date().toISOString();
   manifest.version = Date.now();
   
-  await writeJSON(bucket, manifestPath, manifest);
+  await writeJSON(bucket, manifestPath, manifest, ability);
   console.log('[BundleInvalidation] Org manifest updated at:', manifestPath);
 }
 
@@ -960,12 +1031,13 @@ async function updateOrgManifestForBundle(
 export async function regenerateManifestsForType(
   bucket: R2Bucket,
   entityTypeId: string,
-  config: AppConfig
+  config: AppConfig,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Regenerating all manifests for type:', entityTypeId);
   
   try {
-    const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(entityTypeId));
+    const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(entityTypeId), ability);
     if (!entityType) {
       throw new Error(`Entity type ${entityTypeId} not found`);
     }
@@ -976,14 +1048,14 @@ export async function regenerateManifestsForType(
     // This ensures immediate updates using strongly consistent reads
     console.log('[BundleInvalidation] Directly updating manifests for type:', entityTypeId);
     for (const keyDef of config.membershipKeys.keys) {
-      await updateGlobalManifestForType(bucket, keyDef.id, entityTypeId, config);
+      await updateGlobalManifestForType(bucket, keyDef.id, entityTypeId, config, ability);
     }
     
     // THEN: Regenerate global manifests for full synchronization (ensures all types are in sync)
     console.log('[BundleInvalidation] Regenerating global manifests for full sync:', config.membershipKeys.keys.length, 'membership keys');
     for (const keyDef of config.membershipKeys.keys) {
       console.log('[BundleInvalidation] Regenerating manifest for key:', keyDef.id);
-      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config, null);
+      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config, ability);
       const typeInManifest = manifest.entityTypes.find(t => t.id === entityTypeId);
       if (typeInManifest) {
         console.log('[BundleInvalidation] Type', entityTypeId, 'is included in', keyDef.id, 'manifest');
@@ -994,7 +1066,7 @@ export async function regenerateManifestsForType(
     
     // Regenerate all org manifests that have this type in their permissions
     console.log('[BundleInvalidation] Regenerating org manifests for type:', entityTypeId);
-    await regenerateAllOrgManifestsWithType(bucket, entityTypeId);
+    await regenerateAllOrgManifestsWithType(bucket, entityTypeId, ability);
     
     console.log('[BundleInvalidation] All manifests regenerated for type:', entityTypeId);
   } catch (error) {
@@ -1014,7 +1086,7 @@ async function regenerateGlobalManifest(
 ): Promise<SiteManifest> {
   console.log('[BundleInvalidation] Generating global manifest for key:', keyId);
   
-  const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`);
+  const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`, ability);
   const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
   console.log('[BundleInvalidation] Found', definitionFiles.length, 'definition files to check');
   
@@ -1076,7 +1148,7 @@ async function regenerateGlobalManifest(
   };
   
   const manifestPath = getManifestPath(keyId);
-  await writeJSON(bucket, manifestPath, manifest);
+  await writeJSON(bucket, manifestPath, manifest, ability);
   
   console.log('[BundleInvalidation] Generated global manifest with', entityTypes.length, 'types at:', manifestPath);
   
@@ -1088,19 +1160,20 @@ async function regenerateGlobalManifest(
  */
 async function regenerateAllOrgManifestsWithType(
   bucket: R2Bucket,
-  entityTypeId: string
+  entityTypeId: string,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Regenerating org manifests with type:', entityTypeId);
   
-  const permissionFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}policies/organizations/`);
+  const permissionFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}policies/organizations/`, ability);
   const jsonFiles = permissionFiles.filter(f => f.endsWith('/entity-type-permissions.json'));
   
   for (const file of jsonFiles) {
-    const permissions = await readJSON<EntityTypePermissions>(bucket, file);
+    const permissions = await readJSON<EntityTypePermissions>(bucket, file, ability);
     
     if (permissions && permissions.viewable?.includes(entityTypeId)) {
       console.log('[BundleInvalidation] Regenerating manifests for org:', permissions.organizationId);
-      await regenerateOrgManifest(bucket, permissions.organizationId);
+      await regenerateOrgManifest(bucket, permissions.organizationId, ability);
     }
   }
 }
@@ -1114,14 +1187,15 @@ async function regenerateAllOrgManifestsWithType(
  */
 export async function regenerateOrgManifest(
   bucket: R2Bucket,
-  orgId: string
+  orgId: string,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Regenerating org manifest for:', orgId);
   
   try {
     // Regenerate both member and admin manifests
-    await regenerateOrgManifestForRole(bucket, orgId, 'member', null);
-    await regenerateOrgManifestForRole(bucket, orgId, 'admin', null);
+    await regenerateOrgManifestForRole(bucket, orgId, 'member', ability);
+    await regenerateOrgManifestForRole(bucket, orgId, 'admin', ability);
     console.log('[BundleInvalidation] Org manifests regenerated:', orgId);
   } catch (error) {
     console.error('[BundleInvalidation] Error regenerating org manifest:', error);
@@ -1210,7 +1284,7 @@ export async function invalidateBundlesForFile(
       
       // Also regenerate for all organizations that have this type
       // List all orgs and regenerate their bundles for this type
-      const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`);
+      const orgDirs = await listFiles(bucket, `${R2_PATHS.PRIVATE}orgs/`, ability);
       for (const orgDir of orgDirs) {
         // Extract org ID from path like "orgs/{orgId}/"
         const orgMatch = orgDir.match(/orgs\/([^\/]+)\//);
@@ -1235,7 +1309,7 @@ export async function invalidateBundlesForFile(
       console.log('[BundleInvalidation] Organization profile updated, regenerating org manifests:', orgId);
       
       // Organization profile changed - regenerate org manifests
-      await regenerateOrgManifest(bucket, orgId);
+      await regenerateOrgManifest(bucket, orgId, ability);
       return;
     }
     
@@ -1248,7 +1322,7 @@ export async function invalidateBundlesForFile(
       // Organization permissions changed - regenerate org manifests
       // Note: This might also require regenerating bundles if permissions affect which entities are visible
       // For now, just regenerate manifests; bundle regeneration happens when entities change
-      await regenerateOrgManifest(bucket, orgId);
+      await regenerateOrgManifest(bucket, orgId, ability);
       
       // Also regenerate bundles for all entity types that this org has access to
       // This ensures bundles reflect the updated permissions
@@ -1330,12 +1404,13 @@ async function regenerateOrgManifestForRole(
   
   const permissions = await readJSON<EntityTypePermissions>(
     bucket,
-    getOrgPermissionsPath(orgId)
+    getOrgPermissionsPath(orgId),
+    ability
   );
   
   const allowedTypeIds = permissions?.viewable || [];
   
-  const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`);
+  const typeFiles = await listFiles(bucket, `${R2_PATHS.PUBLIC}entity-types/`, ability);
   const definitionFiles = typeFiles.filter(f => f.endsWith('/definition.json'));
   console.log('[BundleInvalidation] Found', definitionFiles.length, 'definition files to check for org manifest');
   
@@ -1392,7 +1467,7 @@ async function regenerateOrgManifestForRole(
   const manifestPath = role === 'admin'
     ? getOrgAdminManifestPath(orgId)
     : getOrgMemberManifestPath(orgId);
-  await writeJSON(bucket, manifestPath, manifest);
+  await writeJSON(bucket, manifestPath, manifest, ability);
   
   console.log('[BundleInvalidation] Generated org manifest with', entityTypes.length, 'types at:', manifestPath);
   
@@ -1418,14 +1493,14 @@ export async function regenerateOrgBundles(
   
   try {
     for (const typeId of viewableTypeIds) {
-      const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId));
+      const entityType = await readJSON<EntityType>(bucket, getEntityTypePath(typeId), null);
       if (!entityType) continue;
       
-      await regenerateOrgBundlesForType(bucket, orgId, typeId, entityType);
+      await regenerateOrgBundlesForType(bucket, orgId, typeId, entityType, null);
     }
     
     // Also regenerate the org manifests
-    await regenerateOrgManifest(bucket, orgId);
+    await regenerateOrgManifest(bucket, orgId, null);
     
     console.log('[BundleInvalidation] All org bundles regenerated for:', orgId);
   } catch (error) {
@@ -1443,7 +1518,8 @@ export async function regenerateOrgBundles(
  */
 export async function regenerateAllManifests(
   bucket: R2Bucket,
-  config: AppConfig
+  config: AppConfig,
+  ability: AppAbility | null = null
 ): Promise<void> {
   console.log('[BundleInvalidation] Regenerating all manifests after type deletion');
   
@@ -1454,23 +1530,23 @@ export async function regenerateAllManifests(
     // but readJSON will return null for non-existent files and they'll be skipped
     for (const keyDef of config.membershipKeys.keys) {
       console.log('[BundleInvalidation] Regenerating global manifest for key:', keyDef.id);
-      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config, null);
+      const manifest = await regenerateGlobalManifest(bucket, keyDef.id, config, ability);
       console.log('[BundleInvalidation] Regenerated manifest for key', keyDef.id, 'with', manifest.entityTypes.length, 'types:', manifest.entityTypes.map(t => t.id).join(', '));
     }
     
     // Regenerate all org manifests
     // List all org permission files and regenerate each org's manifest
-    const permissionFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}policies/organizations/`);
+    const permissionFiles = await listFiles(bucket, `${R2_PATHS.PRIVATE}policies/organizations/`, ability);
     const jsonFiles = permissionFiles.filter(f => f.endsWith('/entity-type-permissions.json'));
     
     console.log('[BundleInvalidation] Found', jsonFiles.length, 'org permission files to process');
     
     for (const file of jsonFiles) {
       try {
-        const permissions = await readJSON<EntityTypePermissions>(bucket, file);
+        const permissions = await readJSON<EntityTypePermissions>(bucket, file, ability, 'read', 'Organization');
         if (permissions && permissions.organizationId) {
           console.log('[BundleInvalidation] Regenerating manifest for org:', permissions.organizationId);
-          await regenerateOrgManifest(bucket, permissions.organizationId);
+          await regenerateOrgManifest(bucket, permissions.organizationId, ability);
         }
       } catch (err) {
         console.error('[BundleInvalidation] Error regenerating org manifest from file:', file, err);

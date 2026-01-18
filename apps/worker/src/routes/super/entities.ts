@@ -253,13 +253,52 @@ superEntityRoutes.get('/entities/export',
         }
       }
     } else {
-      // Org entity - always use members path - CASL verifies superadmin can read org entities
-      const latestPath = getEntityLatestPath('members', bundleEntity.id, organizationId);
+      // Org entity - check members path first, then visibility-based paths for published entities
+      // Published org entities with public/authenticated visibility may be in visibility-based paths
+      let latestPath = getEntityLatestPath('members', bundleEntity.id, organizationId);
       latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
       
+      // Determine storage visibility based on status and visibility (matches transition logic)
+      let storageVisibility: VisibilityScope = 'members';
       if (latestPointer) {
-        const versionPath = getEntityVersionPath('members', bundleEntity.id, latestPointer.version, organizationId);
-        console.log('[SuperEntities] Loading org entity:', bundleEntity.id, 'org:', organizationId, 'version:', latestPointer.version, 'path:', versionPath);
+        if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
+          // Drafts and pending entities are always in the org's private space
+          storageVisibility = 'members';
+        } else if (latestPointer.visibility === 'members') {
+          // Published entities with members visibility
+          storageVisibility = 'members';
+        } else {
+          // Published entities with public/authenticated visibility are in visibility-based paths
+          storageVisibility = latestPointer.visibility;
+          // Re-read latest pointer from visibility path (it may be there too due to dual-path write)
+          latestPath = getEntityLatestPath(storageVisibility, bundleEntity.id, undefined);
+          const visibilityPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+          if (visibilityPointer) {
+            latestPointer = visibilityPointer; // Use pointer from visibility path (more authoritative)
+          }
+        }
+      } else {
+        // If not found in members path, check visibility-based paths (for published entities)
+        for (const visibility of ['public', 'authenticated'] as const) {
+          latestPath = getEntityLatestPath(visibility, bundleEntity.id, undefined);
+          latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+          // Verify this entity actually belongs to the org by checking if we can read the entity
+          if (latestPointer) {
+            const versionPath = getEntityVersionPath(visibility, bundleEntity.id, latestPointer.version, undefined);
+            const testEntity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
+            if (testEntity && testEntity.organizationId === organizationId) {
+              storageVisibility = visibility;
+              break;
+            } else {
+              latestPointer = null; // Wrong entity, continue searching
+            }
+          }
+        }
+      }
+      
+      if (latestPointer) {
+        const versionPath = getEntityVersionPath(storageVisibility, bundleEntity.id, latestPointer.version, organizationId || undefined);
+        console.log('[SuperEntities] Loading org entity:', bundleEntity.id, 'org:', organizationId, 'visibility:', storageVisibility, 'version:', latestPointer.version, 'path:', versionPath);
         entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
       }
     }
@@ -1260,15 +1299,53 @@ superEntityRoutes.get('/entities/:id', requireAbility('read', 'Entity'), async (
       }
     }
   } else {
-    // Org-scoped entity - try members path (most common for org entities)
-    // CASL verifies superadmin can read org entities
-    const latestPath = getEntityLatestPath('members', entityId, orgId!);
+    // Org-scoped entity - check members path first, then visibility-based paths for published entities
+    // Published org entities with public/authenticated visibility may be in visibility-based paths
+    let latestPath = getEntityLatestPath('members', entityId, orgId!);
     console.log('[SuperEntities] Checking org entity path:', latestPath, 'for org:', orgId);
     latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
     
+    // Determine storage visibility based on status and visibility (matches transition logic)
+    let storageVisibility: VisibilityScope = 'members';
     if (latestPointer) {
-      const versionPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
-      console.log('[SuperEntities] Loading org entity from version path:', versionPath);
+      if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
+        // Drafts and pending entities are always in the org's private space
+        storageVisibility = 'members';
+      } else if (latestPointer.visibility === 'members') {
+        // Published entities with members visibility
+        storageVisibility = 'members';
+      } else {
+        // Published entities with public/authenticated visibility are in visibility-based paths
+        storageVisibility = latestPointer.visibility;
+        // Re-read latest pointer from visibility path (it may be there too due to dual-path write)
+        latestPath = getEntityLatestPath(storageVisibility, entityId, undefined);
+        const visibilityPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+        if (visibilityPointer) {
+          latestPointer = visibilityPointer; // Use pointer from visibility path (more authoritative)
+        }
+      }
+    } else {
+      // If not found in members path, check visibility-based paths (for published entities)
+      for (const visibility of ['public', 'authenticated'] as const) {
+        latestPath = getEntityLatestPath(visibility, entityId, undefined);
+        latestPointer = await readJSON<EntityLatestPointer>(c.env.R2_BUCKET, latestPath, ability, 'read', 'Entity');
+        // Verify this entity actually belongs to the org
+        if (latestPointer) {
+          const versionPath = getEntityVersionPath(visibility, entityId, latestPointer.version, undefined);
+          const testEntity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
+          if (testEntity && testEntity.organizationId === orgId) {
+            storageVisibility = visibility;
+            break;
+          } else {
+            latestPointer = null; // Wrong entity, continue searching
+          }
+        }
+      }
+    }
+    
+    if (latestPointer) {
+      const versionPath = getEntityVersionPath(storageVisibility, entityId, latestPointer.version, orgId || undefined);
+      console.log('[SuperEntities] Loading org entity from version path:', versionPath, 'visibility:', storageVisibility);
       entity = await readJSON<Entity>(c.env.R2_BUCKET, versionPath, ability, 'read', 'Entity');
       if (entity) {
         console.log('[SuperEntities] Org entity found for org:', orgId);
@@ -1276,7 +1353,7 @@ superEntityRoutes.get('/entities/:id', requireAbility('read', 'Entity'), async (
         console.error('[SuperEntities] Org entity file not found at path:', versionPath);
       }
     } else {
-      console.error('[SuperEntities] No latest pointer found for org entity at path:', latestPath);
+      console.error('[SuperEntities] No latest pointer found for org entity - checked members and visibility paths');
     }
   }
   
@@ -1896,6 +1973,44 @@ superEntityRoutes.get('/entities',
   }
   
   console.log('[SuperEntities] Aggregated', items.length, 'entities from bundles,', filteredItems.length, 'after filters');
+  
+  // Debug: Compare bundle entities vs actual R2 entities
+  const bundleEntityIds = new Set(items.map(item => item.id));
+  const stubFiles = await listFiles(c.env.R2_BUCKET, `${R2_PATHS.STUBS}`, ability);
+  const actualEntityIds = new Set<string>();
+  
+  for (const stubFile of stubFiles) {
+    if (!stubFile.endsWith('.json')) continue;
+    const filename = stubFile.replace(`${R2_PATHS.STUBS}`, '');
+    if (filename.includes('/')) continue; // Skip subdirectories
+    
+    try {
+      const stub = await readJSON<EntityStub>(c.env.R2_BUCKET, stubFile, ability, 'read', 'Entity');
+      if (stub && stub.entityTypeId === query.typeId) {
+        actualEntityIds.add(stub.entityId);
+      }
+    } catch (err) {
+      // Skip invalid stubs
+    }
+  }
+  
+  const missingFromBundles = Array.from(actualEntityIds).filter(id => !bundleEntityIds.has(id));
+  const inBundlesButNotInR2 = Array.from(bundleEntityIds).filter(id => !actualEntityIds.has(id));
+  
+  if (missingFromBundles.length > 0) {
+    console.warn('[SuperEntities] Entities in R2 but NOT in bundles:', missingFromBundles);
+    console.warn('[SuperEntities] These entities exist in R2 but are missing from bundles - bundle regeneration may be needed');
+  }
+  if (inBundlesButNotInR2.length > 0) {
+    console.warn('[SuperEntities] Entities in bundles but NOT in R2 (orphaned):', inBundlesButNotInR2);
+  }
+  
+  console.log('[SuperEntities] Entity comparison:', {
+    inBundles: bundleEntityIds.size,
+    inR2Stubs: actualEntityIds.size,
+    missingFromBundles: missingFromBundles.length,
+    orphanedInBundles: inBundlesButNotInR2.length
+  });
   
   let processedCount = 0;
   let skippedCount = 0;

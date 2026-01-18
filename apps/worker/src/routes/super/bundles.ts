@@ -144,8 +144,8 @@ bundleRoutes.get('/bundles',
     
     console.log('[Bundles] Found', organizations.length, 'active organizations');
     
-    // Get all existing bundle files (bundles are public paths - allow null ability)
-    const bundleFiles = await listFiles(bucket, 'bundles/', null, 1000);
+    // Get all existing bundle files (require ability for listFiles on protected paths)
+    const bundleFiles = await listFiles(bucket, 'bundles/', ability, 1000);
     
     console.log('[Bundles] Found', bundleFiles.length, 'bundle files in R2');
     
@@ -170,12 +170,12 @@ bundleRoutes.get('/bundles',
       }
       
       try {
-        // Get file metadata (size) - bundles are public paths
-        const head = await headFile(bucket, bundlePath, null);
+        // Get file metadata (size) - require ability for protected paths
+        const head = await headFile(bucket, bundlePath, ability);
         const size = head?.size || 0;
         
-        // Read bundle JSON - bundles are public paths
-        const bundle = await readJSON<EntityBundle>(bucket, bundlePath, null, 'read', 'Entity');
+        // Read bundle JSON - require ability for protected paths
+        const bundle = await readJSON<EntityBundle>(bucket, bundlePath, ability, 'read', 'Entity');
         if (bundle) {
           existingBundles.set(bundlePath, { bundle, size });
         }

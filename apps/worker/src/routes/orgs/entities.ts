@@ -421,8 +421,22 @@ orgEntityRoutes.post('/entities/:id/transition',
   
   const newStatus = statusMap[action];
   
+  // Determine storage visibility for current entity version
+  // Org entities: drafts/pending/members visibility use 'members', published public/authenticated use visibility-based paths
+  let storageVisibility: VisibilityScope;
+  if (latestPointer.status === 'draft' || latestPointer.status === 'pending') {
+    // Drafts and pending entities are always in the org's private space
+    storageVisibility = 'members';
+  } else if (latestPointer.visibility === 'members') {
+    // Published entities with members visibility
+    storageVisibility = 'members';
+  } else {
+    // Published entities with public/authenticated visibility are in visibility-based paths
+    storageVisibility = latestPointer.visibility;
+  }
+  
   // Get current entity version - CASL verifies user can access this org's entities
-  const currentPath = getEntityVersionPath('members', entityId, latestPointer.version, orgId);
+  const currentPath = getEntityVersionPath(storageVisibility, entityId, latestPointer.version, storageVisibility === 'members' ? orgId : undefined);
   const currentEntity = await readJSON<Entity>(c.env.R2_BUCKET, currentPath, ability, 'read', 'Entity');
   
   if (!currentEntity) {
@@ -446,11 +460,19 @@ orgEntityRoutes.post('/entities/:id/transition',
     })
   };
   
-  // Write new version - CASL verifies user can write to this org's entities
-  const newVersionPath = getEntityVersionPath('members', entityId, newVersion, orgId);
-  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity, ability);
+  // Determine storage location based on new status and visibility
+  // For org entities, use 'members' for drafts/pending, visibility-based for published
+  let targetVisibility: VisibilityScope;
   
-  // Update latest pointer - CASL verifies user can write to this org's entities
+  // Org entity - use 'members' for drafts/pending, visibility-based for published
+  targetVisibility = newStatus === 'published' ? currentEntity.visibility : 'members';
+  
+  // Write new version to appropriate location
+  const newVersionPath = getEntityVersionPath(targetVisibility, entityId, newVersion, 
+    targetVisibility === 'members' ? orgId : undefined);
+  await writeJSON(c.env.R2_BUCKET, newVersionPath, updatedEntity, ability, undefined, 'update', 'Entity');
+  
+  // Update latest pointer
   const newPointer: EntityLatestPointer = {
     version: newVersion,
     status: newStatus,
@@ -458,7 +480,22 @@ orgEntityRoutes.post('/entities/:id/transition',
     updatedAt: now
   };
   
-  await writeJSON(c.env.R2_BUCKET, latestPath, newPointer, ability);
+  // Determine latest pointer location
+  // For org entities, use members path for drafts/pending, visibility-based for published
+  let newLatestPath: string;
+  if (newStatus === 'published' && targetVisibility !== 'members') {
+    newLatestPath = getEntityLatestPath(targetVisibility, entityId, undefined);
+  } else {
+    newLatestPath = latestPath;
+  }
+  
+  // Update latest pointer at the appropriate location
+  await writeJSON(c.env.R2_BUCKET, newLatestPath, newPointer, ability, undefined, 'update', 'Entity');
+  
+  // For org entities publishing to public/authenticated, also keep latest pointer in members path for reference
+  if (newStatus === 'published' && targetVisibility !== 'members') {
+    await writeJSON(c.env.R2_BUCKET, latestPath, newPointer, ability, undefined, 'update', 'Entity');
+  }
   
   console.log('[OrgEntities] Transitioned entity:', entityId, currentStatus, '->', newStatus);
   

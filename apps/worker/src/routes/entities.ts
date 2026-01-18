@@ -27,7 +27,7 @@ import {
   getEntityVersionPath, getEntityLatestPath, getEntityStubPath,
   getEntityTypePath, getOrgPermissionsPath, getUserMembershipPath
 } from '../lib/r2';
-import { loadAppConfig, getUserHighestMembershipKey, projectFieldsForKey } from '../lib/bundle-invalidation';
+import { loadAppConfig, getUserHighestMembershipKey, projectFieldsForKey, regenerateEntityBundles } from '../lib/bundle-invalidation';
 import { upsertSlugIndex, deleteSlugIndex } from '../lib/slug-index';
 import { R2_PATHS } from '@1cc/shared';
 import { createEntityId } from '../lib/id';
@@ -923,8 +923,18 @@ entityRoutes.post('/:id/transition',
   
   console.log('[Entities] Transitioned entity:', entityId, currentStatus, '->', newStatus);
   
-  // Bundle regeneration is now automatic in R2-CASL writeJSON middleware
-  // No need to manually call regenerateEntityBundles here
+  // Regenerate affected bundles synchronously when publish status changes
+  if (newStatus === 'published' || currentStatus === 'published') {
+    console.log('[Entities] Triggering bundle regeneration for type:', stub.entityTypeId);
+    const config = await loadAppConfig(c.env.R2_BUCKET);
+    await regenerateEntityBundles(
+      c.env.R2_BUCKET,
+      stub.entityTypeId,
+      stub.organizationId,
+      config,
+      ability
+    );
+  }
   
   return c.json({
     success: true,
