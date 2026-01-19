@@ -15,7 +15,7 @@
     "@1cc/xstate-machines": "*",
     "@casl/ability": "^6.7.5",
     "@hono/zod-validator": "^0.4.0",
-    "hono": "^4.4.0",
+    "hono": "^4.11.4",
     "nanoid": "^5.0.7",
     "zod": "^3.23.0"
   },
